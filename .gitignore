@@ -1,0 +1,53 @@
+# Python cache / local env
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Training outputs and analysis artifacts
+runs/
+analysis_outputs/
+logs/
+outputs/
+checkpoints/
+checkpoint-*/
+C3DA/log/
+C3DA/**/log/
+C3DA/state_dict/
+
+# Local model files
+models/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.msgpack
+*.h5
+
+# Hugging Face / experiment cache
+.cache/
+wandb/
+tensorboard/
+events.out.tfevents*
+trainer_state.json
+
+# Generated data / large intermediate artifacts
+*.jsonl.tmp
+*.tmp
+*_predictions.json
+*_generated.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Temporary notes
+_tmp_*

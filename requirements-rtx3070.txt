@@ -1,0 +1,10 @@
+torch==2.2.2
+torchvision==0.17.2
+torchaudio==2.2.2
+transformers==4.39.3
+huggingface-hub==0.36.0
+sentencepiece==0.2.0
+scikit-learn==1.4.2
+numpy==1.26.4
+tqdm==4.66.2
+protobuf==4.25.8

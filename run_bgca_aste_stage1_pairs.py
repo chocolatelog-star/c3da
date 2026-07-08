@@ -1,0 +1,499 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+ASTE_PAIRS = [
+    ("rest14", "laptop14"),
+    ("rest15", "laptop14"),
+    ("rest16", "laptop14"),
+    ("laptop14", "rest14"),
+    ("laptop14", "rest15"),
+    ("laptop14", "rest16"),
+]
+
+
+def run_command(command: list[str], dry_run: bool = False) -> None:
+    print(" ".join(command), flush=True)
+    if dry_run:
+        return
+    subprocess.run(command, check=True)
+
+
+def read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def stage_done(status: dict, stage: str, outputs: list[Path], rerun: bool) -> bool:
+    return bool(status.get(stage)) and not rerun and all(path.exists() for path in outputs)
+
+
+def mark_done(status_path: Path, status: dict, stage: str) -> None:
+    status[stage] = True
+    write_json(status_path, status)
+
+
+def pair_run_dir(root: Path, source: str, target: str) -> Path:
+    return root / f"{source}_to_{target}"
+
+
+def generator_tag(prompt_style: str) -> str:
+    if prompt_style == "label_to_text":
+        return "label_to_text_gen"
+    if prompt_style == "masked_mutual":
+        return "masked_mutual_gen"
+    raise ValueError(f"unsupported generator prompt style: {prompt_style}")
+
+
+def metric_value(data: dict, *keys: str):
+    current = data
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return ""
+        current = current[key]
+    return current
+
+
+def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
+    run_dir = pair_run_dir(Path(args.output_root), source, target)
+    if not args.dry_run:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    status_path = run_dir / "stage_status.json"
+    status = read_json(status_path)
+    gen_tag = generator_tag(args.generator_prompt_style)
+    generator_train_file = run_dir / f"c3da_generator_train_{gen_tag}.jsonl"
+    generator_dev_file = run_dir / f"c3da_generator_dev_{gen_tag}.jsonl"
+
+    py = sys.executable
+    common_train = [
+        "--per_device_train_batch_size",
+        "1",
+        "--per_device_eval_batch_size",
+        "2",
+        "--gradient_accumulation_steps",
+        "16",
+        "--learning_rate",
+        str(args.learning_rate),
+        "--fp16",
+        "--gradient_checkpointing",
+        "--cuda",
+        args.cuda,
+        "--seed",
+        str(args.seed),
+    ]
+
+    if not stage_done(
+        status,
+        f"prepare_{gen_tag}",
+        [run_dir / "extract_train.jsonl", generator_train_file, generator_dev_file],
+        args.rerun,
+    ):
+        run_command(
+            [
+                py,
+                "t5_aste_pipeline.py",
+                "prepare",
+                "--source_dataset",
+                source,
+                "--target_dataset",
+                target,
+                "--run_dir",
+                str(run_dir),
+                "--seed",
+                str(args.seed),
+                "--augment_prompt_style",
+                args.generator_prompt_style,
+                "--augment_channel_mode",
+                "all",
+                "--generator_output_tag",
+                gen_tag,
+                "--no_task_prefix",
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, f"prepare_{gen_tag}")
+
+    extractor_dir = run_dir / "models" / "extractor_ep25_plain_last"
+    if not stage_done(status, "train_extractor", [extractor_dir / "best" / "config.json"], args.rerun):
+        run_command(
+            [
+                py,
+                "t5_absa_train.py",
+                "--model_path",
+                args.extractor_model_path,
+                "--train_file",
+                str(run_dir / "extract_train.jsonl"),
+                "--dev_file",
+                str(run_dir / "extract_dev.jsonl"),
+                "--output_dir",
+                str(extractor_dir),
+                "--num_train_epochs",
+                str(args.extractor_epochs),
+                "--source_weight",
+                "1.0",
+                "--pseudo_weight",
+                "0.5",
+                "--augment_weight",
+                "0.2",
+                "--lambda_structure_loss",
+                "0",
+                "--lambda_consistency_loss",
+                "0",
+                "--lambda_pairing_loss",
+                "0",
+                "--multi_triplet_loss_gain",
+                "0",
+                "--neutral_loss_gain",
+                "0",
+                "--checkpoint_selection",
+                "last",
+                *common_train,
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, "train_extractor")
+
+    if not stage_done(status, "pseudo", [run_dir / "target_pseudo_high_precision_analysis.json"], args.rerun):
+        run_command(
+            [
+                py,
+                "t5_aste_pipeline.py",
+                "pseudo",
+                "--run_dir",
+                str(run_dir),
+                "--model_path",
+                str(extractor_dir / "best"),
+                "--batch_size",
+                str(args.eval_batch_size),
+                "--num_beams",
+                "1",
+                "--max_new_tokens",
+                "128",
+                "--no_constrained_decoding",
+                "--cuda",
+                args.cuda,
+                "--no_task_prefix",
+                "--pseudo_model_variant",
+                "last",
+                "--high_precision_max_triplets",
+                "1",
+                "--high_precision_max_token_distance",
+                "5",
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, "pseudo")
+
+    generator_dir = run_dir / "models" / f"generator_{gen_tag}_ep{args.generator_epochs}"
+    if not stage_done(status, f"train_generator_{gen_tag}", [generator_dir / "best" / "config.json"], args.rerun):
+        run_command(
+            [
+                py,
+                "t5_absa_train.py",
+                "--model_path",
+                args.generator_model_path,
+                "--train_file",
+                str(generator_train_file),
+                "--dev_file",
+                str(generator_dev_file),
+                "--output_dir",
+                str(generator_dir),
+                "--num_train_epochs",
+                str(args.generator_epochs),
+                "--source_weight",
+                "1.0",
+                "--pseudo_weight",
+                "1.0",
+                "--augment_weight",
+                "1.0",
+                "--checkpoint_selection",
+                "best",
+                *common_train,
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, f"train_generator_{gen_tag}")
+
+    final_tag = f"strict_aug150_w020_{gen_tag}"
+    final_train_file = run_dir / f"final_train_{final_tag}.jsonl"
+    if not stage_done(status, f"augment_{gen_tag}", [final_train_file], args.rerun):
+        run_command(
+            [
+                py,
+                "t5_aste_pipeline.py",
+                "augment",
+                "--run_dir",
+                str(run_dir),
+                "--model_path",
+                str(generator_dir / "best"),
+                "--nli_model_path",
+                args.nli_model_path,
+                "--augment_prompt_style",
+                "masked_mutual",
+                "--augment_channel_mode",
+                "all",
+                "--augment_output_tag",
+                final_tag,
+                "--final_train_output_tag",
+                final_tag,
+                "--augment_select_max_rows",
+                "150",
+                "--augment_select_max_per_base",
+                "1",
+                "--augment_select_weight",
+                "0.2",
+                "--augment_select_require_raw_exact",
+                "--augment_select_require_model_filter_passed",
+                "--pseudo_train_source",
+                "high_precision",
+                "--high_precision_max_triplets",
+                "1",
+                "--high_precision_max_token_distance",
+                "5",
+                "--model_filter_path",
+                str(extractor_dir / "best"),
+                "--model_filter_mode",
+                "fixed",
+                "--model_filter_batch_size",
+                "2",
+                "--model_filter_num_beams",
+                "1",
+                "--model_filter_no_constrained_decoding",
+                "--model_filter_channel_aware",
+                "--cuda",
+                args.cuda,
+                "--no_task_prefix",
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, f"augment_{gen_tag}")
+
+    final_dir = run_dir / "models" / f"final_dann_l0.03_strict_aug150_w020_{gen_tag}_ep{args.final_epochs}"
+    if not stage_done(status, f"train_final_{gen_tag}", [final_dir / "best" / "config.json"], args.rerun):
+        run_command(
+            [
+                py,
+                "t5_absa_train.py",
+                "--model_path",
+                args.extractor_model_path,
+                "--train_file",
+                str(final_train_file),
+                "--dev_file",
+                str(run_dir / f"final_dev_{final_tag}.jsonl"),
+                "--output_dir",
+                str(final_dir),
+                "--num_train_epochs",
+                str(args.final_epochs),
+                "--source_weight",
+                "1.0",
+                "--pseudo_weight",
+                "0.5",
+                "--augment_weight",
+                "0.2",
+                "--checkpoint_selection",
+                "best",
+                "--lambda_domain_adv",
+                "0.03",
+                "--domain_adv_grl_lambda",
+                "1.0",
+                "--domain_adv_hidden_size",
+                "256",
+                "--domain_adv_exclude_augment",
+                *common_train,
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, f"train_final_{gen_tag}")
+
+    raw_metrics_path = run_dir / f"aste_metrics_raw_{gen_tag}.json"
+    fixed_metrics_path = run_dir / f"aste_metrics_fixed_{gen_tag}.json"
+    if not stage_done(status, f"evaluate_{gen_tag}", [raw_metrics_path, fixed_metrics_path], args.rerun):
+        run_command(
+            [
+                py,
+                "t5_aste_pipeline.py",
+                "evaluate",
+                "--run_dir",
+                str(run_dir),
+                "--model_path",
+                str(final_dir / "best"),
+                "--batch_size",
+                str(args.eval_batch_size),
+                "--num_beams",
+                "4",
+                "--max_new_tokens",
+                "96",
+                "--cuda",
+                args.cuda,
+                "--no_task_prefix",
+                "--no_constrained_decoding",
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            raw_default = run_dir / "aste_metrics_raw.json"
+            fixed_default = run_dir / "aste_metrics_fixed.json"
+            if raw_default.exists():
+                raw_metrics_path.write_text(raw_default.read_text(encoding="utf-8"), encoding="utf-8")
+            if fixed_default.exists():
+                fixed_metrics_path.write_text(fixed_default.read_text(encoding="utf-8"), encoding="utf-8")
+            mark_done(status_path, status, f"evaluate_{gen_tag}")
+
+    return summarize_pair(run_dir, source, target, gen_tag, args.generator_prompt_style)
+
+
+def summarize_pair(run_dir: Path, source: str, target: str, gen_tag: str, generator_prompt_style: str) -> dict:
+    pseudo_hp = read_json(run_dir / "target_pseudo_high_precision_analysis.json")
+    augment = read_json(run_dir / f"c3da_augment_analysis_strict_aug150_w020_{gen_tag}.json")
+    final_comp = read_json(run_dir / f"final_train_composition_analysis_strict_aug150_w020_{gen_tag}.json")
+    raw = read_json(run_dir / f"aste_metrics_raw_{gen_tag}.json")
+    fixed = read_json(run_dir / f"aste_metrics_fixed_{gen_tag}.json")
+    hp_eval = pseudo_hp.get("hidden_gold_eval", {})
+    hp_raw = hp_eval.get("raw_scores", {})
+    return {
+        "source": source,
+        "target": target,
+        "generator_prompt_style": generator_prompt_style,
+        "run_dir": str(run_dir),
+        "source_rows": metric_value(final_comp, "source_rows_used"),
+        "pseudo_hp_rows": pseudo_hp.get("selected_rows", ""),
+        "pseudo_hp_precision": hp_raw.get("precision", ""),
+        "pseudo_hp_recall": hp_raw.get("recall", ""),
+        "pseudo_hp_f1": hp_raw.get("micro_f1", ""),
+        "augment_selected_rows": augment.get("selected_augmented_rows", ""),
+        "final_train_rows": final_comp.get("final_train_rows", ""),
+        "raw_precision": raw.get("precision", ""),
+        "raw_recall": raw.get("recall", ""),
+        "raw_f1": raw.get("micro_f1", ""),
+        "fixed_precision": fixed.get("precision", ""),
+        "fixed_recall": fixed.get("recall", ""),
+        "fixed_f1": fixed.get("micro_f1", ""),
+    }
+
+
+def write_summary(output_root: Path, rows: list[dict]) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    csv_path = output_root / "results_bgca_aste_stage1.csv"
+    fieldnames = list(rows[0].keys()) if rows else [
+        "source",
+        "target",
+        "generator_prompt_style",
+        "run_dir",
+        "source_rows",
+        "pseudo_hp_rows",
+        "pseudo_hp_precision",
+        "pseudo_hp_recall",
+        "pseudo_hp_f1",
+        "augment_selected_rows",
+        "final_train_rows",
+        "raw_precision",
+        "raw_recall",
+        "raw_f1",
+        "fixed_precision",
+        "fixed_recall",
+        "fixed_f1",
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    md_path = output_root / "results_bgca_aste_stage1_CN.md"
+    lines = [
+        "# BGCA ASTE 跨域 Stage1 基线结果",
+        "",
+        "主指标使用 raw F1（原始F1），fixed F1（修正F1）仅作辅助分析。",
+        "",
+        "| 迁移方向 | 生成器训练方式 | 伪标签F1 | 增强条数 | 最终训练条数 | raw P | raw R | raw F1 | fixed F1 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        pair = f"{row['source']} -> {row['target']}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    pair,
+                    str(row.get("generator_prompt_style", "")),
+                    fmt(row.get("pseudo_hp_f1")),
+                    str(row.get("augment_selected_rows", "")),
+                    str(row.get("final_train_rows", "")),
+                    fmt(row.get("raw_precision")),
+                    fmt(row.get("raw_recall")),
+                    fmt(row.get("raw_f1")),
+                    fmt(row.get("fixed_f1")),
+                ]
+            )
+            + " |"
+        )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print({"csv": str(csv_path), "md": str(md_path)}, flush=True)
+
+
+def fmt(value) -> str:
+    if value == "" or value is None:
+        return ""
+    return f"{float(value) * 100:.2f}"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output_root", default=r"runs\bgca_aste_stage1_baseline")
+    parser.add_argument("--pairs", default="all", help="all or comma list like rest16:laptop14,laptop14:rest16")
+    parser.add_argument("--extractor_model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--generator_model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--generator_prompt_style", choices=["label_to_text", "masked_mutual"], default="label_to_text")
+    parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
+    parser.add_argument("--extractor_epochs", type=int, default=25)
+    parser.add_argument("--generator_epochs", type=int, default=8)
+    parser.add_argument("--final_epochs", type=int, default=5)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--eval_batch_size", type=int, default=2)
+    parser.add_argument("--cuda", default="0")
+    parser.add_argument("--seed", type=int, default=1000)
+    parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--rerun", action="store_true")
+    return parser.parse_args()
+
+
+def selected_pairs(pairs_text: str) -> list[tuple[str, str]]:
+    if pairs_text == "all":
+        return ASTE_PAIRS
+    pairs = []
+    for item in pairs_text.split(","):
+        source, target = item.split(":")
+        pairs.append((source.strip(), target.strip()))
+    return pairs
+
+
+def main() -> None:
+    args = parse_args()
+    rows = []
+    for source, target in selected_pairs(args.pairs):
+        rows.append(run_pair(args, source, target))
+        if not args.dry_run:
+            write_summary(Path(args.output_root), rows)
+    if not args.dry_run:
+        write_summary(Path(args.output_root), rows)
+
+
+if __name__ == "__main__":
+    main()
