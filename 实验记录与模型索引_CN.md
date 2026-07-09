@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `de435be Clarify generator and augment prompt styles` |
+| 当前代码版本 | `9e78904 Add domain prefix augmentation experiments` |
 | 当前分支 | `master` |
 | 主实验目录 | `runs\bgca_aste_stage1_baseline` |
 | 当前六组实验状态 | 已完成 |
@@ -31,6 +31,17 @@
 | 生成器训练阶段 | 使用源域名称作为前缀，例如 `rest16` |
 | 数据增强阶段 | 使用目标域名称作为前缀，例如 `laptop14` |
 | 第一轮验证 | 先跑 `rest16 -> laptop14` 两种前缀，与当前六组基线里的同方向 raw F1=46.14、fixed F1=47.69 对比 |
+
+## 0.2 代码版本变更记录
+
+这个表专门记录代码改动和对应 git（版本管理）版本，用来以后回溯、对比和复现实验。原则是：每次改代码后都必须记录 commit（提交号）、改动内容、影响文件、对应实验目录和结果状态；实验效果不如当前最好结果时，先询问是否删除历史输出文件。
+
+| 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
+|---|---|---|---|---|---|---|
+| 2026-07-09 | `9e78904 Add domain prefix augmentation experiments` | 领域前缀掩码增强 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 新增 `--domain_prefix_style`（领域前缀风格），支持 `none`（不加前缀）、`text`（文本式前缀）、`bracket`（括号式前缀）；生成器训练阶段用源域前缀，数据增强阶段用目标域前缀；增强请求和增强样本记录领域前缀元数据；过滤生成文本中的领域前缀提示词泄漏；批量脚本支持断点续跑两种前缀实验。 | `runs\bgca_aste_stage1_domain_prompt_text_v1`、`runs\bgca_aste_stage1_domain_prompt_bracket_v1` | 待跑 `rest16 -> laptop14` 单组对比，基线为 raw F1=46.14、fixed F1=47.69 |
+| 2026-07-09 | `07e589f Update BGCA six-pair experiment results` | 六组 BGCA 风格跨域结果同步 | `实验记录与模型索引_CN.md` 等文档 | 汇总六组跨域实验，与 BGCA 论文 `label-to-text`（标签到文本）结果放在开头对比；记录平均 raw F1=49.86、fixed F1=51.59。 | `runs\bgca_aste_stage1_baseline` | 已完成六组实验 |
+| 2026-07-09 | `de435be Clarify generator and augment prompt styles` | 明确生成器训练方式和增强方式 | `run_bgca_aste_stage1_pairs.py`、相关文档 | 明确当前主流程是 `label_to_text`（标签到文本）生成器训练 + `masked_mutual`（互相掩码）数据增强，避免误认为完全等同 BGCA 原始流程。 | `runs\bgca_aste_stage1_baseline` | 已作为当前阶段基线 |
+| 2026-07-09 | `4906184 Add experiment tracking log` | 建立实验总账 | `实验记录与模型索引_CN.md` | 新增中文实验记录与模型索引，用来记录实验结果、模型路径、运行目录和阶段结论。 | 项目根目录文档 | 已启用 |
 
 ## 1. BGCA 论文结果与我们的结果对比
 
