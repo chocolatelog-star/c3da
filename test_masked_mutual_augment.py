@@ -50,6 +50,46 @@ def test_masked_mutual_generator_training_uses_source_masked_prompts():
     assert {row["channel"] for row in train_rows} == {"masked_aspect_editor", "masked_opinion_sentiment_editor"}
 
 
+def test_generator_training_can_add_text_domain_prefix():
+    rows = [
+        {
+            "text": "The battery life is long.",
+            "label": "<pos> battery life <opinion> long",
+        }
+    ]
+
+    train_rows = build_generator_training_rows(
+        rows,
+        seed=13,
+        prompt_style="masked_mutual",
+        domain_name="laptop14",
+        domain_prefix_style="text",
+    )
+
+    assert train_rows
+    assert all(row["input"].startswith("target domain: [laptop14] ; ") for row in train_rows)
+    assert all(row["domain_name"] == "laptop14" for row in train_rows)
+    assert all(row["domain_prefix_style"] == "text" for row in train_rows)
+
+
+def test_label_to_text_generator_training_can_add_bracket_domain_prefix():
+    rows = [
+        {"text": "The battery life is long.", "label": "<pos> battery life <opinion> long"},
+    ]
+
+    train_rows = build_generator_training_rows(
+        rows,
+        seed=13,
+        prompt_style="label_to_text",
+        domain_name="rest14",
+        domain_prefix_style="bracket",
+    )
+
+    assert train_rows
+    assert all(row["input"].startswith("[rest14] ") for row in train_rows)
+    assert all("generate aste sentence:" in row["input"] for row in train_rows)
+
+
 def test_masked_mutual_aspect_training_uses_supervised_replacement():
     rows = [
         {
@@ -456,6 +496,45 @@ def test_masked_mutual_augmentation_requests_carry_channel_metadata():
     assert any("[ASP]" in req["input"] for req in requests)
     assert any("[OPI]" in req["input"] for req in requests)
     assert all("old_triplet" in req and "new_triplet" in req for req in requests)
+
+
+def test_masked_mutual_augmentation_requests_can_add_target_domain_prefix():
+    source_rows = [
+        {
+            "text": "The battery life is long.",
+            "label": "<pos> battery life <opinion> long",
+        }
+    ]
+    pseudo_rows = [
+        {
+            "id": "t1",
+            "text": "The keyboard is responsive.",
+            "label": "<pos> keyboard <opinion> responsive",
+            "sample_weight": 0.65,
+        },
+        {
+            "id": "t2",
+            "text": "The trackpad is responsive.",
+            "label": "<pos> trackpad <opinion> responsive",
+            "sample_weight": 0.65,
+        },
+    ]
+
+    requests = build_augmentation_requests(
+        source_rows,
+        pseudo_rows,
+        per_row=1,
+        seed=7,
+        prompt_style="masked_mutual",
+        target_domain_name="laptop14",
+        domain_prefix_style="text",
+    )
+
+    assert requests
+    assert all(req["input"].startswith("target domain: [laptop14] ; ") for req in requests)
+    assert all(req["domain_name"] == "laptop14" for req in requests)
+    assert all(req["domain_prefix_style"] == "text" for req in requests)
+    assert all(req["domain_prefix"] == "target domain: [laptop14] ; " for req in requests)
 
 
 def test_masked_mutual_opinion_channel_changes_sentiment_when_possible():

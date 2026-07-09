@@ -541,6 +541,21 @@ def build_concept_prompt(label: str) -> str:
     return canonicalize_triplet_text(label)
 
 
+def format_domain_prefix(domain_name: str = "", style: str = "none") -> str:
+    domain = (domain_name or "").strip()
+    if style in {"", "none"} or not domain:
+        return ""
+    if style == "text":
+        return f"target domain: [{domain}] ; "
+    if style == "bracket":
+        return f"[{domain}] "
+    raise ValueError("domain_prefix_style must be one of none, text, bracket")
+
+
+def apply_domain_prefix(prompt: str, domain_name: str = "", style: str = "none") -> str:
+    return f"{format_domain_prefix(domain_name, style)}{prompt}"
+
+
 def _mask_first_fragment(text: str, fragment: str, mask_token: str) -> str:
     pattern = re.compile(re.escape(fragment), flags=re.IGNORECASE)
     masked, count = pattern.subn(mask_token, text, count=1)
@@ -549,16 +564,23 @@ def _mask_first_fragment(text: str, fragment: str, mask_token: str) -> str:
     return f"{mask_token} {text}"
 
 
-def build_masked_aspect_prompt(text: str, old_triplet: tuple[str, str, str], new_triplet: tuple[str, str, str]) -> str:
+def build_masked_aspect_prompt(
+    text: str,
+    old_triplet: tuple[str, str, str],
+    new_triplet: tuple[str, str, str],
+    domain_name: str = "",
+    domain_prefix_style: str = "none",
+) -> str:
     old_aspect, _old_opinion, _old_sentiment = old_triplet
     new_aspect, opinion, sentiment = new_triplet
     masked_text = _mask_first_fragment(text, old_aspect, "[ASP]")
-    return (
+    prompt = (
         f"masked aspect edit: {masked_text} ; "
         f"new aspect: {new_aspect} ; "
         f"opinion: {opinion} ; "
         f"sentiment: {sentiment}"
     )
+    return apply_domain_prefix(prompt, domain_name, domain_prefix_style)
 
 
 def build_aspect_rewrite_prompt(text: str, old_triplet: tuple[str, str, str], new_triplet: tuple[str, str, str]) -> str:
@@ -577,16 +599,19 @@ def build_masked_opinion_sentiment_prompt(
     text: str,
     old_triplet: tuple[str, str, str],
     new_triplet: tuple[str, str, str],
+    domain_name: str = "",
+    domain_prefix_style: str = "none",
 ) -> str:
     aspect, old_opinion, _old_sentiment = old_triplet
     _new_aspect, new_opinion, new_sentiment = new_triplet
     masked_text = _mask_first_fragment(text, old_opinion, "[OPI]")
-    return (
+    prompt = (
         f"masked opinion-sentiment edit: {masked_text} ; "
         f"aspect: {aspect} ; "
         f"new opinion: {new_opinion} ; "
         f"new sentiment: {new_sentiment}"
     )
+    return apply_domain_prefix(prompt, domain_name, domain_prefix_style)
 
 
 def _replace_first_fragment(text: str, old_fragment: str, new_fragment: str) -> str:
@@ -642,6 +667,8 @@ PROMPT_LEAK_PATTERNS = [
     r"\bparaphrase\b",
     r"\bwith\s+label\b",
     r"\bwith\s+terms?\b",
+    r"\btarget\s+domain\b",
+    r"\[(rest14|rest15|rest16|laptop14)\]",
     r"\bpos\s*>",
     r"\bneg\s*>",
     r"\bneu\s*>",
@@ -888,6 +915,8 @@ def build_augmentation_requests(
     label_embeddings: dict[str, list[float]] | None = None,
     label_similarity_top_k: int = 4,
     composition_source_rows: list[dict] | None = None,
+    target_domain_name: str = "",
+    domain_prefix_style: str = "none",
 ) -> list[dict]:
     """Build C3DA-style generation prompts for ASTE augmentation.
 
@@ -903,6 +932,7 @@ def build_augmentation_requests(
     if channel_mode not in CHANNEL_MODES:
         raise ValueError("channel_mode must be one of all, aspect, opinion")
     memory = domain_memory or build_domain_memory(pseudo_rows)
+    domain_prefix = format_domain_prefix(target_domain_name, domain_prefix_style)
     aspect_bank = (
         memory.get("target_aspects")
         or memory.get("core_target_aspects")
@@ -949,6 +979,10 @@ def build_augmentation_requests(
             "base_id": base.get("id"),
             "prompt_style": prompt_style,
         }
+        if domain_prefix:
+            request["domain_name"] = target_domain_name
+            request["domain_prefix_style"] = domain_prefix_style
+            request["domain_prefix"] = domain_prefix
         if old_triplet is not None and new_triplet is not None:
             request["old_triplet"] = list(old_triplet)
             request["new_triplet"] = list(new_triplet)
@@ -983,7 +1017,11 @@ def build_augmentation_requests(
             new_triplets = sorted({left_triplet, right_triplet})
             if len(new_triplets) < 2:
                 continue
-            prompt = build_sentence_fusion_prompt(left_row.get("text", ""), right_row.get("text", ""), new_triplets)
+            prompt = apply_domain_prefix(
+                build_sentence_fusion_prompt(left_row.get("text", ""), right_row.get("text", ""), new_triplets),
+                target_domain_name,
+                domain_prefix_style,
+            )
             base_text = f"{left_row.get('text', '')} {right_row.get('text', '')}".strip()
             before_count = len(requests)
             add_request(
@@ -1017,7 +1055,11 @@ def build_augmentation_requests(
             for row, triplet in candidates:
                 if len(requests) >= max_requests:
                     break
-                prompt = build_label_composition_prompt([triplet])
+                prompt = apply_domain_prefix(
+                    build_label_composition_prompt([triplet]),
+                    target_domain_name,
+                    domain_prefix_style,
+                )
                 add_request(
                     row,
                     [triplet],
@@ -1062,7 +1104,11 @@ def build_augmentation_requests(
                 new_triplets = sorted({left_triplet, right_triplet})
                 if len(new_triplets) < 2:
                     continue
-                prompt = build_label_composition_prompt(new_triplets)
+                prompt = apply_domain_prefix(
+                    build_label_composition_prompt(new_triplets),
+                    target_domain_name,
+                    domain_prefix_style,
+                )
                 base_text = f"{left_row.get('text', '')} {right_row.get('text', '')}".strip()
                 before_count = len(requests)
                 add_request(
@@ -1089,7 +1135,11 @@ def build_augmentation_requests(
             if left_triplet[0] == right_triplet[0]:
                 continue
             new_triplets = sorted({left_triplet, right_triplet})
-            prompt = build_label_composition_prompt(new_triplets)
+            prompt = apply_domain_prefix(
+                build_label_composition_prompt(new_triplets),
+                target_domain_name,
+                domain_prefix_style,
+            )
             base_text = f"{left_row.get('text', '')} {right_row.get('text', '')}".strip()
             before_count = len(requests)
             add_request(
@@ -1132,16 +1182,34 @@ def build_augmentation_requests(
                 new_triplet = (new_aspect, opinion, sentiment)
                 new_triplets[idx] = new_triplet
                 if prompt_style == "rewrite_aspect":
-                    prompt = build_aspect_rewrite_prompt(row["text"], old_triplet, new_triplet)
+                    prompt = apply_domain_prefix(
+                        build_aspect_rewrite_prompt(row["text"], old_triplet, new_triplet),
+                        target_domain_name,
+                        domain_prefix_style,
+                    )
                     channel = "rewrite_aspect_channel"
                 elif prompt_style == "masked_mutual":
-                    prompt = build_masked_aspect_prompt(row["text"], old_triplet, new_triplet)
+                    prompt = build_masked_aspect_prompt(
+                        row["text"],
+                        old_triplet,
+                        new_triplet,
+                        target_domain_name,
+                        domain_prefix_style,
+                    )
                     channel = "masked_aspect_channel"
                 elif prompt_style == "legacy":
-                    prompt = build_legacy_label_invariant_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets)))
+                    prompt = apply_domain_prefix(
+                        build_legacy_label_invariant_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets))),
+                        target_domain_name,
+                        domain_prefix_style,
+                    )
                     channel = "aspect_channel"
                 else:
-                    prompt = build_concept_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets)))
+                    prompt = apply_domain_prefix(
+                        build_concept_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets))),
+                        target_domain_name,
+                        domain_prefix_style,
+                    )
                     channel = "aspect_channel"
                 add_request(row, new_triplets, channel, prompt, old_triplet, new_triplet, replacement_rank)
 
@@ -1170,13 +1238,27 @@ def build_augmentation_requests(
                 new_triplet = (aspect, new_opinion, new_sentiment)
                 new_triplets[idx] = new_triplet
                 if prompt_style == "masked_mutual":
-                    prompt = build_masked_opinion_sentiment_prompt(row["text"], old_triplet, new_triplet)
+                    prompt = build_masked_opinion_sentiment_prompt(
+                        row["text"],
+                        old_triplet,
+                        new_triplet,
+                        target_domain_name,
+                        domain_prefix_style,
+                    )
                     channel = "masked_opinion_sentiment_channel"
                 elif prompt_style == "legacy":
-                    prompt = build_legacy_label_invariant_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets)))
+                    prompt = apply_domain_prefix(
+                        build_legacy_label_invariant_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets))),
+                        target_domain_name,
+                        domain_prefix_style,
+                    )
                     channel = "opinion_sentiment_channel"
                 else:
-                    prompt = build_concept_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets)))
+                    prompt = apply_domain_prefix(
+                        build_concept_prompt(canonicalize_triplet_text(triplets_to_text(new_triplets))),
+                        target_domain_name,
+                        domain_prefix_style,
+                    )
                     channel = "opinion_sentiment_channel"
                 add_request(row, new_triplets, channel, prompt, old_triplet, new_triplet)
 
@@ -1188,10 +1270,13 @@ def build_generator_training_rows(
     seed: int,
     prompt_style: str = "concept",
     channel_mode: str = "all",
+    domain_name: str = "",
+    domain_prefix_style: str = "none",
 ) -> list[dict]:
     train_rows: list[dict] = []
     seen: set[tuple[str, str]] = set()
     rng = random.Random(seed)
+    domain_prefix = format_domain_prefix(domain_name, domain_prefix_style)
     if prompt_style not in PROMPT_STYLES:
         raise ValueError("prompt_style must be one of concept, legacy, masked_mutual, rewrite_aspect, label_composition, label_to_text")
     if channel_mode not in CHANNEL_MODES:
@@ -1211,21 +1296,24 @@ def build_generator_training_rows(
             triplets = sorted(parse_triplet_text(label))
             if not triplets:
                 continue
-            prompt = build_label_composition_prompt(triplets)
+            prompt = apply_domain_prefix(build_label_composition_prompt(triplets), domain_name, domain_prefix_style)
             channel = "label_to_text_generator" if prompt_style == "label_to_text" else "label_composition_generator"
             key = (prompt.lower(), row["text"].lower(), channel)
             if key in seen:
                 continue
             seen.add(key)
-            train_rows.append(
-                {
-                    "input": prompt,
-                    "target": row["text"],
-                    "label": label,
-                    "channel": channel,
-                    "new_triplets": [list(triplet) for triplet in triplets],
-                }
-            )
+            train_row = {
+                "input": prompt,
+                "target": row["text"],
+                "label": label,
+                "channel": channel,
+                "new_triplets": [list(triplet) for triplet in triplets],
+            }
+            if domain_prefix:
+                train_row["domain_name"] = domain_name
+                train_row["domain_prefix_style"] = domain_prefix_style
+                train_row["domain_prefix"] = domain_prefix
+            train_rows.append(train_row)
             continue
         if prompt_style in {"masked_mutual", "rewrite_aspect"}:
             for triplet in parse_triplet_text(label):
@@ -1235,10 +1323,20 @@ def build_generator_training_rows(
                     new_aspect = _choose_replacement_aspect(rng, aspect_pool, aspect, sentiment)
                     aspect_triplet = (new_aspect, opinion, sentiment)
                     if prompt_style == "rewrite_aspect":
-                        aspect_prompt = build_aspect_rewrite_prompt(row["text"], triplet, aspect_triplet)
+                        aspect_prompt = apply_domain_prefix(
+                            build_aspect_rewrite_prompt(row["text"], triplet, aspect_triplet),
+                            domain_name,
+                            domain_prefix_style,
+                        )
                         aspect_channel = "rewrite_aspect_editor"
                     else:
-                        aspect_prompt = build_masked_aspect_prompt(row["text"], triplet, aspect_triplet)
+                        aspect_prompt = build_masked_aspect_prompt(
+                            row["text"],
+                            triplet,
+                            aspect_triplet,
+                            domain_name,
+                            domain_prefix_style,
+                        )
                         aspect_channel = "masked_aspect_editor"
                     aspect_target = _replace_first_fragment(row["text"], aspect, new_aspect)
                     channel_rows.append((aspect_prompt, aspect_target, aspect_channel, triplet, aspect_triplet))
@@ -1248,20 +1346,29 @@ def build_generator_training_rows(
                         continue
                     seen.add(key)
                     new_label = canonicalize_triplet_text(triplets_to_text([new_triplet]))
-                    train_rows.append(
-                        {
-                            "input": prompt,
-                            "target": target,
-                            "label": new_label,
-                            "channel": channel,
-                            "old_triplet": list(old_triplet),
-                            "new_triplet": list(new_triplet),
-                        }
-                    )
+                    train_row = {
+                        "input": prompt,
+                        "target": target,
+                        "label": new_label,
+                        "channel": channel,
+                        "old_triplet": list(old_triplet),
+                        "new_triplet": list(new_triplet),
+                    }
+                    if domain_prefix:
+                        train_row["domain_name"] = domain_name
+                        train_row["domain_prefix_style"] = domain_prefix_style
+                        train_row["domain_prefix"] = domain_prefix
+                    train_rows.append(train_row)
                 if channel_mode in {"all", "opinion"} and prompt_style == "masked_mutual":
                     new_opinion, new_sentiment = _choose_replacement_opinion(rng, opinion_bank, opinion, sentiment)
                     opinion_triplet = (aspect, new_opinion, new_sentiment)
-                    opinion_prompt = build_masked_opinion_sentiment_prompt(row["text"], triplet, opinion_triplet)
+                    opinion_prompt = build_masked_opinion_sentiment_prompt(
+                        row["text"],
+                        triplet,
+                        opinion_triplet,
+                        domain_name,
+                        domain_prefix_style,
+                    )
                     opinion_target = _replace_first_fragment(row["text"], opinion, new_opinion)
                     if opinion_target == row["text"] and new_opinion != opinion:
                         continue
@@ -1269,33 +1376,39 @@ def build_generator_training_rows(
                     if key in seen:
                         continue
                     seen.add(key)
-                    train_rows.append(
-                        {
-                            "input": opinion_prompt,
-                            "target": opinion_target,
-                            "label": canonicalize_triplet_text(triplets_to_text([opinion_triplet])),
-                            "channel": "masked_opinion_sentiment_editor",
-                            "old_triplet": list(triplet),
-                            "new_triplet": list(opinion_triplet),
-                        }
-                    )
+                    train_row = {
+                        "input": opinion_prompt,
+                        "target": opinion_target,
+                        "label": canonicalize_triplet_text(triplets_to_text([opinion_triplet])),
+                        "channel": "masked_opinion_sentiment_editor",
+                        "old_triplet": list(triplet),
+                        "new_triplet": list(opinion_triplet),
+                    }
+                    if domain_prefix:
+                        train_row["domain_name"] = domain_name
+                        train_row["domain_prefix_style"] = domain_prefix_style
+                        train_row["domain_prefix"] = domain_prefix
+                    train_rows.append(train_row)
         else:
             if prompt_style == "legacy":
-                prompt = build_legacy_label_invariant_prompt(label)
+                prompt = apply_domain_prefix(build_legacy_label_invariant_prompt(label), domain_name, domain_prefix_style)
             else:
-                prompt = build_concept_prompt(label)
+                prompt = apply_domain_prefix(build_concept_prompt(label), domain_name, domain_prefix_style)
             key = (prompt.lower(), row["text"].lower())
             if key in seen:
                 continue
             seen.add(key)
-            train_rows.append(
-                {
-                    "input": prompt,
-                    "target": row["text"],
-                    "label": label,
-                    "channel": "label_to_text_generation",
-                }
-            )
+            train_row = {
+                "input": prompt,
+                "target": row["text"],
+                "label": label,
+                "channel": "label_to_text_generation",
+            }
+            if domain_prefix:
+                train_row["domain_name"] = domain_name
+                train_row["domain_prefix_style"] = domain_prefix_style
+                train_row["domain_prefix"] = domain_prefix
+            train_rows.append(train_row)
     return train_rows
 
 

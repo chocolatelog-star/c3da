@@ -17,6 +17,21 @@
 | 主对比指标 | `raw F1`（原始 F1） |
 | 辅助分析指标 | `fixed F1`（修正 F1） |
 
+## 0.1 下一阶段：领域前缀掩码增强
+
+当前计划在既有最佳流程上只改数据增强提示，不改伪标签筛选、DANN（领域对抗）和最终训练参数。目标是验证“显式目标领域提示”能不能让 `masked_mutual`（互相掩码）增强更贴近目标域，从而提高召回率。
+
+| 实验项 | 配置 |
+|---|---|
+| 基础流程 | `label_to_text`（标签到文本）生成器训练 + `masked_mutual`（互相掩码）增强 + high_precision pseudo（高精度伪标签）+ DANN（领域对抗） |
+| 新增参数 | `--domain_prefix_style`（领域前缀风格） |
+| 默认值 | `none`（不加领域前缀，保持历史流程不变） |
+| text（文本式）前缀 | `target domain: [laptop14] ; masked aspect edit: ...` |
+| bracket（括号式）前缀 | `[laptop14] masked aspect edit: ...` |
+| 生成器训练阶段 | 使用源域名称作为前缀，例如 `rest16` |
+| 数据增强阶段 | 使用目标域名称作为前缀，例如 `laptop14` |
+| 第一轮验证 | 先跑 `rest16 -> laptop14` 两种前缀，与当前六组基线里的同方向 raw F1=46.14、fixed F1=47.69 对比 |
+
 ## 1. BGCA 论文结果与我们的结果对比
 
 BGCA 论文 ASTE（方面情感三元组抽取）六组跨域结果来自 Table 4（表 4），这里优先对比 `BGCA label-to-text`（标签到文本）这一行。我们的结果使用当前主流程：`label_to_text`（标签到文本）生成器训练 + `masked_mutual`（掩码增强）数据增强 + 高精度伪标签 + DANN（领域对抗）。

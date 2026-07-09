@@ -1,5 +1,27 @@
 # CD-C3DA 跨域 ASTE 超越 BGCA 目标路线图
 
+## 0. 当前推进重点：领域感知数据增强
+
+六组 BGCA 风格跨域实验已经跑完，当前平均 `raw F1`（原始 F1）为 49.86，平均 `fixed F1`（修正 F1）为 51.59。主要短板仍然是 `recall`（召回率）偏低，尤其是 `laptop14 -> restaurant`（笔记本到餐馆）方向。
+
+下一步不先扩大模型，也不先改 DANN（领域对抗）主体，而是优先改数据增强提示：在生成器训练和掩码增强请求中加入领域前缀，让生成器知道当前要生成哪个领域风格的句子。
+
+两种待验证前缀：
+
+```text
+text:    target domain: [laptop14] ; masked aspect edit: ...
+bracket: [laptop14] masked aspect edit: ...
+```
+
+判断标准：
+
+```text
+1. 先跑 rest16 -> laptop14 单组实验，分别比较 text 与 bracket。
+2. 与当前同方向基线对比：raw F1=46.14，fixed F1=47.69。
+3. 如果单组 raw F1 或 fixed F1 有稳定提升，再扩展到六组跨域实验。
+4. 如果提升主要来自 fixed F1，而 raw F1 不提升，则只作为辅助观察，不作为主结论。
+```
+
 ## 1. 项目目标
 
 本项目的最终目标不是简单复现 C3DA，而是把 C3DA 改造成一个完整的跨域 ASTE 框架，并在跨域能力上超过 BGCA 约 1 到 2 个 F1 点。
@@ -1100,4 +1122,3 @@ sentiment_distribution
 ```
 
 这两个模块最贴近 BGCA，同时最可能解释为什么当前 F1 和 BGCA 差距很大。
-

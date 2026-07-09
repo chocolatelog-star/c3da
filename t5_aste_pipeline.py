@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from collections import Counter
 from pathlib import Path
@@ -1606,12 +1607,16 @@ def prepare(args: argparse.Namespace) -> None:
         args.seed,
         prompt_style=args.augment_prompt_style,
         channel_mode=args.augment_channel_mode,
+        domain_name=args.source_dataset,
+        domain_prefix_style=args.domain_prefix_style,
     )
     generator_dev_rows = build_generator_training_rows(
         source_dev_rows,
         args.seed + 1,
         prompt_style=args.augment_prompt_style,
         channel_mode=args.augment_channel_mode,
+        domain_name=args.source_dataset,
+        domain_prefix_style=args.domain_prefix_style,
     )
     generator_tag = args.generator_output_tag
     write_jsonl(tagged_output_path(run_dir, "generator_train.jsonl", generator_tag), generator_train_rows)
@@ -1637,6 +1642,8 @@ def prepare(args: argparse.Namespace) -> None:
         "use_task_prefix": use_task_prefix,
         "augment_prompt_style": args.augment_prompt_style,
         "augment_channel_mode": args.augment_channel_mode,
+        "domain_prefix_style": args.domain_prefix_style,
+        "generator_domain_name": args.source_dataset if args.domain_prefix_style != "none" else "",
         "generator_output_tag": generator_tag,
     }
     dump_json(run_dir / "manifest.json", manifest)
@@ -1812,11 +1819,12 @@ def augment(args: argparse.Namespace) -> None:
     source_rows = read_jsonl(run_dir / "source_train.jsonl")
     source_dev_rows = read_jsonl(run_dir / "source_dev.jsonl")
     pseudo_rows = read_selected_pseudo_rows(run_dir)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    target_domain_name = manifest.get("target_dataset", "")
     domain_memory = None
     memory_path = Path(args.memory_path) if args.memory_path else run_dir / "c3da_cross_domain_memory.json"
     if memory_path.exists():
-        import json
-
         domain_memory = json.loads(memory_path.read_text(encoding="utf-8"))
     model_path = Path(args.model_path) if args.model_path else Path(args.generator_model_path)
     label_embeddings = None
@@ -1842,6 +1850,8 @@ def augment(args: argparse.Namespace) -> None:
         label_embeddings=label_embeddings,
         label_similarity_top_k=args.label_similarity_top_k,
         composition_source_rows=composition_source_rows,
+        target_domain_name=target_domain_name,
+        domain_prefix_style=args.domain_prefix_style,
     )
     output_tag = args.augment_output_tag
     write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_requests.jsonl", output_tag), requests)
@@ -1903,6 +1913,9 @@ def augment(args: argparse.Namespace) -> None:
                 "new_triplet": req.get("new_triplet"),
                 "new_triplets": req.get("new_triplets"),
                 "replacement_rank": req.get("replacement_rank"),
+                "domain_name": req.get("domain_name"),
+                "domain_prefix_style": req.get("domain_prefix_style"),
+                "domain_prefix": req.get("domain_prefix"),
             }
         )
     write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_augmented.jsonl", output_tag), augmented_rows)
@@ -1973,6 +1986,8 @@ def augment(args: argparse.Namespace) -> None:
         "generated": len(generated_texts),
         "prompt_style": args.augment_prompt_style,
         "augment_channel_mode": args.augment_channel_mode,
+        "domain_prefix_style": args.domain_prefix_style,
+        "target_domain_name": target_domain_name if args.domain_prefix_style != "none" else "",
         "output_tag": output_tag,
         "selected_output_path": str(tagged_output_path(run_dir, "c3da_two_channel_augmented_selected.jsonl", output_tag)),
         "memory_path": str(memory_path) if domain_memory is not None else "",
@@ -2079,6 +2094,7 @@ def augment(args: argparse.Namespace) -> None:
         "selected_augmented_rows": len(selected_augmented_rows),
         "extra_augmented_rows": len(extra_aug_rows),
         "final_train_rows": len(final_rows),
+        "domain_prefix_style": args.domain_prefix_style,
         "pseudo_train_hidden_gold_eval": pseudo_train_eval,
         "extra_augmented_analysis": extra_aug_stats,
         "final_weight_stats": final_weight_stats,
@@ -2152,6 +2168,7 @@ def main() -> None:
         default="concept",
     )
     p.add_argument("--augment_channel_mode", choices=["all", "aspect", "opinion"], default="all")
+    p.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     p.add_argument("--generator_output_tag", default="")
     p.add_argument("--no_task_prefix", action="store_true")
     p.set_defaults(func=prepare)
@@ -2209,6 +2226,7 @@ def main() -> None:
         default="concept",
     )
     p.add_argument("--augment_channel_mode", choices=["all", "aspect", "opinion"], default="all")
+    p.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     p.add_argument("--augment_output_tag", default="")
     p.add_argument("--memory_path", default="")
     p.add_argument("--cuda", default="0")
