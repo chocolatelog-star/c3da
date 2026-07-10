@@ -1,10 +1,10 @@
 # CD-C3DA 跨域 ASTE 超越 BGCA 目标路线图
 
-## 0. 当前推进重点：领域感知语义增强
+## 0. 当前推进重点：显式情感向量增强
 
 六组 BGCA 风格跨域实验已经跑完，当前平均 `raw F1`（原始 F1）为 49.86，平均 `fixed F1`（修正 F1）为 51.59。主要短板仍然是 `recall`（召回率）偏低，尤其是 `laptop14 -> restaurant`（笔记本到餐馆）方向。
 
-下一步不先扩大模型，也不先改 DANN（领域对抗）主体，contrastive learning（对比学习）也先放到后续单独消融。当前优先改数据增强：在已有 `domain_prefix_style=text`（文本式领域前缀）的基础上，把掩码增强里的观点词通道从随机成对替换改成 domain-aware semantic replacement（领域感知语义替换）。
+下一步不先扩大模型，也不先改 DANN（领域对抗）主体，contrastive learning（对比学习）也先放到后续单独消融。当前优先改数据增强：在已有 `domain_prefix_style=text`（文本式领域前缀）的基础上，显式构建 sentiment vector space（情感向量空间），再做观点词替换。
 
 当前保留并使用的领域前缀：
 
@@ -15,26 +15,30 @@ text:    target domain: [laptop14] ; masked aspect edit: ...
 新增观点词替换策略：
 
 ```text
---opinion_replacement_mode semantic_same_sentiment
+--opinion_replacement_mode sentiment_vector
+--sentiment_vector_model_path J:\nlp\models\t5-base-py
+--sentiment_vector_min_margin 0.05
 ```
 
-它只在同一 sentiment（情感极性）内部替换 opinion（观点词），并优先选择目标域高精度伪标签里与当前 aspect（方面词）更相容的 opinion（观点词）。排序信号包括 target-domain opinion frequency（目标域观点词频率）、aspect-opinion co-occurrence（方面词-观点词共现）、target triplet count（目标域三元组共现）和 lexical similarity（词面相似度）。
-
-v1 单组结果为 raw F1=45.46、fixed F1=47.26，低于当前最好 text 前缀版本，因此已经删除对应输出目录。v2 在 v1 基础上做两个收紧：
+它会用 T5 encoder embedding（T5 编码器嵌入）给候选 opinion（观点词）编码，构建 pos/neg/neu（正/负/中性）三个 sentiment centroid（情感中心）。候选观点词必须更接近自身情感中心，而不是其他情感中心：
 
 ```text
-1. 选入增强数据时加入 4:6 通道比例控制：
-   --augment_select_max_opinion_ratio 0.6
-   即 opinion channel（观点词通道）最多 60%，aspect channel（方面词通道）尽量 40%。
+sim(candidate, c_sentiment) - max(sim(candidate, c_other)) >= margin
+```
 
-2. 加强 opinion（观点词）边界过滤：
-   过滤 [opi]、no、on its feet 等异常观点词边界。
+然后再结合 old opinion similarity（原观点词相似度）、target-domain opinion frequency（目标域观点词频率）、aspect-opinion co-occurrence（方面词-观点词共现）和 target triplet count（目标域三元组共现）打分。
+
+前两版结果已经证明：只靠 `semantic_same_sentiment`（同情感语义替换）不够稳。
+
+```text
+v1: raw F1=45.46, fixed F1=47.26，已删除输出目录。
+v2 4:6: raw F1=42.78, fixed F1=44.71，已删除输出文件和模型目录。
 ```
 
 判断标准：
 
 ```text
-1. 先跑 rest16 -> laptop14 单组 v2 实验。
+1. 先跑 rest16 -> laptop14 单组 sentiment_vector（情感向量）实验。
 2. 与当前 text 前缀结果对比：raw F1=46.63，fixed F1=48.98。
 3. 同时参考原六组基线同方向：raw F1=46.14，fixed F1=47.69。
 4. 如果 raw F1 稳定提升，再扩展到六组跨域实验。

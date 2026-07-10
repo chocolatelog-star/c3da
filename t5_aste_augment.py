@@ -20,7 +20,7 @@ PROMPT_STYLES = {
     "sentence_fusion_composition",
 }
 CHANNEL_MODES = {"all", "aspect", "opinion"}
-OPINION_REPLACEMENT_MODES = {"coupled_random", "semantic_same_sentiment"}
+OPINION_REPLACEMENT_MODES = {"coupled_random", "semantic_same_sentiment", "sentiment_vector"}
 GENERIC_ASPECTS = {
     "about",
     "all",
@@ -951,6 +951,112 @@ def rank_replacement_opinions(
     return sorted(ranked, key=lambda item: (item["score"], item["opinion"]), reverse=True)
 
 
+def _mean_vector(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    width = len(vectors[0])
+    if width == 0:
+        return []
+    return [sum(vector[idx] for vector in vectors if len(vector) == width) / len(vectors) for idx in range(width)]
+
+
+def build_sentiment_centroids(
+    opinion_bank: dict[str, list[str]],
+    opinion_embeddings: dict[str, list[float]],
+) -> dict[str, list[float]]:
+    centroids: dict[str, list[float]] = {}
+    normalized_embeddings = {
+        _normalize_fragment(opinion): vector for opinion, vector in opinion_embeddings.items()
+    }
+    for sentiment, opinions in opinion_bank.items():
+        vectors = [
+            normalized_embeddings[_normalize_fragment(opinion)]
+            for opinion in opinions
+            if _normalize_fragment(opinion) in normalized_embeddings
+        ]
+        centroid = _mean_vector(vectors)
+        if centroid:
+            centroids[sentiment] = centroid
+    return centroids
+
+
+def rank_sentiment_vector_replacement_opinions(
+    aspect: str,
+    old_opinion: str,
+    sentiment: str,
+    opinion_bank: dict[str, list[str]],
+    domain_memory: dict | None = None,
+    min_margin: float = 0.05,
+) -> list[dict]:
+    memory = domain_memory or {}
+    opinion_embeddings = {
+        _normalize_fragment(opinion): vector
+        for opinion, vector in (memory.get("opinion_embeddings") or {}).items()
+    }
+    if not opinion_embeddings:
+        return []
+    centroids = memory.get("sentiment_centroids") or build_sentiment_centroids(opinion_bank, opinion_embeddings)
+    target_centroid = centroids.get(sentiment)
+    old_vector = opinion_embeddings.get(_normalize_fragment(old_opinion))
+    if not target_centroid:
+        return []
+
+    opinion_counts = Counter(memory.get("opinion_counts_by_sentiment", {}).get(sentiment, {}))
+    opinion_aspect_counts = memory.get("opinion_aspect_counts", {})
+    target_triplet_counts = memory.get("target_triplet_counts", {})
+    ranked = []
+    normalized_old = _normalize_fragment(old_opinion)
+    for opinion in opinion_bank.get(sentiment, []):
+        normalized_opinion = _normalize_fragment(opinion)
+        if not normalized_opinion or normalized_opinion == normalized_old:
+            continue
+        if not _valid_opinion(opinion):
+            continue
+        candidate_vector = opinion_embeddings.get(normalized_opinion)
+        if not candidate_vector:
+            continue
+        target_similarity = _cosine_similarity(candidate_vector, target_centroid)
+        other_similarity = max(
+            [
+                _cosine_similarity(candidate_vector, centroid)
+                for other_sentiment, centroid in centroids.items()
+                if other_sentiment != sentiment
+            ]
+            or [0.0]
+        )
+        sentiment_margin = target_similarity - other_similarity
+        if sentiment_margin < min_margin:
+            continue
+        old_similarity = _cosine_similarity(candidate_vector, old_vector) if old_vector else 0.0
+        opinion_key = f"{opinion}|{sentiment}"
+        opinion_count = int(opinion_counts.get(opinion, 0))
+        opinion_aspect_count = int(opinion_aspect_counts.get(opinion_key, {}).get(aspect, 0))
+        target_triplet_count = int(target_triplet_counts.get(f"{aspect}|{opinion}|{sentiment}", 0))
+        score = 1.5 * target_similarity
+        score += 1.0 * sentiment_margin
+        score += 0.8 * old_similarity
+        score += 0.5 * min(opinion_count, 4)
+        score += 2.0 * min(opinion_aspect_count, 3)
+        score += 2.5 * min(target_triplet_count, 2)
+        ranked.append(
+            {
+                "opinion": opinion,
+                "sentiment": sentiment,
+                "score": round(score, 6),
+                "features": {
+                    "target_similarity": round(target_similarity, 6),
+                    "other_similarity": round(other_similarity, 6),
+                    "sentiment_margin": round(sentiment_margin, 6),
+                    "old_similarity": round(old_similarity, 6),
+                    "opinion_count": opinion_count,
+                    "opinion_aspect_count": opinion_aspect_count,
+                    "target_triplet_count": target_triplet_count,
+                },
+            }
+        )
+    return sorted(ranked, key=lambda item: (item["score"], item["opinion"]), reverse=True)
+
+
 def build_augmentation_requests(
     source_rows: list[dict],
     pseudo_rows: list[dict],
@@ -965,6 +1071,7 @@ def build_augmentation_requests(
     target_domain_name: str = "",
     domain_prefix_style: str = "none",
     opinion_replacement_mode: str = "coupled_random",
+    sentiment_vector_min_margin: float = 0.05,
 ) -> list[dict]:
     """Build C3DA-style generation prompts for ASTE augmentation.
 
@@ -980,7 +1087,7 @@ def build_augmentation_requests(
     if channel_mode not in CHANNEL_MODES:
         raise ValueError("channel_mode must be one of all, aspect, opinion")
     if opinion_replacement_mode not in OPINION_REPLACEMENT_MODES:
-        raise ValueError("opinion_replacement_mode must be one of coupled_random, semantic_same_sentiment")
+        raise ValueError("opinion_replacement_mode must be one of coupled_random, semantic_same_sentiment, sentiment_vector")
     memory = domain_memory or build_domain_memory(pseudo_rows)
     domain_prefix = format_domain_prefix(target_domain_name, domain_prefix_style)
     aspect_bank = (
@@ -1271,22 +1378,42 @@ def build_augmentation_requests(
                 old_triplet = new_triplets[idx]
                 aspect, _opinion, _sentiment = old_triplet
                 replacement_rank = None
-                if opinion_replacement_mode == "semantic_same_sentiment":
-                    ranked_opinions = rank_replacement_opinions(
-                        aspect=aspect,
-                        old_opinion=_opinion,
-                        sentiment=_sentiment,
-                        opinion_bank=preferred_opinion_bank,
-                        domain_memory=memory,
-                    )
-                    if not ranked_opinions:
+                if opinion_replacement_mode in {"semantic_same_sentiment", "sentiment_vector"}:
+                    if opinion_replacement_mode == "sentiment_vector":
+                        ranked_opinions = rank_sentiment_vector_replacement_opinions(
+                            aspect=aspect,
+                            old_opinion=_opinion,
+                            sentiment=_sentiment,
+                            opinion_bank=preferred_opinion_bank,
+                            domain_memory=memory,
+                            min_margin=sentiment_vector_min_margin,
+                        )
+                    else:
                         ranked_opinions = rank_replacement_opinions(
                             aspect=aspect,
                             old_opinion=_opinion,
                             sentiment=_sentiment,
-                            opinion_bank=opinion_bank,
+                            opinion_bank=preferred_opinion_bank,
                             domain_memory=memory,
                         )
+                    if not ranked_opinions:
+                        if opinion_replacement_mode == "sentiment_vector":
+                            ranked_opinions = rank_sentiment_vector_replacement_opinions(
+                                aspect=aspect,
+                                old_opinion=_opinion,
+                                sentiment=_sentiment,
+                                opinion_bank=opinion_bank,
+                                domain_memory=memory,
+                                min_margin=sentiment_vector_min_margin,
+                            )
+                        else:
+                            ranked_opinions = rank_replacement_opinions(
+                                aspect=aspect,
+                                old_opinion=_opinion,
+                                sentiment=_sentiment,
+                                opinion_bank=opinion_bank,
+                                domain_memory=memory,
+                            )
                     if not ranked_opinions:
                         continue
                     top_k = ranked_opinions[: min(3, len(ranked_opinions))]

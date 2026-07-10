@@ -187,6 +187,23 @@ def collect_single_triplet_label_texts(rows: list[dict], min_weight: float = 0.6
     return labels
 
 
+def collect_opinion_texts_for_embedding(rows: list[dict], domain_memory: dict | None = None) -> list[str]:
+    opinions = set()
+    for row in rows:
+        for _aspect, opinion, _sentiment in parse_triplet_text_list(row.get("label", "")):
+            normalized = " ".join(str(opinion).split())
+            if normalized:
+                opinions.add(normalized)
+    memory = domain_memory or {}
+    for bank_name in ("candidate_opinions_by_sentiment", "opinions_by_sentiment"):
+        for bank in (memory.get(bank_name) or {}).values():
+            for opinion in bank:
+                normalized = " ".join(str(opinion).split())
+                if normalized:
+                    opinions.add(normalized)
+    return sorted(opinions)
+
+
 def count_triplets(rows: list[dict], field: str = "label") -> int:
     total = 0
     for row in rows:
@@ -1898,6 +1915,29 @@ def augment(args: argparse.Namespace) -> None:
             batch_size=args.embedding_batch_size,
             cuda=args.cuda,
         )
+    sentiment_vector_stats = {"enabled": False}
+    if args.opinion_replacement_mode == "sentiment_vector":
+        if domain_memory is None:
+            domain_memory = build_target_memory(pseudo_rows)
+        embedding_model_path = Path(args.sentiment_vector_model_path) if args.sentiment_vector_model_path else model_path
+        opinion_texts = collect_opinion_texts_for_embedding(source_rows + pseudo_rows, domain_memory)
+        opinion_embeddings = encode_text_embeddings(
+            model_path=embedding_model_path,
+            texts=opinion_texts,
+            batch_size=args.embedding_batch_size,
+            cuda=args.cuda,
+        )
+        domain_memory = {
+            **domain_memory,
+            "opinion_embeddings": opinion_embeddings,
+        }
+        sentiment_vector_stats = {
+            "enabled": True,
+            "model_path": str(embedding_model_path),
+            "opinion_texts": len(opinion_texts),
+            "embedded_opinions": len(opinion_embeddings),
+            "min_margin": args.sentiment_vector_min_margin,
+        }
     composition_source_rows = []
     if args.composition_source_file:
         composition_source_rows = read_jsonl(Path(args.composition_source_file))
@@ -1915,6 +1955,7 @@ def augment(args: argparse.Namespace) -> None:
         target_domain_name=target_domain_name,
         domain_prefix_style=args.domain_prefix_style,
         opinion_replacement_mode=args.opinion_replacement_mode,
+        sentiment_vector_min_margin=args.sentiment_vector_min_margin,
     )
     output_tag = args.augment_output_tag
     write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_requests.jsonl", output_tag), requests)
@@ -2058,6 +2099,7 @@ def augment(args: argparse.Namespace) -> None:
         "augment_channel_mode": args.augment_channel_mode,
         "domain_prefix_style": args.domain_prefix_style,
         "opinion_replacement_mode": args.opinion_replacement_mode,
+        "sentiment_vector": sentiment_vector_stats,
         "target_domain_name": target_domain_name if args.domain_prefix_style != "none" else "",
         "output_tag": output_tag,
         "selected_output_path": str(tagged_output_path(run_dir, "c3da_two_channel_augmented_selected.jsonl", output_tag)),
@@ -2301,9 +2343,11 @@ def main() -> None:
     p.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     p.add_argument(
         "--opinion_replacement_mode",
-        choices=["coupled_random", "semantic_same_sentiment"],
+        choices=["coupled_random", "semantic_same_sentiment", "sentiment_vector"],
         default="coupled_random",
     )
+    p.add_argument("--sentiment_vector_model_path", default="")
+    p.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
     p.add_argument("--augment_output_tag", default="")
     p.add_argument("--memory_path", default="")
     p.add_argument("--cuda", default="0")

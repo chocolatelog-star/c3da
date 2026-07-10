@@ -5,6 +5,7 @@ from t5_aste_augment import (
     build_domain_memory,
     build_generator_training_rows,
     rank_replacement_aspects,
+    rank_sentiment_vector_replacement_opinions,
 )
 from t5_aste_data import parse_triplet_text_list
 from t5_aste_pipeline import (
@@ -629,6 +630,84 @@ def test_semantic_same_sentiment_opinion_channel_keeps_sentiment_and_prefers_dom
     assert any(req["old_triplet"][1] == "responsive" and req["new_triplet"][1] == "smooth" for req in opinion_requests)
     assert all(req["opinion_replacement_mode"] == "semantic_same_sentiment" for req in opinion_requests)
     assert all("opinion_replacement_rank" in req for req in opinion_requests)
+
+
+def test_sentiment_vector_opinion_channel_uses_centroid_margin():
+    pseudo_rows = [
+        {
+            "id": "t1",
+            "text": "The keyboard is responsive.",
+            "label": "<pos> keyboard <opinion> responsive",
+            "sample_weight": 0.65,
+        },
+        {
+            "id": "t2",
+            "text": "The trackpad is smooth.",
+            "label": "<pos> trackpad <opinion> smooth",
+            "sample_weight": 0.65,
+        },
+        {
+            "id": "t3",
+            "text": "The service is terrible.",
+            "label": "<neg> service <opinion> terrible",
+            "sample_weight": 0.65,
+        },
+        {
+            "id": "t4",
+            "text": "The screen is disappointing.",
+            "label": "<neg> screen <opinion> disappointing",
+            "sample_weight": 0.65,
+        },
+    ]
+    memory = {
+        "candidate_opinions_by_sentiment": {
+            "pos": ["smooth", "above average"],
+            "neg": ["terrible", "disappointing"],
+        },
+        "opinion_counts_by_sentiment": {
+            "pos": {"smooth": 3, "above average": 3},
+            "neg": {"terrible": 3, "disappointing": 3},
+        },
+        "opinion_embeddings": {
+            "responsive": [0.95, 0.05],
+            "smooth": [0.9, 0.1],
+            "above average": [0.45, 0.55],
+            "terrible": [0.05, 0.95],
+            "disappointing": [0.1, 0.9],
+        },
+    }
+
+    ranked = rank_sentiment_vector_replacement_opinions(
+        aspect="keyboard",
+        old_opinion="responsive",
+        sentiment="pos",
+        opinion_bank=memory["candidate_opinions_by_sentiment"],
+        domain_memory=memory,
+        min_margin=0.1,
+    )
+
+    assert ranked
+    assert ranked[0]["opinion"] == "smooth"
+    assert all(item["opinion"] != "above average" for item in ranked)
+
+    requests = build_augmentation_requests(
+        [],
+        pseudo_rows,
+        per_row=1,
+        seed=7,
+        prompt_style="masked_mutual",
+        channel_mode="opinion",
+        domain_memory=memory,
+        opinion_replacement_mode="sentiment_vector",
+        sentiment_vector_min_margin=0.1,
+    )
+
+    opinion_requests = [req for req in requests if req["channel"] == "masked_opinion_sentiment_channel"]
+    assert opinion_requests
+    assert all(req["opinion_replacement_mode"] == "sentiment_vector" for req in opinion_requests)
+    assert all(req["old_triplet"][2] == req["new_triplet"][2] for req in opinion_requests)
+    assert any(req["old_triplet"][1] == "responsive" and req["new_triplet"][1] == "smooth" for req in opinion_requests)
+    assert all(req["opinion_replacement_rank"]["features"]["sentiment_margin"] >= 0.1 for req in opinion_requests)
 
 
 def test_augmentation_requests_can_use_explicit_cross_domain_memory():

@@ -62,6 +62,8 @@ def augment_experiment_tag(base_tag: str, opinion_replacement_mode: str) -> str:
         return base_tag
     if opinion_replacement_mode == "semantic_same_sentiment":
         return f"{base_tag}_semantic_same_sentiment"
+    if opinion_replacement_mode == "sentiment_vector":
+        return f"{base_tag}_sentiment_vector"
     raise ValueError(f"unsupported opinion replacement mode: {opinion_replacement_mode}")
 
 
@@ -262,6 +264,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.domain_prefix_style,
                 "--opinion_replacement_mode",
                 args.opinion_replacement_mode,
+                "--sentiment_vector_model_path",
+                args.sentiment_vector_model_path,
+                "--sentiment_vector_min_margin",
+                str(args.sentiment_vector_min_margin),
                 "--augment_output_tag",
                 final_tag,
                 "--final_train_output_tag",
@@ -573,9 +579,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     parser.add_argument(
         "--opinion_replacement_mode",
-        choices=["coupled_random", "semantic_same_sentiment"],
+        choices=["coupled_random", "semantic_same_sentiment", "sentiment_vector"],
         default="coupled_random",
     )
+    parser.add_argument("--sentiment_vector_model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
     parser.add_argument("--augment_select_max_opinion_ratio", type=float, default=1.0)
     parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
     parser.add_argument("--extractor_epochs", type=int, default=25)
