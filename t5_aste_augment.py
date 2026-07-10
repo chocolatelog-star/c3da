@@ -20,6 +20,7 @@ PROMPT_STYLES = {
     "sentence_fusion_composition",
 }
 CHANNEL_MODES = {"all", "aspect", "opinion"}
+OPINION_REPLACEMENT_MODES = {"coupled_random", "semantic_same_sentiment"}
 GENERIC_ASPECTS = {
     "about",
     "all",
@@ -904,6 +905,52 @@ def rank_replacement_aspects(
     return sorted(ranked, key=lambda item: (item["score"], item["aspect"]), reverse=True)
 
 
+def rank_replacement_opinions(
+    aspect: str,
+    old_opinion: str,
+    sentiment: str,
+    opinion_bank: dict[str, list[str]],
+    domain_memory: dict | None = None,
+) -> list[dict]:
+    memory = domain_memory or {}
+    opinion_counts = Counter(memory.get("opinion_counts_by_sentiment", {}).get(sentiment, {}))
+    opinion_aspect_counts = memory.get("opinion_aspect_counts", {})
+    target_triplet_counts = memory.get("target_triplet_counts", {})
+    candidates = opinion_bank.get(sentiment, [])
+    ranked = []
+    normalized_old = _normalize_fragment(old_opinion)
+    for opinion in candidates:
+        normalized_opinion = _normalize_fragment(opinion)
+        if not normalized_opinion or normalized_opinion == normalized_old:
+            continue
+        if not _valid_opinion(opinion):
+            continue
+        opinion_key = f"{opinion}|{sentiment}"
+        opinion_count = int(opinion_counts.get(opinion, 0))
+        opinion_aspect_count = int(opinion_aspect_counts.get(opinion_key, {}).get(aspect, 0))
+        target_triplet_count = int(target_triplet_counts.get(f"{aspect}|{opinion}|{sentiment}", 0))
+        lexical_similarity = _token_jaccard(old_opinion, opinion)
+        score = 1.0
+        score += 2.5 * min(opinion_aspect_count, 3)
+        score += 3.0 * min(target_triplet_count, 2)
+        score += 0.5 * min(opinion_count, 4)
+        score += lexical_similarity
+        ranked.append(
+            {
+                "opinion": opinion,
+                "sentiment": sentiment,
+                "score": round(score, 6),
+                "features": {
+                    "opinion_count": opinion_count,
+                    "opinion_aspect_count": opinion_aspect_count,
+                    "target_triplet_count": target_triplet_count,
+                    "lexical_similarity": round(lexical_similarity, 6),
+                },
+            }
+        )
+    return sorted(ranked, key=lambda item: (item["score"], item["opinion"]), reverse=True)
+
+
 def build_augmentation_requests(
     source_rows: list[dict],
     pseudo_rows: list[dict],
@@ -917,6 +964,7 @@ def build_augmentation_requests(
     composition_source_rows: list[dict] | None = None,
     target_domain_name: str = "",
     domain_prefix_style: str = "none",
+    opinion_replacement_mode: str = "coupled_random",
 ) -> list[dict]:
     """Build C3DA-style generation prompts for ASTE augmentation.
 
@@ -931,6 +979,8 @@ def build_augmentation_requests(
         )
     if channel_mode not in CHANNEL_MODES:
         raise ValueError("channel_mode must be one of all, aspect, opinion")
+    if opinion_replacement_mode not in OPINION_REPLACEMENT_MODES:
+        raise ValueError("opinion_replacement_mode must be one of coupled_random, semantic_same_sentiment")
     memory = domain_memory or build_domain_memory(pseudo_rows)
     domain_prefix = format_domain_prefix(target_domain_name, domain_prefix_style)
     aspect_bank = (
@@ -1220,21 +1270,45 @@ def build_augmentation_requests(
                 idx = rng.randrange(len(new_triplets))
                 old_triplet = new_triplets[idx]
                 aspect, _opinion, _sentiment = old_triplet
-                preferred_opinion, preferred_sentiment = _choose_replacement_opinion(
-                    rng, preferred_opinion_bank, _opinion, _sentiment
-                )
-                if (preferred_opinion, preferred_sentiment) != (_opinion, _sentiment):
-                    new_opinion, new_sentiment = preferred_opinion, preferred_sentiment
-                else:
-                    new_opinion, new_sentiment = _choose_replacement_opinion(rng, opinion_bank, _opinion, _sentiment)
-                if (new_opinion, new_sentiment) == (_opinion, _sentiment):
-                    same_sentiment_candidates = [
-                        opinion for opinion in opinion_bank.get(_sentiment, []) if opinion != _opinion
-                    ]
-                    if same_sentiment_candidates:
-                        new_opinion = rng.choice(sorted(set(same_sentiment_candidates)))
-                    else:
+                replacement_rank = None
+                if opinion_replacement_mode == "semantic_same_sentiment":
+                    ranked_opinions = rank_replacement_opinions(
+                        aspect=aspect,
+                        old_opinion=_opinion,
+                        sentiment=_sentiment,
+                        opinion_bank=preferred_opinion_bank,
+                        domain_memory=memory,
+                    )
+                    if not ranked_opinions:
+                        ranked_opinions = rank_replacement_opinions(
+                            aspect=aspect,
+                            old_opinion=_opinion,
+                            sentiment=_sentiment,
+                            opinion_bank=opinion_bank,
+                            domain_memory=memory,
+                        )
+                    if not ranked_opinions:
                         continue
+                    top_k = ranked_opinions[: min(3, len(ranked_opinions))]
+                    replacement_rank = rng.choice(top_k)
+                    new_opinion = replacement_rank["opinion"]
+                    new_sentiment = replacement_rank["sentiment"]
+                else:
+                    preferred_opinion, preferred_sentiment = _choose_replacement_opinion(
+                        rng, preferred_opinion_bank, _opinion, _sentiment
+                    )
+                    if (preferred_opinion, preferred_sentiment) != (_opinion, _sentiment):
+                        new_opinion, new_sentiment = preferred_opinion, preferred_sentiment
+                    else:
+                        new_opinion, new_sentiment = _choose_replacement_opinion(rng, opinion_bank, _opinion, _sentiment)
+                    if (new_opinion, new_sentiment) == (_opinion, _sentiment):
+                        same_sentiment_candidates = [
+                            opinion for opinion in opinion_bank.get(_sentiment, []) if opinion != _opinion
+                        ]
+                        if same_sentiment_candidates:
+                            new_opinion = rng.choice(sorted(set(same_sentiment_candidates)))
+                        else:
+                            continue
                 new_triplet = (aspect, new_opinion, new_sentiment)
                 new_triplets[idx] = new_triplet
                 if prompt_style == "masked_mutual":
@@ -1260,7 +1334,12 @@ def build_augmentation_requests(
                         domain_prefix_style,
                     )
                     channel = "opinion_sentiment_channel"
-                add_request(row, new_triplets, channel, prompt, old_triplet, new_triplet)
+                before_count = len(requests)
+                add_request(row, new_triplets, channel, prompt, old_triplet, new_triplet, replacement_rank)
+                if len(requests) > before_count:
+                    requests[-1]["opinion_replacement_mode"] = opinion_replacement_mode
+                    if replacement_rank is not None:
+                        requests[-1]["opinion_replacement_rank"] = replacement_rank
 
     return requests
 

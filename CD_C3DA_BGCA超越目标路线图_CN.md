@@ -1,25 +1,33 @@
 # CD-C3DA 跨域 ASTE 超越 BGCA 目标路线图
 
-## 0. 当前推进重点：领域感知数据增强
+## 0. 当前推进重点：领域感知语义增强
 
 六组 BGCA 风格跨域实验已经跑完，当前平均 `raw F1`（原始 F1）为 49.86，平均 `fixed F1`（修正 F1）为 51.59。主要短板仍然是 `recall`（召回率）偏低，尤其是 `laptop14 -> restaurant`（笔记本到餐馆）方向。
 
-下一步不先扩大模型，也不先改 DANN（领域对抗）主体，而是优先改数据增强提示：在生成器训练和掩码增强请求中加入领域前缀，让生成器知道当前要生成哪个领域风格的句子。
+下一步不先扩大模型，也不先改 DANN（领域对抗）主体，contrastive learning（对比学习）也先放到后续单独消融。当前优先改数据增强：在已有 `domain_prefix_style=text`（文本式领域前缀）的基础上，把掩码增强里的观点词通道从随机成对替换改成 domain-aware semantic replacement（领域感知语义替换）。
 
-两种待验证前缀：
+当前保留并使用的领域前缀：
 
 ```text
 text:    target domain: [laptop14] ; masked aspect edit: ...
-bracket: [laptop14] masked aspect edit: ...
 ```
+
+新增观点词替换策略：
+
+```text
+--opinion_replacement_mode semantic_same_sentiment
+```
+
+它只在同一 sentiment（情感极性）内部替换 opinion（观点词），并优先选择目标域高精度伪标签里与当前 aspect（方面词）更相容的 opinion（观点词）。排序信号包括 target-domain opinion frequency（目标域观点词频率）、aspect-opinion co-occurrence（方面词-观点词共现）、target triplet count（目标域三元组共现）和 lexical similarity（词面相似度）。
 
 判断标准：
 
 ```text
-1. 先跑 rest16 -> laptop14 单组实验，分别比较 text 与 bracket。
-2. 与当前同方向基线对比：raw F1=46.14，fixed F1=47.69。
-3. 如果单组 raw F1 或 fixed F1 有稳定提升，再扩展到六组跨域实验。
-4. 如果提升主要来自 fixed F1，而 raw F1 不提升，则只作为辅助观察，不作为主结论。
+1. 先跑 rest16 -> laptop14 单组实验。
+2. 与当前 text 前缀结果对比：raw F1=46.63，fixed F1=48.98。
+3. 同时参考原六组基线同方向：raw F1=46.14，fixed F1=47.69。
+4. 如果 raw F1 稳定提升，再扩展到六组跨域实验。
+5. 如果新策略不如当前最好结果，先询问是否删除对应历史输出文件。
 ```
 
 ## 1. 项目目标

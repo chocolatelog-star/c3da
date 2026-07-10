@@ -573,6 +573,60 @@ def test_masked_mutual_opinion_channel_changes_sentiment_when_possible():
     assert any(req["old_triplet"][2] != req["new_triplet"][2] for req in opinion_requests)
 
 
+def test_semantic_same_sentiment_opinion_channel_keeps_sentiment_and_prefers_domain_match():
+    pseudo_rows = [
+        {
+            "id": "t1",
+            "text": "The keyboard is responsive.",
+            "label": "<pos> keyboard <opinion> responsive",
+            "sample_weight": 0.65,
+        },
+        {
+            "id": "t2",
+            "text": "The trackpad is smooth.",
+            "label": "<pos> trackpad <opinion> smooth",
+            "sample_weight": 0.65,
+        },
+        {
+            "id": "t3",
+            "text": "The service is terrible.",
+            "label": "<neg> service <opinion> terrible",
+            "sample_weight": 0.65,
+        },
+    ]
+    memory = {
+        "candidate_opinions_by_sentiment": {
+            "pos": ["smooth", "bright"],
+            "neg": ["terrible"],
+        },
+        "opinion_aspect_counts": {
+            "smooth|pos": {"keyboard": 4},
+            "bright|pos": {"keyboard": 0},
+        },
+        "target_triplet_counts": {
+            "keyboard|smooth|pos": 2,
+        },
+    }
+
+    requests = build_augmentation_requests(
+        [],
+        pseudo_rows,
+        per_row=1,
+        seed=7,
+        prompt_style="masked_mutual",
+        channel_mode="opinion",
+        domain_memory=memory,
+        opinion_replacement_mode="semantic_same_sentiment",
+    )
+
+    opinion_requests = [req for req in requests if req["channel"] == "masked_opinion_sentiment_channel"]
+    assert opinion_requests
+    assert all(req["old_triplet"][2] == req["new_triplet"][2] for req in opinion_requests)
+    assert any(req["old_triplet"][1] == "responsive" and req["new_triplet"][1] == "smooth" for req in opinion_requests)
+    assert all(req["opinion_replacement_mode"] == "semantic_same_sentiment" for req in opinion_requests)
+    assert all("opinion_replacement_rank" in req for req in opinion_requests)
+
+
 def test_augmentation_requests_can_use_explicit_cross_domain_memory():
     source_rows = [
         {

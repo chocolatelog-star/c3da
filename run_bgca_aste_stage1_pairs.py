@@ -57,6 +57,14 @@ def generator_tag(prompt_style: str) -> str:
     raise ValueError(f"unsupported generator prompt style: {prompt_style}")
 
 
+def augment_experiment_tag(base_tag: str, opinion_replacement_mode: str) -> str:
+    if opinion_replacement_mode == "coupled_random":
+        return base_tag
+    if opinion_replacement_mode == "semantic_same_sentiment":
+        return f"{base_tag}_semantic_same_sentiment"
+    raise ValueError(f"unsupported opinion replacement mode: {opinion_replacement_mode}")
+
+
 def metric_value(data: dict, *keys: str):
     current = data
     for key in keys:
@@ -232,9 +240,9 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, f"train_generator_{gen_tag}")
 
-    final_tag = f"strict_aug150_w020_{gen_tag}"
+    final_tag = augment_experiment_tag(f"strict_aug150_w020_{gen_tag}", args.opinion_replacement_mode)
     final_train_file = run_dir / f"final_train_{final_tag}.jsonl"
-    if not stage_done(status, f"augment_{gen_tag}", [final_train_file], args.rerun):
+    if not stage_done(status, f"augment_{final_tag}", [final_train_file], args.rerun):
         run_command(
             [
                 py,
@@ -252,6 +260,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "all",
                 "--domain_prefix_style",
                 args.domain_prefix_style,
+                "--opinion_replacement_mode",
+                args.opinion_replacement_mode,
                 "--augment_output_tag",
                 final_tag,
                 "--final_train_output_tag",
@@ -287,10 +297,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, f"augment_{gen_tag}")
+            mark_done(status_path, status, f"augment_{final_tag}")
 
-    final_dir = run_dir / "models" / f"final_dann_l0.03_strict_aug150_w020_{gen_tag}_ep{args.final_epochs}"
-    if not stage_done(status, f"train_final_{gen_tag}", [final_dir / "best" / "config.json"], args.rerun):
+    final_dir = run_dir / "models" / f"final_dann_l0.03_{final_tag}_ep{args.final_epochs}"
+    if not stage_done(status, f"train_final_{final_tag}", [final_dir / "best" / "config.json"], args.rerun):
         run_command(
             [
                 py,
@@ -325,11 +335,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, f"train_final_{gen_tag}")
+            mark_done(status_path, status, f"train_final_{final_tag}")
 
-    raw_metrics_path = run_dir / f"aste_metrics_raw_{gen_tag}.json"
-    fixed_metrics_path = run_dir / f"aste_metrics_fixed_{gen_tag}.json"
-    if not stage_done(status, f"evaluate_{gen_tag}", [raw_metrics_path, fixed_metrics_path], args.rerun):
+    raw_metrics_path = run_dir / f"aste_metrics_raw_{final_tag}.json"
+    fixed_metrics_path = run_dir / f"aste_metrics_fixed_{final_tag}.json"
+    if not stage_done(status, f"evaluate_{final_tag}", [raw_metrics_path, fixed_metrics_path], args.rerun):
         run_command(
             [
                 py,
@@ -359,16 +369,17 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 raw_metrics_path.write_text(raw_default.read_text(encoding="utf-8"), encoding="utf-8")
             if fixed_default.exists():
                 fixed_metrics_path.write_text(fixed_default.read_text(encoding="utf-8"), encoding="utf-8")
-            mark_done(status_path, status, f"evaluate_{gen_tag}")
+            mark_done(status_path, status, f"evaluate_{final_tag}")
 
     return summarize_pair(
         run_dir,
         source,
         target,
-        gen_tag,
+        final_tag,
         args.generator_prompt_style,
         args.augment_prompt_style,
         args.domain_prefix_style,
+        args.opinion_replacement_mode,
     )
 
 
@@ -376,16 +387,17 @@ def summarize_pair(
     run_dir: Path,
     source: str,
     target: str,
-    gen_tag: str,
+    final_tag: str,
     generator_prompt_style: str,
     configured_augment_prompt_style: str,
     configured_domain_prefix_style: str,
+    configured_opinion_replacement_mode: str,
 ) -> dict:
     pseudo_hp = read_json(run_dir / "target_pseudo_high_precision_analysis.json")
-    augment = read_json(run_dir / f"c3da_augment_analysis_strict_aug150_w020_{gen_tag}.json")
-    final_comp = read_json(run_dir / f"final_train_composition_analysis_strict_aug150_w020_{gen_tag}.json")
-    raw = read_json(run_dir / f"aste_metrics_raw_{gen_tag}.json")
-    fixed = read_json(run_dir / f"aste_metrics_fixed_{gen_tag}.json")
+    augment = read_json(run_dir / f"c3da_augment_analysis_{final_tag}.json")
+    final_comp = read_json(run_dir / f"final_train_composition_analysis_{final_tag}.json")
+    raw = read_json(run_dir / f"aste_metrics_raw_{final_tag}.json")
+    fixed = read_json(run_dir / f"aste_metrics_fixed_{final_tag}.json")
     hp_eval = pseudo_hp.get("hidden_gold_eval", {})
     hp_raw = hp_eval.get("raw_scores", {})
     return {
@@ -394,6 +406,7 @@ def summarize_pair(
         "generator_prompt_style": generator_prompt_style,
         "augment_prompt_style": augment.get("prompt_style", configured_augment_prompt_style),
         "domain_prefix_style": augment.get("domain_prefix_style", configured_domain_prefix_style),
+        "opinion_replacement_mode": augment.get("opinion_replacement_mode", configured_opinion_replacement_mode),
         "run_dir": str(run_dir),
         "source_rows": metric_value(final_comp, "source_rows_used"),
         "pseudo_hp_rows": pseudo_hp.get("selected_rows", ""),
@@ -420,6 +433,7 @@ def write_summary_legacy(output_root: Path, rows: list[dict]) -> None:
         "generator_prompt_style",
         "augment_prompt_style",
         "domain_prefix_style",
+        "opinion_replacement_mode",
         "run_dir",
         "source_rows",
         "pseudo_hp_rows",
@@ -446,8 +460,8 @@ def write_summary_legacy(output_root: Path, rows: list[dict]) -> None:
         "",
         "主指标使用 raw F1（原始F1），fixed F1（修正F1）仅作辅助分析。",
         "",
-        "| 迁移方向 | 生成器训练方式 | 增强方式 | 领域前缀 | 伪标签F1 | 增强条数 | 最终训练条数 | raw P | raw R | raw F1 | fixed F1 |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| 迁移方向 | 生成器训练方式 | 增强方式 | 领域前缀 | 观点词替换模式 | 伪标签F1 | 增强条数 | 最终训练条数 | raw P | raw R | raw F1 | fixed F1 |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         pair = f"{row['source']} -> {row['target']}"
@@ -459,6 +473,7 @@ def write_summary_legacy(output_root: Path, rows: list[dict]) -> None:
                     str(row.get("generator_prompt_style", "")),
                     str(row.get("augment_prompt_style", "")),
                     str(row.get("domain_prefix_style", "")),
+                    str(row.get("opinion_replacement_mode", "")),
                     fmt(row.get("pseudo_hp_f1")),
                     str(row.get("augment_selected_rows", "")),
                     str(row.get("final_train_rows", "")),
@@ -489,6 +504,7 @@ def write_summary(output_root: Path, rows: list[dict]) -> None:
         "generator_prompt_style",
         "augment_prompt_style",
         "domain_prefix_style",
+        "opinion_replacement_mode",
         "run_dir",
         "source_rows",
         "pseudo_hp_rows",
@@ -515,8 +531,8 @@ def write_summary(output_root: Path, rows: list[dict]) -> None:
         "",
         "主指标使用 raw F1（原始 F1），fixed F1（修正 F1）仅作为辅助分析。",
         "",
-        "| 跨域方向 | 生成器训练方式 | 增强方式 | 领域前缀 | 高精度伪标签 F1 | 增强条数 | 最终训练条数 | raw P | raw R | raw F1 | fixed F1 |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| 跨域方向 | 生成器训练方式 | 增强方式 | 领域前缀 | 观点词替换模式 | 高精度伪标签 F1 | 增强条数 | 最终训练条数 | raw P | raw R | raw F1 | fixed F1 |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         pair = f"{row['source']} -> {row['target']}"
@@ -528,6 +544,7 @@ def write_summary(output_root: Path, rows: list[dict]) -> None:
                     str(row.get("generator_prompt_style", "")),
                     str(row.get("augment_prompt_style", "")),
                     str(row.get("domain_prefix_style", "")),
+                    str(row.get("opinion_replacement_mode", "")),
                     fmt(row.get("pseudo_hp_f1")),
                     str(row.get("augment_selected_rows", "")),
                     str(row.get("final_train_rows", "")),
@@ -552,6 +569,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generator_prompt_style", choices=["label_to_text", "masked_mutual"], default="label_to_text")
     parser.add_argument("--augment_prompt_style", choices=["label_to_text", "masked_mutual"], default="masked_mutual")
     parser.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
+    parser.add_argument(
+        "--opinion_replacement_mode",
+        choices=["coupled_random", "semantic_same_sentiment"],
+        default="coupled_random",
+    )
     parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
     parser.add_argument("--extractor_epochs", type=int, default=25)
     parser.add_argument("--generator_epochs", type=int, default=8)

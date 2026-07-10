@@ -1852,6 +1852,7 @@ def augment(args: argparse.Namespace) -> None:
         composition_source_rows=composition_source_rows,
         target_domain_name=target_domain_name,
         domain_prefix_style=args.domain_prefix_style,
+        opinion_replacement_mode=args.opinion_replacement_mode,
     )
     output_tag = args.augment_output_tag
     write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_requests.jsonl", output_tag), requests)
@@ -1987,6 +1988,7 @@ def augment(args: argparse.Namespace) -> None:
         "prompt_style": args.augment_prompt_style,
         "augment_channel_mode": args.augment_channel_mode,
         "domain_prefix_style": args.domain_prefix_style,
+        "opinion_replacement_mode": args.opinion_replacement_mode,
         "target_domain_name": target_domain_name if args.domain_prefix_style != "none" else "",
         "output_tag": output_tag,
         "selected_output_path": str(tagged_output_path(run_dir, "c3da_two_channel_augmented_selected.jsonl", output_tag)),
@@ -2227,6 +2229,11 @@ def main() -> None:
     )
     p.add_argument("--augment_channel_mode", choices=["all", "aspect", "opinion"], default="all")
     p.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
+    p.add_argument(
+        "--opinion_replacement_mode",
+        choices=["coupled_random", "semantic_same_sentiment"],
+        default="coupled_random",
+    )
     p.add_argument("--augment_output_tag", default="")
     p.add_argument("--memory_path", default="")
     p.add_argument("--cuda", default="0")
