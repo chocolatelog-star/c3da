@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `5d12da3 Add semantic same-sentiment opinion augmentation` |
+| 当前代码版本 | `5157c2f Add semantic same-sentiment opinion augmentation` |
 | 当前分支 | `master` |
 | 主实验目录 | `runs\bgca_aste_stage1_baseline` |
 | 当前六组实验状态 | 已完成 |
@@ -37,7 +37,7 @@
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
-| 2026-07-10 | `5d12da3 Add semantic same-sentiment opinion augmentation` | 领域感知语义增强 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 新增 `--opinion_replacement_mode`（观点词替换模式），支持 `coupled_random`（旧版成对随机替换）和 `semantic_same_sentiment`（同情感语义替换）；新模式只在同一情感极性内替换 opinion（观点词），并按目标域出现频率、aspect-opinion（方面词-观点词）共现、目标域三元组共现和词面相似度排序；批量脚本使用独立 tag 保存新实验，避免覆盖旧结果；本轮暂不加入 contrastive learning（对比学习）。 | `runs\bgca_aste_stage1_semantic_opinion_text_v1` | 待跑 `rest16 -> laptop14` 单组验证 |
+| 2026-07-10 | `5157c2f Add semantic same-sentiment opinion augmentation` | 领域感知语义增强 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 新增 `--opinion_replacement_mode`（观点词替换模式），支持 `coupled_random`（旧版成对随机替换）和 `semantic_same_sentiment`（同情感语义替换）；新模式只在同一情感极性内替换 opinion（观点词），并按目标域出现频率、aspect-opinion（方面词-观点词）共现、目标域三元组共现和词面相似度排序；批量脚本使用独立 tag 保存新实验，避免覆盖旧结果；本轮暂不加入 contrastive learning（对比学习）。 | `runs\bgca_aste_stage1_semantic_opinion_text_v1` | 待跑 `rest16 -> laptop14` 单组验证 |
 | 2026-07-09 | `9e78904 Add domain prefix augmentation experiments` | 领域前缀掩码增强 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 新增 `--domain_prefix_style`（领域前缀风格），支持 `none`（不加前缀）、`text`（文本式前缀）、`bracket`（括号式前缀）；生成器训练阶段用源域前缀，数据增强阶段用目标域前缀；增强请求和增强样本记录领域前缀元数据；过滤生成文本中的领域前缀提示词泄漏；批量脚本支持断点续跑两种前缀实验。 | `runs\bgca_aste_stage1_domain_prompt_text_v1`、`runs\bgca_aste_stage1_domain_prompt_bracket_v1` | 待跑 `rest16 -> laptop14` 单组对比，基线为 raw F1=46.14、fixed F1=47.69 |
 | 2026-07-09 | `07e589f Update BGCA six-pair experiment results` | 六组 BGCA 风格跨域结果同步 | `实验记录与模型索引_CN.md` 等文档 | 汇总六组跨域实验，与 BGCA 论文 `label-to-text`（标签到文本）结果放在开头对比；记录平均 raw F1=49.86、fixed F1=51.59。 | `runs\bgca_aste_stage1_baseline` | 已完成六组实验 |
 | 2026-07-09 | `de435be Clarify generator and augment prompt styles` | 明确生成器训练方式和增强方式 | `run_bgca_aste_stage1_pairs.py`、相关文档 | 明确当前主流程是 `label_to_text`（标签到文本）生成器训练 + `masked_mutual`（互相掩码）数据增强，避免误认为完全等同 BGCA 原始流程。 | `runs\bgca_aste_stage1_baseline` | 已作为当前阶段基线 |
