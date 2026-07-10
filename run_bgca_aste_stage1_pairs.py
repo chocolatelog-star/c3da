@@ -272,6 +272,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "1",
                 "--augment_select_weight",
                 "0.2",
+                "--augment_select_max_opinion_ratio",
+                str(args.augment_select_max_opinion_ratio),
                 "--augment_select_require_raw_exact",
                 "--augment_select_require_model_filter_passed",
                 "--pseudo_train_source",
@@ -574,6 +576,7 @@ def parse_args() -> argparse.Namespace:
         choices=["coupled_random", "semantic_same_sentiment"],
         default="coupled_random",
     )
+    parser.add_argument("--augment_select_max_opinion_ratio", type=float, default=1.0)
     parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
     parser.add_argument("--extractor_epochs", type=int, default=25)
     parser.add_argument("--generator_epochs", type=int, default=8)

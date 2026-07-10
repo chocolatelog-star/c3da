@@ -20,10 +20,21 @@ text:    target domain: [laptop14] ; masked aspect edit: ...
 
 它只在同一 sentiment（情感极性）内部替换 opinion（观点词），并优先选择目标域高精度伪标签里与当前 aspect（方面词）更相容的 opinion（观点词）。排序信号包括 target-domain opinion frequency（目标域观点词频率）、aspect-opinion co-occurrence（方面词-观点词共现）、target triplet count（目标域三元组共现）和 lexical similarity（词面相似度）。
 
+v1 单组结果为 raw F1=45.46、fixed F1=47.26，低于当前最好 text 前缀版本，因此已经删除对应输出目录。v2 在 v1 基础上做两个收紧：
+
+```text
+1. 选入增强数据时加入 4:6 通道比例控制：
+   --augment_select_max_opinion_ratio 0.6
+   即 opinion channel（观点词通道）最多 60%，aspect channel（方面词通道）尽量 40%。
+
+2. 加强 opinion（观点词）边界过滤：
+   过滤 [opi]、no、on its feet 等异常观点词边界。
+```
+
 判断标准：
 
 ```text
-1. 先跑 rest16 -> laptop14 单组实验。
+1. 先跑 rest16 -> laptop14 单组 v2 实验。
 2. 与当前 text 前缀结果对比：raw F1=46.63，fixed F1=48.98。
 3. 同时参考原六组基线同方向：raw F1=46.14，fixed F1=47.69。
 4. 如果 raw F1 稳定提升，再扩展到六组跨域实验。

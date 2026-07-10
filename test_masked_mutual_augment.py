@@ -7,6 +7,10 @@ from t5_aste_augment import (
     rank_replacement_aspects,
 )
 from t5_aste_data import parse_triplet_text_list
+from t5_aste_pipeline import (
+    opinion_augmented_label_boundary_valid,
+    select_high_value_augmented_rows,
+)
 
 
 def test_domain_memory_keeps_high_confidence_target_aspects():
@@ -808,3 +812,75 @@ def test_augmentation_requests_skip_incompatible_aspect_replacements():
     assert requests
     assert all(req["new_triplet"][0] != "desktop" for req in requests)
     assert any(req["new_triplet"][0] == "keyboard" for req in requests)
+
+
+def test_opinion_augmented_label_boundary_filter_rejects_bad_opinions():
+    assert not opinion_augmented_label_boundary_valid(
+        {
+            "augmentation": "masked_opinion_sentiment_channel",
+            "label": "<pos> iphotos <opinion> [opi]",
+        }
+    )
+    assert not opinion_augmented_label_boundary_valid(
+        {
+            "augmentation": "masked_opinion_sentiment_channel",
+            "label": "<neg> windows <opinion> on its feet",
+        }
+    )
+    assert not opinion_augmented_label_boundary_valid(
+        {
+            "augmentation": "masked_opinion_sentiment_channel",
+            "label": "<neg> bluetooth <opinion> no",
+        }
+    )
+    assert opinion_augmented_label_boundary_valid(
+        {
+            "augmentation": "masked_opinion_sentiment_channel",
+            "label": "<neg> web access <opinion> disappointing",
+        }
+    )
+
+
+def test_select_high_value_augmented_rows_caps_opinion_channel_ratio():
+    rows = []
+    for idx in range(8):
+        rows.append(
+            {
+                "text": f"opinion {idx}",
+                "label": "<pos> keyboard <opinion> responsive",
+                "augmentation": "masked_opinion_sentiment_channel",
+                "base_id": f"op{idx}",
+                "sample_weight": 0.275,
+                "quality_score": 1.0,
+                "quality_flags": {"model_filter_raw_exact": True, "model_filter_fixed_exact": True},
+                "model_filter_passed": True,
+            }
+        )
+    for idx in range(4):
+        rows.append(
+            {
+                "text": f"aspect {idx}",
+                "label": "<pos> trackpad <opinion> responsive",
+                "augmentation": "masked_aspect_channel",
+                "base_id": f"asp{idx}",
+                "sample_weight": 0.235,
+                "quality_score": 0.5,
+                "quality_flags": {"model_filter_raw_exact": True, "model_filter_fixed_exact": True},
+                "model_filter_passed": True,
+            }
+        )
+
+    selected, stats = select_high_value_augmented_rows(
+        rows,
+        max_rows=10,
+        max_per_base=1,
+        selected_weight=0.2,
+        max_opinion_ratio=0.6,
+        require_model_filter_passed=True,
+    )
+
+    distribution = stats["augmentation_distribution"]
+    assert len(selected) == 10
+    assert distribution["masked_opinion_sentiment_channel"] == 6
+    assert distribution["masked_aspect_channel"] == 4
+    assert stats["max_opinion_ratio"] == 0.6

@@ -451,6 +451,40 @@ def augmentation_channel_analysis(rows: list[dict]) -> dict:
     return analysis
 
 
+OPINION_AUGMENT_CHANNELS = {
+    "opinion_sentiment_channel",
+    "masked_opinion_sentiment_channel",
+    "masked_opinion_sentiment_editor",
+}
+BAD_OPINION_BOUNDARY_TOKENS = {"[opi]", "[opinion]", "[asp]", "[aspect]", "<opinion>"}
+BAD_SINGLE_TOKEN_OPINIONS = {"no", "none", "yes", "ok", "okay"}
+BAD_OPINION_PREFIXES = {"on", "in", "at", "of", "for", "with", "by", "as", "to", "from"}
+
+
+def opinion_augmented_label_boundary_valid(row: dict) -> bool:
+    if row.get("augmentation") not in OPINION_AUGMENT_CHANNELS:
+        return True
+    triplets = parse_triplet_text_list(canonicalize_triplet_text(row.get("label", "")))
+    if not triplets:
+        return False
+    for _aspect, opinion, _sentiment in triplets:
+        normalized = " ".join(str(opinion).lower().split())
+        tokens = normalized.split()
+        if not normalized:
+            return False
+        if any(token in normalized for token in BAD_OPINION_BOUNDARY_TOKENS):
+            return False
+        if normalized in BAD_SINGLE_TOKEN_OPINIONS:
+            return False
+        if tokens and tokens[0] in BAD_OPINION_PREFIXES:
+            return False
+    return True
+
+
+def _is_opinion_augment_channel(row: dict) -> bool:
+    return row.get("augmentation") in OPINION_AUGMENT_CHANNELS
+
+
 def sample_weight_summary(rows: list[dict]) -> dict:
     weights = [float(row["sample_weight"]) for row in rows if "sample_weight" in row]
     if not weights:
@@ -909,6 +943,7 @@ def select_high_value_augmented_rows(
     max_rows: int = 200,
     max_per_base: int = 1,
     selected_weight: float = 0.35,
+    max_opinion_ratio: float = 1.0,
     require_raw_exact: bool = False,
     require_model_filter_passed: bool = False,
 ) -> tuple[list[dict], dict]:
@@ -926,9 +961,11 @@ def select_high_value_augmented_rows(
             "max_rows": max_rows,
             "max_per_base": max_per_base,
             "selected_weight": selected_weight,
+            "max_opinion_ratio": max_opinion_ratio,
             "require_raw_exact": require_raw_exact,
             "require_model_filter_passed": require_model_filter_passed,
             "skipped_by_base_limit": 0,
+            "skipped_by_channel_ratio": 0,
         }
 
     def rank_key(row: dict) -> tuple:
@@ -947,11 +984,20 @@ def select_high_value_augmented_rows(
     selected_keys: set[tuple[str, str]] = set()
     base_counts: Counter[str] = Counter()
     skipped_by_base_limit = 0
-    for row in ranked_rows:
+    skipped_by_channel_ratio = 0
+    opinion_cap = max_rows if max_opinion_ratio >= 1.0 else max(0, int(max_rows * max_opinion_ratio))
+    opinion_selected = 0
+
+    def try_select(row: dict, enforce_channel_ratio: bool) -> bool:
+        nonlocal skipped_by_base_limit, skipped_by_channel_ratio, opinion_selected
         base_key = row.get("base_id") or row.get("base_text") or row.get("text", "")
         if max_per_base > 0 and base_counts[base_key] >= max_per_base:
             skipped_by_base_limit += 1
-            continue
+            return False
+        is_opinion_channel = _is_opinion_augment_channel(row)
+        if enforce_channel_ratio and is_opinion_channel and opinion_selected >= opinion_cap:
+            skipped_by_channel_ratio += 1
+            return False
         selected_row = {
             **row,
             "original_sample_weight": row.get("sample_weight"),
@@ -965,8 +1011,22 @@ def select_high_value_augmented_rows(
         )
         selected_keys.add((row.get("text", "").lower(), canonicalize_triplet_text(row.get("label", "")).lower()))
         base_counts[base_key] += 1
+        if is_opinion_channel:
+            opinion_selected += 1
+        return True
+
+    for row in ranked_rows:
+        try_select(row, enforce_channel_ratio=True)
         if len(selected) >= max_rows:
             break
+    if len(selected) < max_rows and max_opinion_ratio < 1.0:
+        for row in ranked_rows:
+            key = (row.get("text", "").lower(), canonicalize_triplet_text(row.get("label", "")).lower())
+            if key in selected_keys:
+                continue
+            try_select(row, enforce_channel_ratio=False)
+            if len(selected) >= max_rows:
+                break
 
     if len(selected) >= max_rows and max_per_base > 0:
         for row in ranked_rows:
@@ -985,9 +1045,11 @@ def select_high_value_augmented_rows(
         "max_rows": max_rows,
         "max_per_base": max_per_base,
         "selected_weight": selected_weight,
+        "max_opinion_ratio": max_opinion_ratio,
         "require_raw_exact": require_raw_exact,
         "require_model_filter_passed": require_model_filter_passed,
         "skipped_by_base_limit": skipped_by_base_limit,
+        "skipped_by_channel_ratio": skipped_by_channel_ratio,
         "sample_weight_summary": sample_weight_summary(selected),
         "augmentation_distribution": augmentation_distribution(selected),
         "sentiment_distribution": sentiment_distribution(selected),
@@ -1917,6 +1979,8 @@ def augment(args: argparse.Namespace) -> None:
                 "domain_name": req.get("domain_name"),
                 "domain_prefix_style": req.get("domain_prefix_style"),
                 "domain_prefix": req.get("domain_prefix"),
+                "opinion_replacement_mode": req.get("opinion_replacement_mode"),
+                "opinion_replacement_rank": req.get("opinion_replacement_rank"),
             }
         )
     write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_augmented.jsonl", output_tag), augmented_rows)
@@ -1972,11 +2036,16 @@ def augment(args: argparse.Namespace) -> None:
         write_jsonl(tagged_output_path(run_dir, "c3da_model_filter_removed.jsonl", output_tag), model_filter_removed)
         dump_json(tagged_output_path(run_dir, "c3da_model_filter_analysis.json", output_tag), model_filter_stats)
 
+    before_opinion_boundary_filter = len(augmented_rows)
+    augmented_rows = [row for row in augmented_rows if opinion_augmented_label_boundary_valid(row)]
+    filtered_opinion_boundary = before_opinion_boundary_filter - len(augmented_rows)
+
     selected_augmented_rows, selection_stats = select_high_value_augmented_rows(
         augmented_rows,
         max_rows=args.augment_select_max_rows,
         max_per_base=args.augment_select_max_per_base,
         selected_weight=args.augment_select_weight,
+        max_opinion_ratio=args.augment_select_max_opinion_ratio,
         require_raw_exact=args.augment_select_require_raw_exact,
         require_model_filter_passed=args.augment_select_require_model_filter_passed,
     )
@@ -1999,6 +2068,7 @@ def augment(args: argparse.Namespace) -> None:
         "final_augmented_rows": len(augmented_rows),
         "filtered_inconsistent": filtered_inconsistent,
         "filtered_channel_inconsistent": filtered_channel_inconsistent,
+        "filtered_opinion_boundary": filtered_opinion_boundary,
         "quality_filter": dict(quality_filter_counts),
         "filtered_prompt_leak": quality_filter_counts.get("prompt_leak", 0),
         "augmentation_distribution": augmentation_distribution(augmented_rows),
@@ -2242,6 +2312,7 @@ def main() -> None:
     p.add_argument("--augment_select_max_rows", type=int, default=200)
     p.add_argument("--augment_select_max_per_base", type=int, default=1)
     p.add_argument("--augment_select_weight", type=float, default=0.35)
+    p.add_argument("--augment_select_max_opinion_ratio", type=float, default=1.0)
     p.add_argument("--augment_select_require_raw_exact", action="store_true")
     p.add_argument("--augment_select_require_model_filter_passed", action="store_true")
     p.add_argument("--composition_source_file", default="")
