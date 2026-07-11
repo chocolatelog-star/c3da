@@ -45,6 +45,29 @@ v2 4:6: raw F1=42.78, fixed F1=44.71，已删除输出文件和模型目录。
 5. 如果新策略不如当前最好结果，先询问是否删除对应历史输出文件。
 ```
 
+### GloVe 情感向量诊断（2026-07-11）
+
+已新增 GloVe（全局词向量）后端，使用：
+
+```text
+J:\models\glove.6B.300d.txt
+--sentiment_vector_backend glove
+--sentiment_vector_min_margin 0.05
+```
+
+诊断结果：
+
+```text
+观点词总数：851
+成功编码：827
+覆盖率：97.18%
+pos-neg 中心相似度：0.8258
+pos-neu 中心相似度：0.9223
+neg-neu 中心相似度：0.8849
+```
+
+覆盖率满足要求，但三个情感中心过近，尤其正向与中性中心几乎重叠。替换样例比 T5 静态编码有所改善，但仍存在 `large -> great`、`four gigabytes -> great`、`no complaints -> plenty` 等语义不等价替换。根据“先诊断再训练”的约定，当前不启动最终训练；下一步需要显式构建 polarity direction（情感极性方向）或加入最小原词相似度约束后再次诊断。
+
 ## 1. 项目目标
 
 本项目的最终目标不是简单复现 C3DA，而是把 C3DA 改造成一个完整的跨域 ASTE 框架，并在跨域能力上超过 BGCA 约 1 到 2 个 F1 点。

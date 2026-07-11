@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -156,6 +158,139 @@ def encode_text_embeddings(
             for text, vector in zip(batch, pooled.detach().cpu().tolist()):
                 embeddings[str(text)] = [float(value) for value in vector]
     return embeddings
+
+
+def _normalize_vector(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0.0:
+        return []
+    return [round(value / norm, 6) for value in vector]
+
+
+def _glove_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+(?:'[a-z0-9]+)?", text.lower())
+
+
+def load_glove_opinion_embeddings(
+    glove_path: str | Path,
+    opinions: list[str],
+) -> tuple[dict[str, list[float]], dict]:
+    from tqdm import tqdm
+
+    path = Path(glove_path)
+    if not path.exists():
+        raise FileNotFoundError(f"GloVe file not found: {path}")
+    opinion_tokens = {opinion: _glove_tokens(opinion) for opinion in opinions}
+    needed_tokens = {token for tokens in opinion_tokens.values() for token in tokens}
+    token_vectors: dict[str, list[float]] = {}
+    file_size = path.stat().st_size
+    with path.open("r", encoding="utf-8", errors="ignore") as handle, tqdm(
+        total=file_size,
+        desc=f"load-glove:{path.name}",
+        unit="B",
+        unit_scale=True,
+    ) as progress:
+        for line in handle:
+            progress.update(len(line.encode("utf-8")))
+            word, separator, values_text = line.partition(" ")
+            if not separator or word not in needed_tokens:
+                continue
+            try:
+                token_vectors[word] = [float(value) for value in values_text.split()]
+            except ValueError:
+                continue
+            if len(token_vectors) == len(needed_tokens):
+                break
+
+    embeddings: dict[str, list[float]] = {}
+    partial_coverage = 0
+    for opinion, tokens in opinion_tokens.items():
+        vectors = [token_vectors[token] for token in tokens if token in token_vectors]
+        if not vectors:
+            continue
+        if len(vectors) < len(tokens):
+            partial_coverage += 1
+        width = len(vectors[0])
+        compatible = [vector for vector in vectors if len(vector) == width]
+        if not compatible:
+            continue
+        averaged = [sum(vector[idx] for vector in compatible) / len(compatible) for idx in range(width)]
+        normalized = _normalize_vector(averaged)
+        if normalized:
+            embeddings[opinion] = normalized
+
+    missing = sorted(opinion for opinion in opinions if opinion not in embeddings)
+    stats = {
+        "glove_path": str(path),
+        "requested_opinions": len(opinions),
+        "needed_tokens": len(needed_tokens),
+        "found_tokens": len(token_vectors),
+        "embedded_opinions": len(embeddings),
+        "oov_opinions": len(missing),
+        "partial_coverage_opinions": partial_coverage,
+        "coverage": round(len(embeddings) / max(1, len(opinions)), 6),
+        "oov_examples": missing[:100],
+    }
+    return embeddings, stats
+
+
+def build_weighted_sentiment_centroids(
+    rows: list[dict],
+    opinion_embeddings: dict[str, list[float]],
+) -> tuple[dict[str, list[float]], dict]:
+    normalized_embeddings = {
+        " ".join(opinion.lower().split()): vector for opinion, vector in opinion_embeddings.items()
+    }
+    weighted_sums: dict[str, list[float]] = {}
+    weight_totals: Counter[str] = Counter()
+    sentiment_rows: Counter[str] = Counter()
+    for row in rows:
+        weight = float(row.get("sample_weight", 1.0) or 1.0)
+        for _aspect, opinion, sentiment in parse_triplet_text_list(row.get("label", "")):
+            vector = normalized_embeddings.get(" ".join(opinion.lower().split()))
+            if not vector or sentiment not in {"pos", "neg", "neu"}:
+                continue
+            if sentiment not in weighted_sums:
+                weighted_sums[sentiment] = [0.0] * len(vector)
+            if len(weighted_sums[sentiment]) != len(vector):
+                continue
+            for idx, value in enumerate(vector):
+                weighted_sums[sentiment][idx] += weight * value
+            weight_totals[sentiment] += weight
+            sentiment_rows[sentiment] += 1
+    centroids = {
+        sentiment: _normalize_vector(vector)
+        for sentiment, vector in weighted_sums.items()
+        if weight_totals[sentiment] > 0
+    }
+    stats = {
+        "sentiment_rows": {sentiment: int(sentiment_rows.get(sentiment, 0)) for sentiment in ("pos", "neg", "neu")},
+        "sentiment_weight_totals": {
+            sentiment: round(float(weight_totals.get(sentiment, 0.0)), 6)
+            for sentiment in ("pos", "neg", "neu")
+        },
+    }
+    return centroids, stats
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    numerator = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
+
+
+def sentiment_centroid_similarity(centroids: dict[str, list[float]]) -> dict[str, float]:
+    pairs = (("pos", "neg"), ("pos", "neu"), ("neg", "neu"))
+    return {
+        f"{left}_{right}": round(cosine_similarity(centroids.get(left, []), centroids.get(right, [])), 6)
+        for left, right in pairs
+        if left in centroids and right in centroids
+    }
 
 
 def load_split(dataset: str, split: str) -> list[dict]:
@@ -1919,24 +2054,55 @@ def augment(args: argparse.Namespace) -> None:
     if args.opinion_replacement_mode == "sentiment_vector":
         if domain_memory is None:
             domain_memory = build_target_memory(pseudo_rows)
-        embedding_model_path = Path(args.sentiment_vector_model_path) if args.sentiment_vector_model_path else model_path
         opinion_texts = collect_opinion_texts_for_embedding(source_rows + pseudo_rows, domain_memory)
-        opinion_embeddings = encode_text_embeddings(
-            model_path=embedding_model_path,
-            texts=opinion_texts,
-            batch_size=args.embedding_batch_size,
-            cuda=args.cuda,
-        )
+        if args.sentiment_vector_backend == "glove":
+            opinion_embeddings, embedding_stats = load_glove_opinion_embeddings(
+                args.glove_path,
+                opinion_texts,
+            )
+            weighted_rows = [
+                {**row, "sample_weight": float(row.get("sample_weight", 1.0) or 1.0)}
+                for row in source_rows
+            ] + [
+                {**row, "sample_weight": float(row.get("sample_weight", 0.65) or 0.65)}
+                for row in pseudo_rows
+            ]
+            sentiment_centroids, centroid_stats = build_weighted_sentiment_centroids(
+                weighted_rows,
+                opinion_embeddings,
+            )
+            embedding_model_path = Path(args.glove_path)
+        else:
+            embedding_model_path = Path(args.sentiment_vector_model_path) if args.sentiment_vector_model_path else model_path
+            opinion_embeddings = encode_text_embeddings(
+                model_path=embedding_model_path,
+                texts=opinion_texts,
+                batch_size=args.embedding_batch_size,
+                cuda=args.cuda,
+            )
+            embedding_stats = {
+                "requested_opinions": len(opinion_texts),
+                "embedded_opinions": len(opinion_embeddings),
+                "coverage": round(len(opinion_embeddings) / max(1, len(opinion_texts)), 6),
+            }
+            sentiment_centroids = {}
+            centroid_stats = {}
         domain_memory = {
             **domain_memory,
             "opinion_embeddings": opinion_embeddings,
         }
+        if sentiment_centroids:
+            domain_memory["sentiment_centroids"] = sentiment_centroids
         sentiment_vector_stats = {
             "enabled": True,
+            "backend": args.sentiment_vector_backend,
             "model_path": str(embedding_model_path),
             "opinion_texts": len(opinion_texts),
             "embedded_opinions": len(opinion_embeddings),
             "min_margin": args.sentiment_vector_min_margin,
+            "embedding_stats": embedding_stats,
+            "centroid_stats": centroid_stats,
+            "centroid_similarity": sentiment_centroid_similarity(sentiment_centroids),
         }
     composition_source_rows = []
     if args.composition_source_file:
@@ -1959,6 +2125,37 @@ def augment(args: argparse.Namespace) -> None:
     )
     output_tag = args.augment_output_tag
     write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_requests.jsonl", output_tag), requests)
+
+    if args.opinion_replacement_mode == "sentiment_vector":
+        vector_requests = [
+            row for row in requests
+            if row.get("opinion_replacement_mode") == "sentiment_vector"
+        ]
+        margins = [
+            float((row.get("opinion_replacement_rank") or {}).get("features", {}).get("sentiment_margin"))
+            for row in vector_requests
+            if (row.get("opinion_replacement_rank") or {}).get("features", {}).get("sentiment_margin") is not None
+        ]
+        sentiment_vector_stats["request_rows"] = len(vector_requests)
+        sentiment_vector_stats["margin_summary"] = {
+            "count": len(margins),
+            "min": min(margins) if margins else None,
+            "mean": sum(margins) / len(margins) if margins else None,
+            "max": max(margins) if margins else None,
+        }
+        sentiment_vector_stats["replacement_examples"] = [
+            {
+                "old_triplet": row.get("old_triplet"),
+                "new_triplet": row.get("new_triplet"),
+                "rank": row.get("opinion_replacement_rank"),
+            }
+            for row in vector_requests[:50]
+        ]
+        diagnostics_path = tagged_output_path(run_dir, "sentiment_vector_diagnostics.json", output_tag)
+        dump_json(diagnostics_path, sentiment_vector_stats)
+        if args.sentiment_vector_diagnostics_only:
+            print({"sentiment_vector_diagnostics": str(diagnostics_path), **sentiment_vector_stats})
+            return
 
     generated_texts = generate_texts(
         model_path=model_path,
@@ -2347,7 +2544,10 @@ def main() -> None:
         default="coupled_random",
     )
     p.add_argument("--sentiment_vector_model_path", default="")
+    p.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
+    p.add_argument("--glove_path", default=r"J:\models\glove.6B.300d.txt")
     p.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
+    p.add_argument("--sentiment_vector_diagnostics_only", action="store_true")
     p.add_argument("--augment_output_tag", default="")
     p.add_argument("--memory_path", default="")
     p.add_argument("--cuda", default="0")

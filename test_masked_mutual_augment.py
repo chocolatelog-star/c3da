@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 from t5_aste_augment import (
     aspect_replacement_compatible,
     build_aspect_rewrite_prompt,
@@ -9,6 +12,8 @@ from t5_aste_augment import (
 )
 from t5_aste_data import parse_triplet_text_list
 from t5_aste_pipeline import (
+    build_weighted_sentiment_centroids,
+    load_glove_opinion_embeddings,
     opinion_augmented_label_boundary_valid,
     select_high_value_augmented_rows,
 )
@@ -708,6 +713,47 @@ def test_sentiment_vector_opinion_channel_uses_centroid_margin():
     assert all(req["old_triplet"][2] == req["new_triplet"][2] for req in opinion_requests)
     assert any(req["old_triplet"][1] == "responsive" and req["new_triplet"][1] == "smooth" for req in opinion_requests)
     assert all(req["opinion_replacement_rank"]["features"]["sentiment_margin"] >= 0.1 for req in opinion_requests)
+
+
+def test_glove_opinion_embeddings_average_multiword_tokens_and_report_oov():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        glove_path = Path(tmp_dir) / "glove.txt"
+        glove_path.write_text(
+            "good 1.0 0.0\n"
+            "battery 0.0 1.0\n"
+            "life 0.0 3.0\n",
+            encoding="utf-8",
+        )
+        embeddings, stats = load_glove_opinion_embeddings(
+            glove_path,
+            ["good", "battery life", "missing phrase"],
+        )
+
+    assert embeddings["good"] == [1.0, 0.0]
+    assert embeddings["battery life"] == [0.0, 1.0]
+    assert "missing phrase" not in embeddings
+    assert stats["requested_opinions"] == 3
+    assert stats["embedded_opinions"] == 2
+    assert stats["oov_opinions"] == 1
+
+
+def test_weighted_sentiment_centroids_use_source_and_pseudo_weights():
+    rows = [
+        {"label": "<pos> battery <opinion> good", "sample_weight": 1.0},
+        {"label": "<pos> screen <opinion> nice", "sample_weight": 0.5},
+        {"label": "<neg> service <opinion> bad", "sample_weight": 1.0},
+    ]
+    embeddings = {
+        "good": [1.0, 0.0],
+        "nice": [0.0, 1.0],
+        "bad": [-1.0, 0.0],
+    }
+
+    centroids, stats = build_weighted_sentiment_centroids(rows, embeddings)
+
+    assert centroids["pos"] == [0.894427, 0.447214]
+    assert centroids["neg"] == [-1.0, 0.0]
+    assert stats["sentiment_rows"] == {"pos": 2, "neg": 1, "neu": 0}
 
 
 def test_augmentation_requests_can_use_explicit_cross_domain_memory():

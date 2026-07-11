@@ -57,13 +57,18 @@ def generator_tag(prompt_style: str) -> str:
     raise ValueError(f"unsupported generator prompt style: {prompt_style}")
 
 
-def augment_experiment_tag(base_tag: str, opinion_replacement_mode: str) -> str:
+def augment_experiment_tag(
+    base_tag: str,
+    opinion_replacement_mode: str,
+    sentiment_vector_backend: str = "t5",
+) -> str:
     if opinion_replacement_mode == "coupled_random":
         return base_tag
     if opinion_replacement_mode == "semantic_same_sentiment":
         return f"{base_tag}_semantic_same_sentiment"
     if opinion_replacement_mode == "sentiment_vector":
-        return f"{base_tag}_sentiment_vector"
+        suffix = "sentiment_vector_glove" if sentiment_vector_backend == "glove" else "sentiment_vector"
+        return f"{base_tag}_{suffix}"
     raise ValueError(f"unsupported opinion replacement mode: {opinion_replacement_mode}")
 
 
@@ -242,7 +247,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, f"train_generator_{gen_tag}")
 
-    final_tag = augment_experiment_tag(f"strict_aug150_w020_{gen_tag}", args.opinion_replacement_mode)
+    final_tag = augment_experiment_tag(
+        f"strict_aug150_w020_{gen_tag}",
+        args.opinion_replacement_mode,
+        args.sentiment_vector_backend,
+    )
     final_train_file = run_dir / f"final_train_{final_tag}.jsonl"
     if not stage_done(status, f"augment_{final_tag}", [final_train_file], args.rerun):
         run_command(
@@ -266,6 +275,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.opinion_replacement_mode,
                 "--sentiment_vector_model_path",
                 args.sentiment_vector_model_path,
+                "--sentiment_vector_backend",
+                args.sentiment_vector_backend,
+                "--glove_path",
+                args.glove_path,
                 "--sentiment_vector_min_margin",
                 str(args.sentiment_vector_min_margin),
                 "--augment_output_tag",
@@ -583,6 +596,8 @@ def parse_args() -> argparse.Namespace:
         default="coupled_random",
     )
     parser.add_argument("--sentiment_vector_model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
+    parser.add_argument("--glove_path", default=r"J:\models\glove.6B.300d.txt")
     parser.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
     parser.add_argument("--augment_select_max_opinion_ratio", type=float, default=1.0)
     parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
