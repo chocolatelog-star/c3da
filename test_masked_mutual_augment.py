@@ -12,11 +12,58 @@ from t5_aste_augment import (
 )
 from t5_aste_data import parse_triplet_text_list
 from t5_aste_pipeline import (
+    build_sentiment_polarity_axis,
     build_weighted_sentiment_centroids,
+    filter_augmented_rows_by_model_predictions_channel_aware,
     load_glove_opinion_embeddings,
     opinion_augmented_label_boundary_valid,
     select_high_value_augmented_rows,
 )
+
+
+def test_polarity_axis_filters_semantically_distant_candidates():
+    rows = [
+        {"label": "<pos> screen <opinion> excellent", "sample_weight": 1.0},
+        {"label": "<neg> screen <opinion> terrible", "sample_weight": 1.0},
+    ]
+    embeddings = {
+        "good": [1.0, 0.0], "excellent": [0.9, 0.1],
+        "terrible": [-1.0, 0.0], "large": [0.2, 0.98],
+    }
+    centroids, _ = build_weighted_sentiment_centroids(rows, embeddings)
+    axis, thresholds, _ = build_sentiment_polarity_axis(rows, embeddings, centroids)
+    memory = {
+        "opinion_embeddings": embeddings,
+        "sentiment_centroids": centroids,
+        "sentiment_polarity_axis": axis,
+        "sentiment_polarity_thresholds": thresholds,
+        "candidate_opinions_by_sentiment": {"pos": ["excellent", "large"]},
+        "opinion_counts_by_sentiment": {"pos": {"excellent": 1, "large": 1}},
+        "opinion_aspect_counts": {"excellent|pos": {"screen": 1}},
+    }
+    ranked = rank_sentiment_vector_replacement_opinions(
+        "screen", "good", "pos", memory["candidate_opinions_by_sentiment"], memory,
+        use_polarity_axis=True, min_old_similarity=0.35, no_cooccurrence_min_similarity=0.50,
+    )
+    assert [item["opinion"] for item in ranked] == ["excellent"]
+
+
+def test_channel_filter_requires_requested_opinion_similarity_and_polarity():
+    row = {
+        "text": "The screen is large.",
+        "label": "<pos> screen <opinion> excellent",
+        "augmentation": "masked_opinion_sentiment_channel",
+        "new_triplet": ["screen", "excellent", "pos"],
+    }
+    embeddings = {"excellent": [1.0, 0.0], "large": [0.0, 1.0]}
+    kept, removed, _ = filter_augmented_rows_by_model_predictions_channel_aware(
+        [row], ["<pos> screen <opinion> large"],
+        opinion_embeddings=embeddings, polarity_axis=[1.0, 0.0],
+        polarity_thresholds={"pos": 0.2, "neg": -0.2, "neu_abs": 0.1},
+        opinion_similarity_min=0.45, require_opinion_polarity=True,
+    )
+    assert not kept
+    assert removed[0]["model_filter_reason"] == "opinion_similarity_mismatch"
 
 
 def test_domain_memory_keeps_high_confidence_target_aspects():

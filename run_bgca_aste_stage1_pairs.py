@@ -61,6 +61,7 @@ def augment_experiment_tag(
     base_tag: str,
     opinion_replacement_mode: str,
     sentiment_vector_backend: str = "t5",
+    use_polarity_axis: bool = False,
 ) -> str:
     if opinion_replacement_mode == "coupled_random":
         return base_tag
@@ -68,7 +69,8 @@ def augment_experiment_tag(
         return f"{base_tag}_semantic_same_sentiment"
     if opinion_replacement_mode == "sentiment_vector":
         suffix = "sentiment_vector_glove" if sentiment_vector_backend == "glove" else "sentiment_vector"
-        return f"{base_tag}_{suffix}"
+        polarity_suffix = "_polarity_axis" if use_polarity_axis else ""
+        return f"{base_tag}_{suffix}{polarity_suffix}"
     raise ValueError(f"unsupported opinion replacement mode: {opinion_replacement_mode}")
 
 
@@ -251,6 +253,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         f"strict_aug150_w020_{gen_tag}",
         args.opinion_replacement_mode,
         args.sentiment_vector_backend,
+        args.sentiment_vector_use_polarity_axis,
     )
     final_train_file = run_dir / f"final_train_{final_tag}.jsonl"
     if not stage_done(status, f"augment_{final_tag}", [final_train_file], args.rerun):
@@ -281,6 +284,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.glove_path,
                 "--sentiment_vector_min_margin",
                 str(args.sentiment_vector_min_margin),
+                "--sentiment_vector_min_old_similarity",
+                str(args.sentiment_vector_min_old_similarity),
+                "--sentiment_vector_no_cooccurrence_min_similarity",
+                str(args.sentiment_vector_no_cooccurrence_min_similarity),
+                *(["--sentiment_vector_use_polarity_axis"] if args.sentiment_vector_use_polarity_axis else []),
                 "--augment_output_tag",
                 final_tag,
                 "--final_train_output_tag",
@@ -311,6 +319,9 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "1",
                 "--model_filter_no_constrained_decoding",
                 "--model_filter_channel_aware",
+                "--model_filter_opinion_similarity_min",
+                str(args.model_filter_opinion_similarity_min),
+                *(["--model_filter_require_opinion_polarity"] if args.model_filter_require_opinion_polarity else []),
                 "--cuda",
                 args.cuda,
                 "--no_task_prefix",
@@ -599,6 +610,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
     parser.add_argument("--glove_path", default=r"J:\models\glove.6B.300d.txt")
     parser.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
+    parser.add_argument("--sentiment_vector_use_polarity_axis", action="store_true")
+    parser.add_argument("--sentiment_vector_min_old_similarity", type=float, default=0.35)
+    parser.add_argument("--sentiment_vector_no_cooccurrence_min_similarity", type=float, default=0.50)
+    parser.add_argument("--model_filter_opinion_similarity_min", type=float, default=0.0)
+    parser.add_argument("--model_filter_require_opinion_polarity", action="store_true")
     parser.add_argument("--augment_select_max_opinion_ratio", type=float, default=1.0)
     parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
     parser.add_argument("--extractor_epochs", type=int, default=25)

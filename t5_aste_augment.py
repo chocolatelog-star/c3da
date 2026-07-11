@@ -987,6 +987,9 @@ def rank_sentiment_vector_replacement_opinions(
     opinion_bank: dict[str, list[str]],
     domain_memory: dict | None = None,
     min_margin: float = 0.05,
+    use_polarity_axis: bool = False,
+    min_old_similarity: float = 0.35,
+    no_cooccurrence_min_similarity: float = 0.50,
 ) -> list[dict]:
     memory = domain_memory or {}
     opinion_embeddings = {
@@ -997,6 +1000,8 @@ def rank_sentiment_vector_replacement_opinions(
         return []
     centroids = memory.get("sentiment_centroids") or build_sentiment_centroids(opinion_bank, opinion_embeddings)
     target_centroid = centroids.get(sentiment)
+    polarity_axis = memory.get("sentiment_polarity_axis") or []
+    polarity_thresholds = memory.get("sentiment_polarity_thresholds") or {}
     old_vector = opinion_embeddings.get(_normalize_fragment(old_opinion))
     if not target_centroid:
         return []
@@ -1025,13 +1030,27 @@ def rank_sentiment_vector_replacement_opinions(
             or [0.0]
         )
         sentiment_margin = target_similarity - other_similarity
-        if sentiment_margin < min_margin:
+        polarity_score = _cosine_similarity(candidate_vector, polarity_axis) if polarity_axis else 0.0
+        polarity_passed = (
+            (sentiment == "pos" and polarity_score >= float(polarity_thresholds.get("pos", 0.0)))
+            or (sentiment == "neg" and polarity_score <= float(polarity_thresholds.get("neg", 0.0)))
+            or (sentiment == "neu" and abs(polarity_score) <= float(polarity_thresholds.get("neu_abs", 0.15)))
+        )
+        if use_polarity_axis and (not polarity_axis or not polarity_passed):
+            continue
+        if not use_polarity_axis and sentiment_margin < min_margin:
             continue
         old_similarity = _cosine_similarity(candidate_vector, old_vector) if old_vector else 0.0
         opinion_key = f"{opinion}|{sentiment}"
         opinion_count = int(opinion_counts.get(opinion, 0))
         opinion_aspect_count = int(opinion_aspect_counts.get(opinion_key, {}).get(aspect, 0))
         target_triplet_count = int(target_triplet_counts.get(f"{aspect}|{opinion}|{sentiment}", 0))
+        required_old_similarity = (
+            min_old_similarity if opinion_aspect_count > 0 or target_triplet_count > 0
+            else no_cooccurrence_min_similarity
+        )
+        if use_polarity_axis and (not old_vector or old_similarity < required_old_similarity):
+            continue
         score = 1.5 * target_similarity
         score += 1.0 * sentiment_margin
         score += 0.8 * old_similarity
@@ -1047,7 +1066,10 @@ def rank_sentiment_vector_replacement_opinions(
                     "target_similarity": round(target_similarity, 6),
                     "other_similarity": round(other_similarity, 6),
                     "sentiment_margin": round(sentiment_margin, 6),
+                    "polarity_score": round(polarity_score, 6),
+                    "polarity_passed": polarity_passed,
                     "old_similarity": round(old_similarity, 6),
+                    "required_old_similarity": round(required_old_similarity, 6),
                     "opinion_count": opinion_count,
                     "opinion_aspect_count": opinion_aspect_count,
                     "target_triplet_count": target_triplet_count,
@@ -1072,6 +1094,9 @@ def build_augmentation_requests(
     domain_prefix_style: str = "none",
     opinion_replacement_mode: str = "coupled_random",
     sentiment_vector_min_margin: float = 0.05,
+    sentiment_vector_use_polarity_axis: bool = False,
+    sentiment_vector_min_old_similarity: float = 0.35,
+    sentiment_vector_no_cooccurrence_min_similarity: float = 0.50,
 ) -> list[dict]:
     """Build C3DA-style generation prompts for ASTE augmentation.
 
@@ -1387,6 +1412,9 @@ def build_augmentation_requests(
                             opinion_bank=preferred_opinion_bank,
                             domain_memory=memory,
                             min_margin=sentiment_vector_min_margin,
+                            use_polarity_axis=sentiment_vector_use_polarity_axis,
+                            min_old_similarity=sentiment_vector_min_old_similarity,
+                            no_cooccurrence_min_similarity=sentiment_vector_no_cooccurrence_min_similarity,
                         )
                     else:
                         ranked_opinions = rank_replacement_opinions(
@@ -1405,6 +1433,9 @@ def build_augmentation_requests(
                                 opinion_bank=opinion_bank,
                                 domain_memory=memory,
                                 min_margin=sentiment_vector_min_margin,
+                                use_polarity_axis=sentiment_vector_use_polarity_axis,
+                                min_old_similarity=sentiment_vector_min_old_similarity,
+                                no_cooccurrence_min_similarity=sentiment_vector_no_cooccurrence_min_similarity,
                             )
                         else:
                             ranked_opinions = rank_replacement_opinions(

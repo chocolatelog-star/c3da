@@ -293,6 +293,52 @@ def sentiment_centroid_similarity(centroids: dict[str, list[float]]) -> dict[str
     }
 
 
+def build_sentiment_polarity_axis(
+    rows: list[dict],
+    opinion_embeddings: dict[str, list[float]],
+    centroids: dict[str, list[float]],
+) -> tuple[list[float], dict[str, float], dict]:
+    pos = centroids.get("pos", [])
+    neg = centroids.get("neg", [])
+    if not pos or not neg or len(pos) != len(neg):
+        return [], {}, {"enabled": False, "reason": "missing_pos_or_neg_centroid"}
+    axis = _normalize_vector([left - right for left, right in zip(pos, neg)])
+    scores = {sentiment: [] for sentiment in ("pos", "neg", "neu")}
+    normalized_embeddings = {" ".join(key.lower().split()): value for key, value in opinion_embeddings.items()}
+    for row in rows:
+        weight = max(1, int(round(float(row.get("sample_weight", 1.0) or 1.0) * 20)))
+        for _aspect, opinion, sentiment in parse_triplet_text_list(row.get("label", "")):
+            vector = normalized_embeddings.get(" ".join(opinion.lower().split()))
+            if vector and sentiment in scores:
+                scores[sentiment].extend([cosine_similarity(vector, axis)] * weight)
+
+    def quantile(values: list[float], fraction: float, fallback: float) -> float:
+        if not values:
+            return fallback
+        ordered = sorted(values)
+        return ordered[min(len(ordered) - 1, max(0, int((len(ordered) - 1) * fraction)))]
+
+    thresholds = {
+        "pos": quantile(scores["pos"], 0.20, 0.0),
+        "neg": quantile(scores["neg"], 0.80, 0.0),
+        "neu_abs": quantile([abs(value) for value in scores["neu"]], 0.80, 0.15),
+    }
+    stats = {
+        "enabled": True,
+        "thresholds": {key: round(value, 6) for key, value in thresholds.items()},
+        "score_summary": {
+            sentiment: {
+                "count": len(values),
+                "min": round(min(values), 6) if values else None,
+                "mean": round(sum(values) / len(values), 6) if values else None,
+                "max": round(max(values), 6) if values else None,
+            }
+            for sentiment, values in scores.items()
+        },
+    }
+    return axis, thresholds, stats
+
+
 def load_split(dataset: str, split: str) -> list[dict]:
     return read_bgca_aste_file(DATASETS[dataset] / f"{split}.txt")
 
@@ -1498,6 +1544,11 @@ def filter_augmented_rows_by_model_predictions_channel_aware(
     rows: list[dict],
     predictions: list[str],
     mode: str = "fixed",
+    opinion_embeddings: dict[str, list[float]] | None = None,
+    polarity_axis: list[float] | None = None,
+    polarity_thresholds: dict[str, float] | None = None,
+    opinion_similarity_min: float = 0.0,
+    require_opinion_polarity: bool = False,
 ) -> tuple[list[dict], list[dict], dict]:
     if mode not in {"exact", "fixed"}:
         raise ValueError("model_filter mode must be 'exact' or 'fixed'")
@@ -1532,12 +1583,13 @@ def filter_augmented_rows_by_model_predictions_channel_aware(
         if is_opinion_channel:
             new_triplet = row.get("new_triplet") or []
             target_aspect = _normalized_fragment(new_triplet[0]) if len(new_triplet) >= 1 else ""
+            target_opinion = _normalized_fragment(new_triplet[1]) if len(new_triplet) >= 2 else ""
             target_sentiment = new_triplet[2] if len(new_triplet) >= 3 else ""
             pred_triplets = list(_triplet_set(compare_label))
-            has_target_triplet = any(
-                _normalized_fragment(pred_aspect) == target_aspect and pred_sentiment == target_sentiment
-                for pred_aspect, _pred_opinion, pred_sentiment in pred_triplets
-            )
+            matching_triplets = [
+                triplet for triplet in pred_triplets
+                if _normalized_fragment(triplet[0]) == target_aspect and triplet[2] == target_sentiment
+            ]
             if not compare_label:
                 removed.append(
                     {
@@ -1547,7 +1599,7 @@ def filter_augmented_rows_by_model_predictions_channel_aware(
                     }
                 )
                 continue
-            if not has_target_triplet:
+            if not matching_triplets:
                 removed.append(
                     {
                         **enriched,
@@ -1556,12 +1608,43 @@ def filter_augmented_rows_by_model_predictions_channel_aware(
                     }
                 )
                 continue
+            embeddings = opinion_embeddings or {}
+            target_vector = embeddings.get(target_opinion)
+            best_similarity = None
+            best_polarity_score = None
+            semantic_match = opinion_similarity_min <= 0.0
+            polarity_match = not require_opinion_polarity
+            for _pred_aspect, pred_opinion, _pred_sentiment in matching_triplets:
+                pred_vector = embeddings.get(_normalized_fragment(pred_opinion))
+                if not target_vector or not pred_vector:
+                    continue
+                similarity = cosine_similarity(target_vector, pred_vector)
+                score = cosine_similarity(pred_vector, polarity_axis or [])
+                thresholds = polarity_thresholds or {}
+                candidate_polarity_match = (
+                    (target_sentiment == "pos" and score >= float(thresholds.get("pos", 0.0)))
+                    or (target_sentiment == "neg" and score <= float(thresholds.get("neg", 0.0)))
+                    or (target_sentiment == "neu" and abs(score) <= float(thresholds.get("neu_abs", 0.15)))
+                )
+                if best_similarity is None or similarity > best_similarity:
+                    best_similarity = similarity
+                    best_polarity_score = score
+                semantic_match = semantic_match or similarity >= opinion_similarity_min
+                polarity_match = polarity_match or candidate_polarity_match
+            if not semantic_match:
+                removed.append({**enriched, "model_filter_passed": False, "model_filter_reason": "opinion_similarity_mismatch", "model_filter_opinion_similarity": best_similarity})
+                continue
+            if not polarity_match:
+                removed.append({**enriched, "model_filter_passed": False, "model_filter_reason": "opinion_polarity_mismatch", "model_filter_opinion_polarity_score": best_polarity_score})
+                continue
             updated = {
                 **enriched,
                 "label": compare_label,
                 "model_filter_passed": True,
                 "model_filter_match": "extracted",
                 "model_filter_label_source": "opinion_extractor",
+                "model_filter_opinion_similarity": best_similarity,
+                "model_filter_opinion_polarity_score": best_polarity_score,
             }
             opinion_label_replaced += 1
             opinion_kept += 1
@@ -1666,9 +1749,10 @@ def filter_augmented_rows_with_optional_channel_awareness(
     predictions: list[str],
     mode: str = "fixed",
     channel_aware: bool = False,
+    **channel_options,
 ) -> tuple[list[dict], list[dict], dict]:
     if channel_aware:
-        return filter_augmented_rows_by_model_predictions_channel_aware(rows, predictions, mode=mode)
+        return filter_augmented_rows_by_model_predictions_channel_aware(rows, predictions, mode=mode, **channel_options)
     kept, removed, stats = filter_augmented_rows_by_model_predictions(rows, predictions, mode=mode)
     stats["channel_aware"] = False
     return kept, removed, stats
@@ -1685,6 +1769,8 @@ def run_model_filter(
     use_task_prefix: bool,
     constrained: bool,
     channel_aware: bool = False,
+    opinion_glove_path: str = "",
+    **channel_options,
 ) -> tuple[list[dict], list[dict], dict]:
     predictions = generate_texts(
         model_path=model_path,
@@ -1696,11 +1782,23 @@ def run_model_filter(
         constrained=constrained,
         length_penalty=1.0,
     )
+    if opinion_glove_path and channel_options.get("opinion_embeddings") is not None:
+        predicted_opinions = [
+            opinion
+            for prediction in predictions
+            for _aspect, opinion, _sentiment in parse_triplet_text_list(prediction)
+        ]
+        predicted_embeddings, _ = load_glove_opinion_embeddings(opinion_glove_path, predicted_opinions)
+        channel_options["opinion_embeddings"] = {
+            **channel_options["opinion_embeddings"],
+            **predicted_embeddings,
+        }
     kept, removed, stats = filter_augmented_rows_with_optional_channel_awareness(
         rows,
         predictions,
         mode=mode,
         channel_aware=channel_aware,
+        **channel_options,
     )
     stats["model_path"] = str(model_path)
     stats["batch_size"] = batch_size
@@ -2051,6 +2149,9 @@ def augment(args: argparse.Namespace) -> None:
             cuda=args.cuda,
         )
     sentiment_vector_stats = {"enabled": False}
+    sentiment_polarity_axis: list[float] = []
+    sentiment_polarity_thresholds: dict[str, float] = {}
+    opinion_embeddings: dict[str, list[float]] = {}
     if args.opinion_replacement_mode == "sentiment_vector":
         if domain_memory is None:
             domain_memory = build_target_memory(pseudo_rows)
@@ -2093,6 +2194,20 @@ def augment(args: argparse.Namespace) -> None:
         }
         if sentiment_centroids:
             domain_memory["sentiment_centroids"] = sentiment_centroids
+        polarity_stats = {"enabled": False}
+        if args.sentiment_vector_use_polarity_axis:
+            weighted_rows = [
+                {**row, "sample_weight": float(row.get("sample_weight", 1.0) or 1.0)}
+                for row in source_rows
+            ] + [
+                {**row, "sample_weight": float(row.get("sample_weight", 0.65) or 0.65)}
+                for row in pseudo_rows
+            ]
+            sentiment_polarity_axis, sentiment_polarity_thresholds, polarity_stats = build_sentiment_polarity_axis(
+                weighted_rows, opinion_embeddings, sentiment_centroids
+            )
+            domain_memory["sentiment_polarity_axis"] = sentiment_polarity_axis
+            domain_memory["sentiment_polarity_thresholds"] = sentiment_polarity_thresholds
         sentiment_vector_stats = {
             "enabled": True,
             "backend": args.sentiment_vector_backend,
@@ -2103,6 +2218,9 @@ def augment(args: argparse.Namespace) -> None:
             "embedding_stats": embedding_stats,
             "centroid_stats": centroid_stats,
             "centroid_similarity": sentiment_centroid_similarity(sentiment_centroids),
+            "polarity_axis": polarity_stats,
+            "min_old_similarity": args.sentiment_vector_min_old_similarity,
+            "no_cooccurrence_min_similarity": args.sentiment_vector_no_cooccurrence_min_similarity,
         }
     composition_source_rows = []
     if args.composition_source_file:
@@ -2122,9 +2240,13 @@ def augment(args: argparse.Namespace) -> None:
         domain_prefix_style=args.domain_prefix_style,
         opinion_replacement_mode=args.opinion_replacement_mode,
         sentiment_vector_min_margin=args.sentiment_vector_min_margin,
+        sentiment_vector_use_polarity_axis=args.sentiment_vector_use_polarity_axis,
+        sentiment_vector_min_old_similarity=args.sentiment_vector_min_old_similarity,
+        sentiment_vector_no_cooccurrence_min_similarity=args.sentiment_vector_no_cooccurrence_min_similarity,
     )
     output_tag = args.augment_output_tag
-    write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_requests.jsonl", output_tag), requests)
+    if not args.sentiment_vector_diagnostics_only:
+        write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_requests.jsonl", output_tag), requests)
 
     if args.opinion_replacement_mode == "sentiment_vector":
         vector_requests = [
@@ -2264,6 +2386,12 @@ def augment(args: argparse.Namespace) -> None:
             use_task_prefix=not args.no_task_prefix,
             constrained=not args.model_filter_no_constrained_decoding,
             channel_aware=args.model_filter_channel_aware,
+            opinion_embeddings=opinion_embeddings,
+            polarity_axis=sentiment_polarity_axis,
+            polarity_thresholds=sentiment_polarity_thresholds,
+            opinion_similarity_min=args.model_filter_opinion_similarity_min,
+            require_opinion_polarity=args.model_filter_require_opinion_polarity,
+            opinion_glove_path=args.glove_path if args.sentiment_vector_backend == "glove" else "",
         )
         augmented_rows = assign_augment_quality(augmented_rows, base_weight=args.augment_base_weight)
         write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_augmented_model_filter.jsonl", output_tag), augmented_rows)
@@ -2547,6 +2675,9 @@ def main() -> None:
     p.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
     p.add_argument("--glove_path", default=r"J:\models\glove.6B.300d.txt")
     p.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
+    p.add_argument("--sentiment_vector_use_polarity_axis", action="store_true")
+    p.add_argument("--sentiment_vector_min_old_similarity", type=float, default=0.35)
+    p.add_argument("--sentiment_vector_no_cooccurrence_min_similarity", type=float, default=0.50)
     p.add_argument("--sentiment_vector_diagnostics_only", action="store_true")
     p.add_argument("--augment_output_tag", default="")
     p.add_argument("--memory_path", default="")
@@ -2586,6 +2717,8 @@ def main() -> None:
     p.add_argument("--model_filter_model_variant", choices=["none", "best", "last"], default="none")
     p.add_argument("--model_filter_no_constrained_decoding", action="store_true")
     p.add_argument("--model_filter_channel_aware", action="store_true")
+    p.add_argument("--model_filter_opinion_similarity_min", type=float, default=0.0)
+    p.add_argument("--model_filter_require_opinion_polarity", action="store_true")
     p.add_argument("--final_multi_triplet_gain", type=float, default=0.0)
     p.add_argument("--final_neutral_gain", type=float, default=0.0)
     p.add_argument("--final_max_weight", type=float, default=1.0)
