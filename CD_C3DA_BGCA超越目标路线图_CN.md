@@ -66,7 +66,15 @@ pos-neu 中心相似度：0.9223
 neg-neu 中心相似度：0.8849
 ```
 
-覆盖率满足要求，但三个情感中心过近，尤其正向与中性中心几乎重叠。替换样例比 T5 静态编码有所改善，但仍存在 `large -> great`、`four gigabytes -> great`、`no complaints -> plenty` 等语义不等价替换。根据“先诊断再训练”的约定，当前不启动最终训练；下一步需要显式构建 polarity direction（情感极性方向）或加入最小原词相似度约束后再次诊断。
+覆盖率满足要求，但三个情感中心过近，因此代码版本 `33c76e3` 不再直接使用中心距离，而是显式构建 polarity axis（情感极性轴）：`normalize(c_pos - c_neg)`。阈值从 source gold（源域人工标注，权重 1.0）和 target pseudo（目标域伪标签，权重 0.65）的极性得分分布自动估计。
+
+第二轮诊断文件：
+
+```text
+runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\sentiment_vector_diagnostics_glove_polarity_diag_v2.json
+```
+
+第二轮结果：正向均值 +0.1575，负向均值 -0.1216；正向阈值 0.005817，负向阈值 -0.024779，中性绝对值带宽 0.177709；观点替换请求由 633 降至 493。候选还必须满足原观点相似度至少 0.35，无方面-观点共现时至少 0.50。模型回抽过滤进一步要求提取观点与请求观点的 GloVe（全局词向量）相似度至少 0.45，且极性一致。诊断已达到进入 `rest16 -> laptop14` 单组完整实验的条件，但仍需以 `raw F1`（原始 F1）和当前最佳 46.63 做最终判断。
 
 ## 1. 项目目标
 

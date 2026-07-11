@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `38923fb Add GloVe sentiment vector backend` |
+| 当前代码版本 | `33c76e3 Add polarity-aware opinion augmentation` |
 | 当前分支 | `master` |
 | 主实验目录 | `runs\bgca_aste_stage1_baseline` |
 | 当前六组实验状态 | 已完成 |
@@ -36,7 +36,9 @@
 | v2 结果处理 | v2 4:6 版本输出已删除；该版本 raw F1=42.78、fixed F1=44.71，低于当前最好结果 |
 | 向量版第一轮验证 | 先复用当前最好 text 前缀目录，只重跑 augment（数据增强）+ final training（最终训练）+ evaluate（评估），与 raw F1=46.63、fixed F1=48.98 对比 |
 | GloVe 文件 | `J:\models\glove.6B.300d.txt`，300 维，大小 1,037,965,801 字节 |
-| GloVe 诊断 | 覆盖 827/851 个观点词（97.18%）；pos-neg=0.8258、pos-neu=0.9223、neg-neu=0.8849，情感中心仍然过近，因此暂不启动最终训练 |
+| GloVe 诊断 | 覆盖 827/851 个观点词（97.18%）；极性轴正/负均值为 +0.1575/-0.1216，候选由 633 降至 493，允许进入单组完整验证 |
+| 极性轴阈值 | pos >= 0.005817；neg <= -0.024779；neutral abs <= 0.177709 |
+| 观点过滤 | 原观点相似度至少 0.35；无方面-观点共现时至少 0.50；提取器回抽观点相似度至少 0.45，并要求极性一致 |
 
 ## 0.2 代码版本变更记录
 
@@ -44,6 +46,7 @@
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
+| 2026-07-11 | `33c76e3 Add polarity-aware opinion augmentation` | GloVe 极性轴与观点一致性过滤 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py` | 用 pos-neg 差向量建立极性轴并从带权样本分布估计阈值；增加原观点相似度、无共现严格阈值；观点通道模型过滤新增观点相似度和极性检查；新实验使用独立 `_polarity_axis` 标签 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\sentiment_vector_diagnostics_glove_polarity_diag_v2.json` | 诊断通过；493 条观点替换请求，待跑单组最终实验 |
 | 2026-07-11 | `38923fb Add GloVe sentiment vector backend` | GloVe 情感向量后端 | `t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 新增 `--sentiment_vector_backend glove`、`--glove_path` 和 `--sentiment_vector_diagnostics_only`；按需加载 GloVe 词向量，多词观点短语取平均并归一化；source gold 权重 1.0、target pseudo 权重 0.65 构建情感中心；诊断阶段不调用生成器和训练。 | `sentiment_vector_diagnostics_glove_sentiment_diag_m005.json` | 覆盖率 97.18%，但情感中心相似度过高，按预设门槛暂停训练 |
 | 2026-07-10 | `4ea0f8f Add sentiment vector opinion replacement` | 显式情感向量增强 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 新增 `--opinion_replacement_mode sentiment_vector`（情感向量替换），通过 T5 encoder embedding（T5 编码器嵌入）给候选 opinion（观点词）编码，构建 pos/neg/neu（正/负/中性）情感原型；候选词必须满足 `sentiment_margin >= --sentiment_vector_min_margin`，即更靠近本情感原型并远离其他情感原型；继续保留 `--augment_select_max_opinion_ratio 0.6` 和 opinion 边界过滤。 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14` 的 `_sentiment_vector` tag | 待跑单组验证 |
 | 2026-07-10 | `231c49d Constrain semantic opinion augmentation selection` | 语义观点增强 v2 | `t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 在 v1 同情感语义替换基础上新增 `--augment_select_max_opinion_ratio`（观点词通道最大比例），本轮使用 0.6，即 opinion channel（观点词通道）最多 60%、aspect channel（方面词通道）尽量 40%；新增 opinion（观点词）边界过滤，过滤 `[opi]`、`no`、`on its feet` 这类异常观点词边界；保留增强样本中的 `opinion_replacement_mode`（观点词替换模式）元数据，方便后续分析。 | `runs\bgca_aste_stage1_semantic_opinion_text_v2` | 待跑 `rest16 -> laptop14` 单组验证 |
