@@ -1,10 +1,21 @@
 # CD-C3DA 跨域 ASTE 超越 BGCA 目标路线图
 
-## 0. 当前推进重点：显式情感向量增强
+## 0. 当前推进重点：情感原型对比学习
 
 六组 BGCA 风格跨域实验已经跑完，当前平均 `raw F1`（原始 F1）为 49.86，平均 `fixed F1`（修正 F1）为 51.59。主要短板仍然是 `recall`（召回率）偏低，尤其是 `laptop14 -> restaurant`（笔记本到餐馆）方向。
 
-下一步不先扩大模型，也不先改 DANN（领域对抗）主体，contrastive learning（对比学习）也先放到后续单独消融。当前优先改数据增强：在已有 `domain_prefix_style=text`（文本式领域前缀）的基础上，显式构建 sentiment vector space（情感向量空间），再做观点词替换。
+GloVe（全局词向量）极性轴增强的 raw F1=44.70，低于当前最佳 46.63，说明继续单独微调静态词向量阈值收益有限。当前不改数据增强、不改伪标签、不改 DANN（领域对抗），只在最佳最终训练文件上加入 supervised prototype contrastive learning（监督式原型对比学习），做严格单变量消融。
+
+对比学习从每个三元组的 opinion span（观点词跨度）提取解码器上下文表示，并与 pos/neg/neu（正向/负向/中性）三个可训练原型计算温度缩放交叉熵。它支持 batch size=1（批大小为 1），因此适配 RTX 3070 8GB。source gold（源域人工标注）和权重不低于 0.65 的 target pseudo（目标域伪标签）参与，augment（增强数据）不参与。本轮共有 1276 个合格句子、1812 个三元组，其中 pos=1224、neg=538、neu=50。
+
+```text
+--lambda_sentiment_contrastive 0.05
+--sentiment_contrastive_temperature 0.10
+--sentiment_contrastive_min_weight 0.65
+--sentiment_contrastive_exclude_augment
+```
+
+本轮复用当前最佳 `final_train_strict_aug150_w020_label_to_text_gen.jsonl` 和对应 dev（验证）文件，只重新训练最终 5 轮模型并评估。对照仍为 raw F1=46.63、fixed F1=48.98；若 `lambda=0.05` 有提升，再进行 0.02/0.05/0.10 参数搜索。
 
 当前保留并使用的领域前缀：
 
