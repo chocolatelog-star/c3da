@@ -3,8 +3,10 @@ import torch
 from t5_absa_train import (
     DomainAdversarialHead,
     JsonlSeq2SeqDataset,
+    SentimentPrototypeHead,
     gradient_reverse,
     mean_pool_encoder_hidden,
+    sentiment_prototype_contrastive_loss,
 )
 
 
@@ -54,8 +56,42 @@ def test_domain_head_pooling_produces_domain_logits():
     assert list(logits.shape) == [2, 2]
 
 
+def test_dataset_builds_clean_sentiment_contrastive_features():
+    rows = [
+        {"input": "source", "target": "<neu> food <opinion> average"},
+        {"input": "pseudo", "target": "<pos> screen <opinion> bright", "augmentation": "target_pseudo", "sample_weight": 0.65},
+        {"input": "augment", "target": "<neg> fan <opinion> loud", "augmentation": "masked_opinion_sentiment_channel", "sample_weight": 0.2},
+    ]
+    dataset = JsonlSeq2SeqDataset(
+        rows, TinyTokenizer(), 64, 64, 1.0, 0.5, 0.2,
+        sentiment_contrastive_min_weight=0.65,
+        sentiment_contrastive_exclude_augment=True,
+    )
+
+    assert dataset[0]["sentiment_contrastive_labels"] == [2]
+    assert dataset[1]["sentiment_contrastive_labels"] == [0]
+    assert dataset[2]["sentiment_contrastive_labels"] == []
+
+
+def test_sentiment_prototype_loss_works_with_one_triplet():
+    hidden = torch.tensor([[[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]]], requires_grad=True)
+    spans = torch.tensor([[[0, 2]]])
+    labels = torch.tensor([[0]])
+    mask = torch.tensor([[1]])
+    head = SentimentPrototypeHead(hidden_size=2)
+    loss = sentiment_prototype_contrastive_loss(hidden, spans, labels, mask, head, temperature=0.1)
+
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+    assert loss.item() > 0
+    loss.backward()
+    assert hidden.grad is not None
+
+
 if __name__ == "__main__":
     test_dataset_assigns_domain_labels()
     test_gradient_reverse_flips_gradient_sign()
     test_domain_head_pooling_produces_domain_logits()
+    test_dataset_builds_clean_sentiment_contrastive_features()
+    test_sentiment_prototype_loss_works_with_one_triplet()
     print("domain adversarial training tests passed")

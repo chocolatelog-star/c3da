@@ -256,7 +256,14 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         args.sentiment_vector_use_polarity_axis,
     )
     final_train_file = run_dir / f"final_train_{final_tag}.jsonl"
-    if not stage_done(status, f"augment_{final_tag}", [final_train_file], args.rerun):
+    final_dev_file = run_dir / f"final_dev_{final_tag}.jsonl"
+    reuse_for_contrastive = (
+        args.lambda_sentiment_contrastive > 0
+        and final_train_file.exists()
+        and final_dev_file.exists()
+        and not args.rerun
+    )
+    if not reuse_for_contrastive and not stage_done(status, f"augment_{final_tag}", [final_train_file], args.rerun):
         run_command(
             [
                 py,
@@ -331,8 +338,12 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, f"augment_{final_tag}")
 
-    final_dir = run_dir / "models" / f"final_dann_l0.03_{final_tag}_ep{args.final_epochs}"
-    if not stage_done(status, f"train_final_{final_tag}", [final_dir / "best" / "config.json"], args.rerun):
+    result_tag = final_tag
+    if args.lambda_sentiment_contrastive > 0:
+        lambda_tag = str(args.lambda_sentiment_contrastive).replace(".", "")
+        result_tag = f"{final_tag}_sentiment_contrastive_l{lambda_tag}"
+    final_dir = run_dir / "models" / f"final_dann_l0.03_{result_tag}_ep{args.final_epochs}"
+    if not stage_done(status, f"train_final_{result_tag}", [final_dir / "best" / "config.json"], args.rerun):
         run_command(
             [
                 py,
@@ -342,7 +353,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--train_file",
                 str(final_train_file),
                 "--dev_file",
-                str(run_dir / f"final_dev_{final_tag}.jsonl"),
+                str(final_dev_file),
                 "--output_dir",
                 str(final_dir),
                 "--num_train_epochs",
@@ -362,16 +373,23 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--domain_adv_hidden_size",
                 "256",
                 "--domain_adv_exclude_augment",
+                "--lambda_sentiment_contrastive",
+                str(args.lambda_sentiment_contrastive),
+                "--sentiment_contrastive_temperature",
+                str(args.sentiment_contrastive_temperature),
+                "--sentiment_contrastive_min_weight",
+                str(args.sentiment_contrastive_min_weight),
+                *(["--sentiment_contrastive_exclude_augment"] if args.sentiment_contrastive_exclude_augment else []),
                 *common_train,
             ],
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, f"train_final_{final_tag}")
+            mark_done(status_path, status, f"train_final_{result_tag}")
 
-    raw_metrics_path = run_dir / f"aste_metrics_raw_{final_tag}.json"
-    fixed_metrics_path = run_dir / f"aste_metrics_fixed_{final_tag}.json"
-    if not stage_done(status, f"evaluate_{final_tag}", [raw_metrics_path, fixed_metrics_path], args.rerun):
+    raw_metrics_path = run_dir / f"aste_metrics_raw_{result_tag}.json"
+    fixed_metrics_path = run_dir / f"aste_metrics_fixed_{result_tag}.json"
+    if not stage_done(status, f"evaluate_{result_tag}", [raw_metrics_path, fixed_metrics_path], args.rerun):
         run_command(
             [
                 py,
@@ -401,13 +419,14 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 raw_metrics_path.write_text(raw_default.read_text(encoding="utf-8"), encoding="utf-8")
             if fixed_default.exists():
                 fixed_metrics_path.write_text(fixed_default.read_text(encoding="utf-8"), encoding="utf-8")
-            mark_done(status_path, status, f"evaluate_{final_tag}")
+            mark_done(status_path, status, f"evaluate_{result_tag}")
 
     return summarize_pair(
         run_dir,
         source,
         target,
         final_tag,
+        result_tag,
         args.generator_prompt_style,
         args.augment_prompt_style,
         args.domain_prefix_style,
@@ -420,6 +439,7 @@ def summarize_pair(
     source: str,
     target: str,
     final_tag: str,
+    result_tag: str,
     generator_prompt_style: str,
     configured_augment_prompt_style: str,
     configured_domain_prefix_style: str,
@@ -428,8 +448,8 @@ def summarize_pair(
     pseudo_hp = read_json(run_dir / "target_pseudo_high_precision_analysis.json")
     augment = read_json(run_dir / f"c3da_augment_analysis_{final_tag}.json")
     final_comp = read_json(run_dir / f"final_train_composition_analysis_{final_tag}.json")
-    raw = read_json(run_dir / f"aste_metrics_raw_{final_tag}.json")
-    fixed = read_json(run_dir / f"aste_metrics_fixed_{final_tag}.json")
+    raw = read_json(run_dir / f"aste_metrics_raw_{result_tag}.json")
+    fixed = read_json(run_dir / f"aste_metrics_fixed_{result_tag}.json")
     hp_eval = pseudo_hp.get("hidden_gold_eval", {})
     hp_raw = hp_eval.get("raw_scores", {})
     return {
@@ -620,6 +640,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extractor_epochs", type=int, default=25)
     parser.add_argument("--generator_epochs", type=int, default=8)
     parser.add_argument("--final_epochs", type=int, default=5)
+    parser.add_argument("--lambda_sentiment_contrastive", type=float, default=0.0)
+    parser.add_argument("--sentiment_contrastive_temperature", type=float, default=0.1)
+    parser.add_argument("--sentiment_contrastive_min_weight", type=float, default=0.65)
+    parser.add_argument("--sentiment_contrastive_exclude_augment", action="store_true")
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")
