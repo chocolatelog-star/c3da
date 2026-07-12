@@ -656,6 +656,7 @@ def main() -> None:
     parser.add_argument("--max_target_length", type=int, default=96)
     parser.add_argument("--logging_steps", type=int, default=50)
     parser.add_argument("--save_total_limit", type=int, default=2)
+    parser.add_argument("--resume_from_checkpoint", choices=["none", "auto"], default="none")
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--fp16", action="store_true")
@@ -819,7 +820,11 @@ def main() -> None:
         lambda_sentiment_contrastive=args.lambda_sentiment_contrastive,
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
     )
-    trainer.train()
+    checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
+    resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
+    if resume_from_checkpoint:
+        print(f"resuming from latest checkpoint in {output_dir}")
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     best_dir = output_dir / "best"
     if best_dir.exists():
         shutil.rmtree(best_dir)
