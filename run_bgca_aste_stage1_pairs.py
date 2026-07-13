@@ -145,8 +145,15 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, f"prepare_{gen_tag}")
 
-    extractor_dir = run_dir / "models" / "extractor_ep25_plain_last"
-    if not stage_done(status, "train_extractor", [extractor_dir / "best" / "config.json"], args.rerun):
+    extractor_tag = "extractor_ep25_plain_last"
+    if args.extractor_lambda_sentiment_contrastive > 0:
+        extractor_lambda_tag = str(args.extractor_lambda_sentiment_contrastive).replace(".", "")
+        extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
+        if args.sentiment_prototype_initialize_from_context:
+            extractor_tag += "_encoder_context_init"
+    extractor_dir = run_dir / "models" / extractor_tag
+    extractor_stage = f"train_{extractor_tag}"
+    if not stage_done(status, extractor_stage, [extractor_dir / "best" / "config.json"], args.rerun):
         run_command(
             [
                 py,
@@ -181,14 +188,19 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "last",
                 "--resume_from_checkpoint",
                 "auto",
+                "--lambda_sentiment_contrastive",
+                str(args.extractor_lambda_sentiment_contrastive),
+                *(["--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced"] if args.extractor_lambda_sentiment_contrastive > 0 else []),
+                *(["--sentiment_prototype_initialize_from_context", "--sentiment_prototype_init_batch_size", str(args.sentiment_prototype_init_batch_size)] if args.extractor_lambda_sentiment_contrastive > 0 and args.sentiment_prototype_initialize_from_context else []),
                 *common_train,
             ],
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, "train_extractor")
+            mark_done(status_path, status, extractor_stage)
 
-    if not stage_done(status, "pseudo", [run_dir / "target_pseudo_high_precision_analysis.json"], args.rerun):
+    pseudo_stage = f"pseudo_{extractor_tag}"
+    if not stage_done(status, pseudo_stage, [run_dir / "target_pseudo_high_precision_analysis.json"], args.rerun):
         run_command(
             [
                 py,
@@ -218,7 +230,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, "pseudo")
+            mark_done(status_path, status, pseudo_stage)
 
     generator_dir = run_dir / "models" / f"generator_{gen_tag}_ep{args.generator_epochs}"
     if not stage_done(status, f"train_generator_{gen_tag}", [generator_dir / "best" / "config.json"], args.rerun):
@@ -350,6 +362,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             result_tag += "_source"
         if args.sentiment_contrastive_class_balanced:
             result_tag += "_balanced"
+        if args.sentiment_prototype_initialize_from_context:
+            result_tag += "_encoder_context_init"
     final_dir = run_dir / "models" / f"final_dann_l0.03_{result_tag}_ep{args.final_epochs}"
     if not stage_done(status, f"train_final_{result_tag}", [final_dir / "best" / "config.json"], args.rerun):
         run_command(
@@ -392,6 +406,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 *(["--sentiment_contrastive_exclude_augment"] if args.sentiment_contrastive_exclude_augment else []),
                 *(["--sentiment_contrastive_source_only"] if args.sentiment_contrastive_source_only else []),
                 *(["--sentiment_contrastive_class_balanced"] if args.sentiment_contrastive_class_balanced else []),
+                *(["--sentiment_prototype_initialize_from_context", "--sentiment_prototype_init_batch_size", str(args.sentiment_prototype_init_batch_size)] if args.sentiment_prototype_initialize_from_context else []),
                 *common_train,
             ],
             args.dry_run,
@@ -652,12 +667,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extractor_epochs", type=int, default=25)
     parser.add_argument("--generator_epochs", type=int, default=8)
     parser.add_argument("--final_epochs", type=int, default=5)
+    parser.add_argument("--extractor_lambda_sentiment_contrastive", type=float, default=0.0)
     parser.add_argument("--lambda_sentiment_contrastive", type=float, default=0.0)
     parser.add_argument("--sentiment_contrastive_temperature", type=float, default=0.1)
     parser.add_argument("--sentiment_contrastive_min_weight", type=float, default=0.65)
     parser.add_argument("--sentiment_contrastive_exclude_augment", action="store_true")
     parser.add_argument("--sentiment_contrastive_source_only", action="store_true")
     parser.add_argument("--sentiment_contrastive_class_balanced", action="store_true")
+    parser.add_argument("--sentiment_prototype_initialize_from_context", action="store_true")
+    parser.add_argument("--sentiment_prototype_init_batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")

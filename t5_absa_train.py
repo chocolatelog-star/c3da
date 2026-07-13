@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import os
 import shutil
@@ -11,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
+from tqdm import tqdm
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -107,7 +109,7 @@ class JsonlSeq2SeqDataset(Dataset):
         model_inputs["structure_weight"] = self.structure_weight(row, domain_weight)
         model_inputs["consistency_group"] = self.consistency_group(row, idx)
         model_inputs.update(self.pairing_features(row))
-        model_inputs.update(self.sentiment_contrastive_features(row, labels["input_ids"], domain_weight))
+        model_inputs.update(self.sentiment_contrastive_features(row, model_inputs["input_ids"], domain_weight))
         return model_inputs
 
     def sample_weight(self, row: dict) -> float:
@@ -182,7 +184,7 @@ class JsonlSeq2SeqDataset(Dataset):
             "pairing_mask": mask,
         }
 
-    def sentiment_contrastive_features(self, row: dict, target_ids: list[int], domain_weight: float) -> dict:
+    def sentiment_contrastive_features(self, row: dict, input_ids: list[int], domain_weight: float) -> dict:
         augmentation = row.get("augmentation")
         if domain_weight < self.sentiment_contrastive_min_weight:
             return self.empty_sentiment_contrastive_features()
@@ -196,8 +198,7 @@ class JsonlSeq2SeqDataset(Dataset):
         labels = []
         for _aspect, opinion, sentiment in parse_triplet_text_list(row.get("target", "")):
             sentiment_id = SENTIMENT_LABEL_IDS.get(sentiment)
-            opinion_ids = self.tokenizer.encode(opinion, add_special_tokens=False)
-            span = find_token_subsequence_span(target_ids, opinion_ids)
+            span = find_opinion_span_in_input(self.tokenizer, row.get("input", ""), input_ids, opinion)
             if sentiment_id is None or span is None:
                 continue
             spans.append(list(span))
@@ -234,6 +235,25 @@ def find_token_subsequence_span(sequence: list[int], subsequence: list[int]) -> 
     for start in range(0, len(sequence) - width + 1):
         if sequence[start : start + width] == subsequence:
             return start, start + width
+    return None
+
+
+def find_opinion_span_in_input(tokenizer, text: str, input_ids: list[int], opinion: str) -> tuple[int, int] | None:
+    candidates = [opinion]
+    lower_text = text.lower()
+    lower_opinion = opinion.lower()
+    start = 0
+    while lower_opinion and (match_start := lower_text.find(lower_opinion, start)) >= 0:
+        candidates.append(text[match_start : match_start + len(opinion)])
+        start = match_start + max(1, len(opinion))
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        span = find_token_subsequence_span(input_ids, tokenizer.encode(candidate, add_special_tokens=False))
+        if span is not None:
+            return span
     return None
 
 
@@ -331,6 +351,91 @@ class SentimentPrototypeHead(nn.Module):
         return F.normalize(self.prototypes, p=2, dim=-1)
 
 
+def build_sentiment_prototype_centroids(
+    vectors: torch.Tensor,
+    labels: torch.Tensor,
+    num_sentiments: int = 3,
+) -> tuple[torch.Tensor, list[int]]:
+    if vectors.ndim != 2 or labels.ndim != 1 or vectors.size(0) != labels.size(0):
+        raise ValueError("vectors and labels must have aligned [N, H] and [N] shapes")
+    centroids = []
+    counts = []
+    for sentiment_id in range(num_sentiments):
+        class_vectors = vectors[labels == sentiment_id]
+        counts.append(int(class_vectors.size(0)))
+        if class_vectors.size(0) == 0:
+            raise ValueError(f"cannot initialize sentiment prototype {sentiment_id}: no examples")
+        centroids.append(F.normalize(class_vectors.mean(dim=0), p=2, dim=0))
+    return torch.stack(centroids), counts
+
+
+def initialize_sentiment_prototypes_from_context(
+    model,
+    tokenizer,
+    rows: list[dict],
+    batch_size: int,
+    max_source_length: int,
+) -> dict:
+    source_rows = [
+        row for row in rows
+        if row.get("augmentation") != "target_pseudo"
+        and row.get("augmentation") not in CSA_AUGMENT_CHANNELS
+    ]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    was_training = model.training
+    model.eval()
+    collected_vectors = []
+    collected_labels = []
+    for start in tqdm(range(0, len(source_rows), batch_size), desc="init-sentiment-prototypes"):
+        batch_rows = source_rows[start : start + batch_size]
+        encoded = tokenizer(
+            [row["input"] for row in batch_rows],
+            max_length=max_source_length,
+            truncation=True,
+            padding=True,
+            return_tensors="pt",
+        )
+        encoded = {key: value.to(device) for key, value in encoded.items()}
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+            encoder_hidden = model.get_encoder()(**encoded, return_dict=True).last_hidden_state
+        for row_idx, row in enumerate(batch_rows):
+            row_input_ids = encoded["input_ids"][row_idx].tolist()
+            for _aspect, opinion, sentiment in parse_triplet_text_list(row.get("target", "")):
+                sentiment_id = SENTIMENT_LABEL_IDS.get(sentiment)
+                span = find_opinion_span_in_input(
+                    tokenizer,
+                    row.get("input", ""),
+                    row_input_ids,
+                    opinion,
+                )
+                if sentiment_id is None or span is None:
+                    continue
+                collected_vectors.append(encoder_hidden[row_idx, span[0] : span[1]].mean(dim=0).float().cpu())
+                collected_labels.append(sentiment_id)
+    if was_training:
+        model.train()
+    if not collected_vectors:
+        raise ValueError("no opinion context vectors were collected for sentiment prototype initialization")
+    vectors = torch.stack(collected_vectors)
+    labels = torch.tensor(collected_labels, dtype=torch.long)
+    centroids, counts = build_sentiment_prototype_centroids(vectors, labels)
+    with torch.no_grad():
+        model.sentiment_prototype_head.prototypes.copy_(
+            centroids.to(
+                model.sentiment_prototype_head.prototypes.device,
+                dtype=model.sentiment_prototype_head.prototypes.dtype,
+            )
+        )
+    return {
+        "source_rows": len(source_rows),
+        "embedded_triplets": len(collected_vectors),
+        "sentiment_counts": dict(zip(("pos", "neg", "neu"), counts)),
+        "prototype_norms": [round(float(value), 6) for value in centroids.norm(dim=-1)],
+        "device": str(device),
+    }
+
+
 def mean_pool_encoder_hidden(hidden: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
     if attention_mask is None:
         return hidden.mean(dim=1)
@@ -392,7 +497,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         sentiment_contrastive_weights = inputs.pop("sentiment_contrastive_weights", None)
         attention_mask = inputs.get("attention_mask")
         labels = inputs.get("labels")
-        needs_decoder_hidden = self.lambda_pairing_loss > 0 or self.lambda_sentiment_contrastive > 0
+        needs_decoder_hidden = self.lambda_pairing_loss > 0
         outputs = model(**inputs, return_dict=True, output_hidden_states=needs_decoder_hidden)
         logits = outputs.logits
         token_loss = F.cross_entropy(
@@ -440,10 +545,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             and sentiment_contrastive_spans is not None
             and hasattr(model, "sentiment_prototype_head")
         ):
-            decoder_hidden = outputs.decoder_hidden_states[-1] if outputs.decoder_hidden_states else None
-            if decoder_hidden is not None:
+            encoder_hidden = outputs.encoder_last_hidden_state
+            if encoder_hidden is not None:
                 sentiment_loss, sentiment_stats = sentiment_prototype_contrastive_loss(
-                    decoder_hidden,
+                    encoder_hidden,
                     sentiment_contrastive_spans,
                     sentiment_contrastive_labels,
                     sentiment_contrastive_mask,
@@ -451,7 +556,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
                     temperature=self.sentiment_contrastive_temperature,
                     sample_weights=sentiment_contrastive_weights,
                     class_weights=(
-                        torch.tensor(self.sentiment_contrastive_class_weights, device=decoder_hidden.device)
+                        torch.tensor(self.sentiment_contrastive_class_weights, device=encoder_hidden.device)
                         if self.sentiment_contrastive_class_weights else None
                     ),
                     return_stats=True,
@@ -578,7 +683,7 @@ def pairing_contrastive_loss(
 
 
 def sentiment_prototype_contrastive_loss(
-    decoder_hidden: torch.Tensor,
+    contextual_hidden: torch.Tensor,
     opinion_spans: torch.Tensor,
     sentiment_labels: torch.Tensor,
     sentiment_mask: torch.Tensor,
@@ -589,15 +694,15 @@ def sentiment_prototype_contrastive_loss(
     return_stats: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
     if opinion_spans is None or opinion_spans.numel() == 0:
-        zero = decoder_hidden.new_tensor(0.0)
+        zero = contextual_hidden.new_tensor(0.0)
         return (zero, {}) if return_stats else zero
-    opinion_spans = opinion_spans.to(decoder_hidden.device)
-    sentiment_labels = sentiment_labels.to(decoder_hidden.device, dtype=torch.long)
-    valid_mask = sentiment_mask.to(decoder_hidden.device).bool() & sentiment_labels.ne(-100)
+    opinion_spans = opinion_spans.to(contextual_hidden.device)
+    sentiment_labels = sentiment_labels.to(contextual_hidden.device, dtype=torch.long)
+    valid_mask = sentiment_mask.to(contextual_hidden.device).bool() & sentiment_labels.ne(-100)
     if not valid_mask.any():
-        zero = decoder_hidden.new_tensor(0.0)
+        zero = contextual_hidden.new_tensor(0.0)
         return (zero, {}) if return_stats else zero
-    opinion_repr = F.normalize(span_mean(decoder_hidden, opinion_spans), p=2, dim=-1)
+    opinion_repr = F.normalize(span_mean(contextual_hidden, opinion_spans), p=2, dim=-1)
     logits = opinion_repr[valid_mask] @ prototype_head.normalized_prototypes().transpose(0, 1)
     logits = logits / max(float(temperature), 1e-6)
     targets = sentiment_labels[valid_mask]
@@ -761,6 +866,8 @@ def main() -> None:
     parser.add_argument("--sentiment_contrastive_exclude_augment", action="store_true")
     parser.add_argument("--sentiment_contrastive_source_only", action="store_true")
     parser.add_argument("--sentiment_contrastive_class_balanced", action="store_true")
+    parser.add_argument("--sentiment_prototype_initialize_from_context", action="store_true")
+    parser.add_argument("--sentiment_prototype_init_batch_size", type=int, default=2)
     parser.add_argument("--max_pairing_triplets", type=int, default=4)
     parser.add_argument("--min_pairing_triplets", type=int, default=2)
     parser.add_argument("--min_pairing_sample_weight", type=float, default=0.65)
@@ -779,6 +886,9 @@ def main() -> None:
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+    output_dir = Path(args.output_dir)
+    checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
+    resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model_path)
@@ -794,6 +904,20 @@ def main() -> None:
     if args.lambda_sentiment_contrastive > 0:
         hidden_size = int(getattr(model.config, "d_model", model.get_input_embeddings().embedding_dim))
         model.sentiment_prototype_head = SentimentPrototypeHead(hidden_size=hidden_size)
+        if args.sentiment_prototype_initialize_from_context and not resume_from_checkpoint:
+            prototype_init_stats = initialize_sentiment_prototypes_from_context(
+                model,
+                tokenizer,
+                train_rows,
+                batch_size=args.sentiment_prototype_init_batch_size,
+                max_source_length=args.max_source_length,
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            init_path = output_dir / "sentiment_prototype_init.json"
+            init_path.write_text(json.dumps(prototype_init_stats, ensure_ascii=False, indent=2), encoding="utf-8")
+            print("sentiment prototype initialization:", {"path": str(init_path), **prototype_init_stats})
+        elif args.sentiment_prototype_initialize_from_context:
+            print("sentiment prototype initialization: skipped because training will resume from checkpoint")
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
@@ -824,6 +948,8 @@ def main() -> None:
             "sentiment_contrastive_exclude_augment": args.sentiment_contrastive_exclude_augment,
             "sentiment_contrastive_source_only": args.sentiment_contrastive_source_only,
             "sentiment_contrastive_class_balanced": args.sentiment_contrastive_class_balanced,
+            "sentiment_prototype_initialize_from_context": args.sentiment_prototype_initialize_from_context,
+            "sentiment_prototype_init_batch_size": args.sentiment_prototype_init_batch_size,
             "max_pairing_triplets": args.max_pairing_triplets,
             "min_pairing_triplets": args.min_pairing_triplets,
             "min_pairing_sample_weight": args.min_pairing_sample_weight,
@@ -877,7 +1003,6 @@ def main() -> None:
         1.0,
     )
 
-    output_dir = Path(args.output_dir)
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
         overwrite_output_dir=True,
@@ -915,8 +1040,6 @@ def main() -> None:
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
         sentiment_contrastive_class_weights=sentiment_class_weights,
     )
-    checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
-    resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
     if resume_from_checkpoint:
         print(f"resuming from latest checkpoint in {output_dir}")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

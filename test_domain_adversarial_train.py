@@ -5,7 +5,9 @@ from t5_absa_train import (
     JsonlSeq2SeqDataset,
     SentimentPrototypeHead,
     build_sentiment_class_weights,
+    build_sentiment_prototype_centroids,
     gradient_reverse,
+    find_opinion_span_in_input,
     mean_pool_encoder_hidden,
     sentiment_prototype_contrastive_loss,
 )
@@ -59,9 +61,9 @@ def test_domain_head_pooling_produces_domain_logits():
 
 def test_dataset_builds_clean_sentiment_contrastive_features():
     rows = [
-        {"input": "source", "target": "<neu> food <opinion> average"},
-        {"input": "pseudo", "target": "<pos> screen <opinion> bright", "augmentation": "target_pseudo", "sample_weight": 0.65},
-        {"input": "augment", "target": "<neg> fan <opinion> loud", "augmentation": "masked_opinion_sentiment_channel", "sample_weight": 0.2},
+        {"input": "the food is average", "target": "<neu> food <opinion> average"},
+        {"input": "the screen is bright", "target": "<pos> screen <opinion> bright", "augmentation": "target_pseudo", "sample_weight": 0.65},
+        {"input": "the fan is loud", "target": "<neg> fan <opinion> loud", "augmentation": "masked_opinion_sentiment_channel", "sample_weight": 0.2},
     ]
     dataset = JsonlSeq2SeqDataset(
         rows, TinyTokenizer(), 64, 64, 1.0, 0.5, 0.2,
@@ -103,6 +105,29 @@ def test_sentiment_class_weights_upweight_rare_neutral_class():
     assert weights[2] > weights[1] > weights[0]
 
 
+def test_context_vectors_initialize_normalized_sentiment_centroids():
+    vectors = torch.tensor([[2.0, 0.0], [1.0, 0.0], [0.0, 3.0], [-2.0, 0.0]])
+    labels = torch.tensor([0, 0, 1, 2])
+
+    centroids, counts = build_sentiment_prototype_centroids(vectors, labels, num_sentiments=3)
+
+    assert counts == [2, 1, 1]
+    assert torch.allclose(centroids.norm(dim=-1), torch.ones(3))
+    assert torch.allclose(centroids[0], torch.tensor([1.0, 0.0]))
+    assert torch.allclose(centroids[1], torch.tensor([0.0, 1.0]))
+    assert torch.allclose(centroids[2], torch.tensor([-1.0, 0.0]))
+
+
+def test_opinion_span_lookup_uses_original_input_casing():
+    tokenizer = TinyTokenizer()
+    text = "The food is ALL Japanese."
+    input_ids = tokenizer(text)["input_ids"]
+
+    span = find_opinion_span_in_input(tokenizer, text, input_ids, "japanese")
+
+    assert span is not None
+
+
 if __name__ == "__main__":
     test_dataset_assigns_domain_labels()
     test_gradient_reverse_flips_gradient_sign()
@@ -110,4 +135,6 @@ if __name__ == "__main__":
     test_dataset_builds_clean_sentiment_contrastive_features()
     test_sentiment_prototype_loss_works_with_one_triplet()
     test_sentiment_class_weights_upweight_rare_neutral_class()
+    test_context_vectors_initialize_normalized_sentiment_centroids()
+    test_opinion_span_lookup_uses_original_input_casing()
     print("domain adversarial training tests passed")
