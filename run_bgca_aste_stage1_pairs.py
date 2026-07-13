@@ -346,6 +346,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     if args.lambda_sentiment_contrastive > 0:
         lambda_tag = str(args.lambda_sentiment_contrastive).replace(".", "")
         result_tag = f"{final_tag}_sentiment_contrastive_l{lambda_tag}"
+        if args.sentiment_contrastive_source_only:
+            result_tag += "_source"
+        if args.sentiment_contrastive_class_balanced:
+            result_tag += "_balanced"
     final_dir = run_dir / "models" / f"final_dann_l0.03_{result_tag}_ep{args.final_epochs}"
     if not stage_done(status, f"train_final_{result_tag}", [final_dir / "best" / "config.json"], args.rerun):
         run_command(
@@ -386,6 +390,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--sentiment_contrastive_min_weight",
                 str(args.sentiment_contrastive_min_weight),
                 *(["--sentiment_contrastive_exclude_augment"] if args.sentiment_contrastive_exclude_augment else []),
+                *(["--sentiment_contrastive_source_only"] if args.sentiment_contrastive_source_only else []),
+                *(["--sentiment_contrastive_class_balanced"] if args.sentiment_contrastive_class_balanced else []),
                 *common_train,
             ],
             args.dry_run,
@@ -650,6 +656,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sentiment_contrastive_temperature", type=float, default=0.1)
     parser.add_argument("--sentiment_contrastive_min_weight", type=float, default=0.65)
     parser.add_argument("--sentiment_contrastive_exclude_augment", action="store_true")
+    parser.add_argument("--sentiment_contrastive_source_only", action="store_true")
+    parser.add_argument("--sentiment_contrastive_class_balanced", action="store_true")
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")

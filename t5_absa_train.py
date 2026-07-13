@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 import shutil
 from pathlib import Path
@@ -62,6 +63,7 @@ class JsonlSeq2SeqDataset(Dataset):
         domain_adv_exclude_augment: bool = False,
         sentiment_contrastive_min_weight: float = 0.65,
         sentiment_contrastive_exclude_augment: bool = False,
+        sentiment_contrastive_source_only: bool = False,
     ):
         self.rows = rows
         self.tokenizer = tokenizer
@@ -80,6 +82,7 @@ class JsonlSeq2SeqDataset(Dataset):
         self.domain_adv_exclude_augment = domain_adv_exclude_augment
         self.sentiment_contrastive_min_weight = sentiment_contrastive_min_weight
         self.sentiment_contrastive_exclude_augment = sentiment_contrastive_exclude_augment
+        self.sentiment_contrastive_source_only = sentiment_contrastive_source_only
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -185,6 +188,10 @@ class JsonlSeq2SeqDataset(Dataset):
             return self.empty_sentiment_contrastive_features()
         if self.sentiment_contrastive_exclude_augment and augmentation in CSA_AUGMENT_CHANNELS:
             return self.empty_sentiment_contrastive_features()
+        if self.sentiment_contrastive_source_only and (
+            augmentation == "target_pseudo" or augmentation in CSA_AUGMENT_CHANNELS
+        ):
+            return self.empty_sentiment_contrastive_features()
         spans = []
         labels = []
         for _aspect, opinion, sentiment in parse_triplet_text_list(row.get("target", "")):
@@ -199,6 +206,7 @@ class JsonlSeq2SeqDataset(Dataset):
             "sentiment_contrastive_spans": spans,
             "sentiment_contrastive_labels": labels,
             "sentiment_contrastive_mask": [1] * len(labels),
+            "sentiment_contrastive_weights": [float(domain_weight)] * len(labels),
         }
 
     @staticmethod
@@ -207,6 +215,7 @@ class JsonlSeq2SeqDataset(Dataset):
             "sentiment_contrastive_spans": [],
             "sentiment_contrastive_labels": [],
             "sentiment_contrastive_mask": [],
+            "sentiment_contrastive_weights": [],
         }
 
 
@@ -239,6 +248,7 @@ class DataCollatorForSeq2SeqWithPairing:
         sentiment_spans = [feature.pop("sentiment_contrastive_spans", []) for feature in features]
         sentiment_labels = [feature.pop("sentiment_contrastive_labels", []) for feature in features]
         sentiment_masks = [feature.pop("sentiment_contrastive_mask", []) for feature in features]
+        sentiment_weights = [feature.pop("sentiment_contrastive_weights", []) for feature in features]
         batch = self.base_collator(features)
         max_pairs = max([len(mask) for mask in pairing_masks] + [0])
         if max_pairs == 0:
@@ -266,14 +276,19 @@ class DataCollatorForSeq2SeqWithPairing:
         sentiment_span_tensor = torch.zeros((len(features), max_sentiments, 2), dtype=torch.long)
         sentiment_label_tensor = torch.full((len(features), max_sentiments), -100, dtype=torch.long)
         sentiment_mask_tensor = torch.zeros((len(features), max_sentiments), dtype=torch.long)
-        for row_idx, (spans, labels, mask) in enumerate(zip(sentiment_spans, sentiment_labels, sentiment_masks)):
-            for item_idx, (span, label, active) in enumerate(zip(spans, labels, mask)):
+        sentiment_weight_tensor = torch.zeros((len(features), max_sentiments), dtype=torch.float)
+        for row_idx, (spans, labels, mask, weights) in enumerate(
+            zip(sentiment_spans, sentiment_labels, sentiment_masks, sentiment_weights)
+        ):
+            for item_idx, (span, label, active, weight) in enumerate(zip(spans, labels, mask, weights)):
                 sentiment_span_tensor[row_idx, item_idx] = torch.tensor(span, dtype=torch.long)
                 sentiment_label_tensor[row_idx, item_idx] = int(label)
                 sentiment_mask_tensor[row_idx, item_idx] = int(active)
+                sentiment_weight_tensor[row_idx, item_idx] = float(weight)
         batch["sentiment_contrastive_spans"] = sentiment_span_tensor
         batch["sentiment_contrastive_labels"] = sentiment_label_tensor
         batch["sentiment_contrastive_mask"] = sentiment_mask_tensor
+        batch["sentiment_contrastive_weights"] = sentiment_weight_tensor
         return batch
 
 
@@ -334,6 +349,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         domain_adv_grl_lambda: float = 1.0,
         lambda_sentiment_contrastive: float = 0.0,
         sentiment_contrastive_temperature: float = 0.1,
+        sentiment_contrastive_class_weights: list[float] | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -344,6 +360,22 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.domain_adv_grl_lambda = domain_adv_grl_lambda
         self.lambda_sentiment_contrastive = lambda_sentiment_contrastive
         self.sentiment_contrastive_temperature = sentiment_contrastive_temperature
+        self.sentiment_contrastive_class_weights = sentiment_contrastive_class_weights
+        self._component_sums: dict[str, float] = {}
+        self._component_counts: dict[str, int] = {}
+
+    def _track_component(self, name: str, value: torch.Tensor | float) -> None:
+        numeric = float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
+        self._component_sums[name] = self._component_sums.get(name, 0.0) + numeric
+        self._component_counts[name] = self._component_counts.get(name, 0) + 1
+
+    def log(self, logs: dict, *args, **kwargs) -> None:
+        if "loss" in logs and self._component_sums:
+            for name, total in self._component_sums.items():
+                logs[name] = round(total / max(1, self._component_counts.get(name, 1)), 6)
+            self._component_sums.clear()
+            self._component_counts.clear()
+        super().log(logs, *args, **kwargs)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         sample_weight = inputs.pop("sample_weight", None)
@@ -357,6 +389,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         sentiment_contrastive_spans = inputs.pop("sentiment_contrastive_spans", None)
         sentiment_contrastive_labels = inputs.pop("sentiment_contrastive_labels", None)
         sentiment_contrastive_mask = inputs.pop("sentiment_contrastive_mask", None)
+        sentiment_contrastive_weights = inputs.pop("sentiment_contrastive_weights", None)
         attention_mask = inputs.get("attention_mask")
         labels = inputs.get("labels")
         needs_decoder_hidden = self.lambda_pairing_loss > 0 or self.lambda_sentiment_contrastive > 0
@@ -384,6 +417,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
                 loss = weighted_loss_mean(per_sample_loss, domain_weights)
         else:
             loss = per_sample_loss.mean()
+        generation_loss = loss
         if consistency_group is not None and self.lambda_consistency_loss > 0:
             consistency_loss = grouped_representation_consistency_loss(
                 outputs.encoder_last_hidden_state,
@@ -408,15 +442,25 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         ):
             decoder_hidden = outputs.decoder_hidden_states[-1] if outputs.decoder_hidden_states else None
             if decoder_hidden is not None:
-                sentiment_loss = sentiment_prototype_contrastive_loss(
+                sentiment_loss, sentiment_stats = sentiment_prototype_contrastive_loss(
                     decoder_hidden,
                     sentiment_contrastive_spans,
                     sentiment_contrastive_labels,
                     sentiment_contrastive_mask,
                     model.sentiment_prototype_head,
                     temperature=self.sentiment_contrastive_temperature,
+                    sample_weights=sentiment_contrastive_weights,
+                    class_weights=(
+                        torch.tensor(self.sentiment_contrastive_class_weights, device=decoder_hidden.device)
+                        if self.sentiment_contrastive_class_weights else None
+                    ),
+                    return_stats=True,
                 )
                 loss = loss + self.lambda_sentiment_contrastive * sentiment_loss
+                if model.training:
+                    self._track_component("sentiment_contrastive_loss", sentiment_loss)
+                    for name, value in sentiment_stats.items():
+                        self._track_component(name, value)
         if (
             model.training
             and self.lambda_domain_adv > 0
@@ -432,6 +476,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             if domain_valid_mask.any():
                 domain_adv_loss = F.cross_entropy(domain_logits[domain_valid_mask], domain_targets[domain_valid_mask])
                 loss = loss + self.lambda_domain_adv * domain_adv_loss
+                self._track_component("domain_adv_loss", domain_adv_loss)
+        if model.training:
+            self._track_component("generation_loss", generation_loss)
+            self._track_component("joint_total_loss", loss)
         return (loss, outputs) if return_outputs else loss
 
 
@@ -536,18 +584,44 @@ def sentiment_prototype_contrastive_loss(
     sentiment_mask: torch.Tensor,
     prototype_head: SentimentPrototypeHead,
     temperature: float = 0.1,
-) -> torch.Tensor:
+    sample_weights: torch.Tensor | None = None,
+    class_weights: torch.Tensor | None = None,
+    return_stats: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
     if opinion_spans is None or opinion_spans.numel() == 0:
-        return decoder_hidden.new_tensor(0.0)
+        zero = decoder_hidden.new_tensor(0.0)
+        return (zero, {}) if return_stats else zero
     opinion_spans = opinion_spans.to(decoder_hidden.device)
     sentiment_labels = sentiment_labels.to(decoder_hidden.device, dtype=torch.long)
     valid_mask = sentiment_mask.to(decoder_hidden.device).bool() & sentiment_labels.ne(-100)
     if not valid_mask.any():
-        return decoder_hidden.new_tensor(0.0)
+        zero = decoder_hidden.new_tensor(0.0)
+        return (zero, {}) if return_stats else zero
     opinion_repr = F.normalize(span_mean(decoder_hidden, opinion_spans), p=2, dim=-1)
     logits = opinion_repr[valid_mask] @ prototype_head.normalized_prototypes().transpose(0, 1)
     logits = logits / max(float(temperature), 1e-6)
-    return F.cross_entropy(logits, sentiment_labels[valid_mask])
+    targets = sentiment_labels[valid_mask]
+    per_item_loss = F.cross_entropy(
+        logits,
+        targets,
+        weight=class_weights.to(logits.device, dtype=logits.dtype) if class_weights is not None else None,
+        reduction="none",
+    )
+    valid_weights = (
+        sample_weights.to(logits.device, dtype=logits.dtype)[valid_mask]
+        if sample_weights is not None else torch.ones_like(per_item_loss)
+    )
+    loss = (per_item_loss * valid_weights).sum() / valid_weights.sum().clamp_min(1e-6)
+    if not return_stats:
+        return loss
+    predictions = logits.argmax(dim=-1)
+    stats = {}
+    for sentiment_id, sentiment_name in enumerate(("pos", "neg", "neu")):
+        class_mask = targets.eq(sentiment_id)
+        if class_mask.any():
+            stats[f"sentiment_{sentiment_name}_accuracy"] = float(predictions[class_mask].eq(targets[class_mask]).float().mean())
+    stats["sentiment_prototype_accuracy"] = float(predictions.eq(targets).float().mean())
+    return loss, stats
 
 
 def summarize_sample_weights(
@@ -603,6 +677,7 @@ def summarize_sentiment_contrastive_rows(
     rows: list[dict],
     min_weight: float,
     exclude_augment: bool,
+    source_only: bool = False,
 ) -> dict:
     counts = {"pos": 0, "neg": 0, "neu": 0}
     eligible_rows = 0
@@ -612,11 +687,19 @@ def summarize_sentiment_contrastive_rows(
         weight = float(row.get("sample_weight", fallback_weight) or fallback_weight)
         if weight < min_weight or (exclude_augment and augmentation in CSA_AUGMENT_CHANNELS):
             continue
+        if source_only and (augmentation == "target_pseudo" or augmentation in CSA_AUGMENT_CHANNELS):
+            continue
         eligible_rows += 1
         for _aspect, _opinion, sentiment in parse_triplet_text_list(row.get("target", "")):
             if sentiment in counts:
                 counts[sentiment] += 1
     return {"eligible_rows": eligible_rows, "triplets": sum(counts.values()), **counts}
+
+
+def build_sentiment_class_weights(counts: dict[str, int]) -> list[float]:
+    raw = [1.0 / math.sqrt(max(1, int(counts.get(name, 0)))) for name in ("pos", "neg", "neu")]
+    mean_weight = sum(raw) / len(raw)
+    return [value / mean_weight for value in raw]
 
 
 def add_task_special_tokens(tokenizer, model, rows: list[dict]) -> None:
@@ -676,6 +759,8 @@ def main() -> None:
     parser.add_argument("--sentiment_contrastive_temperature", type=float, default=0.1)
     parser.add_argument("--sentiment_contrastive_min_weight", type=float, default=0.65)
     parser.add_argument("--sentiment_contrastive_exclude_augment", action="store_true")
+    parser.add_argument("--sentiment_contrastive_source_only", action="store_true")
+    parser.add_argument("--sentiment_contrastive_class_balanced", action="store_true")
     parser.add_argument("--max_pairing_triplets", type=int, default=4)
     parser.add_argument("--min_pairing_triplets", type=int, default=2)
     parser.add_argument("--min_pairing_sample_weight", type=float, default=0.65)
@@ -737,6 +822,8 @@ def main() -> None:
             "sentiment_contrastive_temperature": args.sentiment_contrastive_temperature,
             "sentiment_contrastive_min_weight": args.sentiment_contrastive_min_weight,
             "sentiment_contrastive_exclude_augment": args.sentiment_contrastive_exclude_augment,
+            "sentiment_contrastive_source_only": args.sentiment_contrastive_source_only,
+            "sentiment_contrastive_class_balanced": args.sentiment_contrastive_class_balanced,
             "max_pairing_triplets": args.max_pairing_triplets,
             "min_pairing_triplets": args.min_pairing_triplets,
             "min_pairing_sample_weight": args.min_pairing_sample_weight,
@@ -746,14 +833,20 @@ def main() -> None:
         },
     )
     if args.lambda_sentiment_contrastive > 0:
-        print(
-            "sentiment contrastive samples:",
-            summarize_sentiment_contrastive_rows(
-                train_rows,
-                args.sentiment_contrastive_min_weight,
-                args.sentiment_contrastive_exclude_augment,
-            ),
+        sentiment_summary = summarize_sentiment_contrastive_rows(
+            train_rows,
+            args.sentiment_contrastive_min_weight,
+            args.sentiment_contrastive_exclude_augment,
+            args.sentiment_contrastive_source_only,
         )
+        sentiment_class_weights = (
+            build_sentiment_class_weights(sentiment_summary)
+            if args.sentiment_contrastive_class_balanced else None
+        )
+        print("sentiment contrastive samples:", sentiment_summary)
+        print("sentiment contrastive class weights:", sentiment_class_weights)
+    else:
+        sentiment_class_weights = None
     train_data = JsonlSeq2SeqDataset(
         train_rows,
         tokenizer,
@@ -772,6 +865,7 @@ def main() -> None:
         domain_adv_exclude_augment=args.domain_adv_exclude_augment,
         sentiment_contrastive_min_weight=args.sentiment_contrastive_min_weight,
         sentiment_contrastive_exclude_augment=args.sentiment_contrastive_exclude_augment,
+        sentiment_contrastive_source_only=args.sentiment_contrastive_source_only,
     )
     dev_data = JsonlSeq2SeqDataset(
         dev_rows,
@@ -819,6 +913,7 @@ def main() -> None:
         domain_adv_grl_lambda=args.domain_adv_grl_lambda,
         lambda_sentiment_contrastive=args.lambda_sentiment_contrastive,
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
+        sentiment_contrastive_class_weights=sentiment_class_weights,
     )
     checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
     resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)

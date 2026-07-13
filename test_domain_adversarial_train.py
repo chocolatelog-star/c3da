@@ -4,6 +4,7 @@ from t5_absa_train import (
     DomainAdversarialHead,
     JsonlSeq2SeqDataset,
     SentimentPrototypeHead,
+    build_sentiment_class_weights,
     gradient_reverse,
     mean_pool_encoder_hidden,
     sentiment_prototype_contrastive_loss,
@@ -66,11 +67,13 @@ def test_dataset_builds_clean_sentiment_contrastive_features():
         rows, TinyTokenizer(), 64, 64, 1.0, 0.5, 0.2,
         sentiment_contrastive_min_weight=0.65,
         sentiment_contrastive_exclude_augment=True,
+        sentiment_contrastive_source_only=True,
     )
 
     assert dataset[0]["sentiment_contrastive_labels"] == [2]
-    assert dataset[1]["sentiment_contrastive_labels"] == [0]
+    assert dataset[1]["sentiment_contrastive_labels"] == []
     assert dataset[2]["sentiment_contrastive_labels"] == []
+    assert dataset[0]["sentiment_contrastive_weights"] == [1.0]
 
 
 def test_sentiment_prototype_loss_works_with_one_triplet():
@@ -78,8 +81,13 @@ def test_sentiment_prototype_loss_works_with_one_triplet():
     spans = torch.tensor([[[0, 2]]])
     labels = torch.tensor([[0]])
     mask = torch.tensor([[1]])
+    sample_weights = torch.tensor([[0.7]])
     head = SentimentPrototypeHead(hidden_size=2)
-    loss = sentiment_prototype_contrastive_loss(hidden, spans, labels, mask, head, temperature=0.1)
+    loss = sentiment_prototype_contrastive_loss(
+        hidden, spans, labels, mask, head, temperature=0.1,
+        sample_weights=sample_weights,
+        class_weights=torch.tensor([1.0, 2.0, 3.0]),
+    )
 
     assert loss.ndim == 0
     assert torch.isfinite(loss)
@@ -88,10 +96,18 @@ def test_sentiment_prototype_loss_works_with_one_triplet():
     assert hidden.grad is not None
 
 
+def test_sentiment_class_weights_upweight_rare_neutral_class():
+    weights = build_sentiment_class_weights({"pos": 1200, "neg": 500, "neu": 50})
+
+    assert len(weights) == 3
+    assert weights[2] > weights[1] > weights[0]
+
+
 if __name__ == "__main__":
     test_dataset_assigns_domain_labels()
     test_gradient_reverse_flips_gradient_sign()
     test_domain_head_pooling_produces_domain_logits()
     test_dataset_builds_clean_sentiment_contrastive_features()
     test_sentiment_prototype_loss_works_with_one_triplet()
+    test_sentiment_class_weights_upweight_rare_neutral_class()
     print("domain adversarial training tests passed")
