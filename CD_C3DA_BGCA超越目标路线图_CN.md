@@ -6,16 +6,20 @@
 
 GloVe（全局词向量）极性轴增强的 raw F1=44.70，低于当前最佳 46.63，说明继续单独微调静态词向量阈值收益有限。当前不改数据增强、不改伪标签、不改 DANN（领域对抗），只在最佳最终训练文件上加入 supervised prototype contrastive learning（监督式原型对比学习），做严格单变量消融。
 
-对比学习从每个三元组的 opinion span（观点词跨度）提取解码器上下文表示，并与 pos/neg/neu（正向/负向/中性）三个可训练原型计算温度缩放交叉熵。它支持 batch size=1（批大小为 1），因此适配 RTX 3070 8GB。source gold（源域人工标注）和权重不低于 0.65 的 target pseudo（目标域伪标签）参与，augment（增强数据）不参与。本轮共有 1276 个合格句子、1812 个三元组，其中 pos=1224、neg=538、neu=50。
+对比学习从每个三元组的 opinion span（观点词跨度）提取解码器上下文表示，并与 pos/neg/neu（正向/负向/中性）三个可训练原型计算温度缩放交叉熵。第一版使用 source gold（源域人工标注）和高精度 target pseudo（目标域伪标签），`lambda=0.05`，结果为 raw F1=43.92、fixed F1=46.72，精确率与召回率同时低于最佳；对应模型、检查点和专属指标已删除。
+
+第二版只让 source gold（源域人工标注）参与对比损失，完全排除伪标签和增强数据；对正负中性使用平方根倒频率类别权重，并把对比权重降至 0.01。实际参与的是 857 句、1393 个三元组，其中 pos=1015、neg=328、neu=50，自动类别权重约为 0.413/0.726/1.861。训练日志新增 generation loss（生成损失）、domain adversarial loss（领域对抗损失）、sentiment contrastive loss（情感对比损失）、总体原型准确率和正负中性分类准确率。
 
 ```text
---lambda_sentiment_contrastive 0.05
+--lambda_sentiment_contrastive 0.01
 --sentiment_contrastive_temperature 0.10
 --sentiment_contrastive_min_weight 0.65
 --sentiment_contrastive_exclude_augment
+--sentiment_contrastive_source_only
+--sentiment_contrastive_class_balanced
 ```
 
-本轮复用当前最佳 `final_train_strict_aug150_w020_label_to_text_gen.jsonl` 和对应 dev（验证）文件，只重新训练最终 5 轮模型并评估。对照仍为 raw F1=46.63、fixed F1=48.98；若 `lambda=0.05` 有提升，再进行 0.02/0.05/0.10 参数搜索。
+本轮复用当前最佳 `final_train_strict_aug150_w020_label_to_text_gen.jsonl` 和对应 dev（验证）文件，只重新训练最终 5 轮模型并评估。对照仍为 raw F1=46.63、fixed F1=48.98。先通过分项日志确认对比损失尺度和三类准确率，再决定是否继续参数搜索。
 
 当前保留并使用的领域前缀：
 
