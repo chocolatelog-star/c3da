@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `f809beb Balance and instrument sentiment contrastive loss` |
+| 当前代码版本 | `c94a094 Apply contextual contrastive learning end to end` |
 | 当前分支 | `master` |
 | 主实验目录 | `runs\bgca_aste_stage1_baseline` |
 | 当前六组实验状态 | 已完成 |
@@ -17,9 +17,9 @@
 | 主对比指标 | `raw F1`（原始 F1） |
 | 辅助分析指标 | `fixed F1`（修正 F1） |
 
-## 0.1 当前阶段：情感原型对比学习消融
+## 0.1 当前阶段：全流程编码器情感原型对比学习
 
-GloVe（全局词向量）极性轴增强低于最佳结果后，当前固定 raw F1=46.63、fixed F1=48.98 的全部数据与 DANN（领域对抗）配置，只在最终 5 轮训练中加入 supervised prototype contrastive learning（监督式原型对比学习）。对比对象是解码器中的观点词上下文表示，正向、负向、中性各有一个可训练原型；增强数据不参与该损失，高精度伪标签仅在样本权重不低于 0.65 时参与。
+第二版只在最终 5 轮加入解码器观点原型对比学习，得到 raw F1=46.82、fixed F1=48.94，召回率提高但中性原型准确率最终为 0%。当前升级为完整流程：先用预训练 T5 编码器对源域句子中的观点跨度生成上下文表示并初始化正/负/中性原型，再从 25 轮初始提取器开始使用类别平衡对比损失；随后重新生成伪标签、训练生成器、做掩码增强，并在最终 5 轮模型中再次使用编码器上下文原型。对比学习只使用源域人工标注，伪标签和增强数据不参与该损失。
 
 | 实验项 | 配置 |
 |---|---|
@@ -40,10 +40,11 @@ GloVe（全局词向量）极性轴增强低于最佳结果后，当前固定 ra
 | 极性轴阈值 | pos >= 0.005817；neg <= -0.024779；neutral abs <= 0.177709 |
 | 观点过滤 | 原观点相似度至少 0.35；无方面-观点共现时至少 0.50；提取器回抽观点相似度至少 0.45，并要求极性一致 |
 | 第一版对比学习结果 | `lambda=0.05`，raw F1=43.92、fixed F1=46.72，低于最佳 46.63/48.98；模型、检查点和专属指标已删除 |
-| 当前对比学习参数 | `--lambda_sentiment_contrastive 0.01 --sentiment_contrastive_source_only --sentiment_contrastive_class_balanced --sentiment_contrastive_exclude_augment` |
-| 当前对比学习样本 | 857 句、1393 个源域三元组：pos=1015、neg=328、neu=50；类别权重约 0.413/0.726/1.861 |
-| 复用训练文件 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\final_train_strict_aug150_w020_label_to_text_gen.jsonl` |
-| 新模型位置 | `models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5` |
+| 第二版对比学习结果 | `lambda=0.01`、仅最终阶段、解码器观点表示：raw F1=46.82、fixed F1=48.94；raw 比旧最佳高 0.19，但中性原型准确率为 0%，保留为候选而非正式结论 |
+| 当前对比学习参数 | 初始提取器与最终模型均使用 `lambda=0.01`、仅源域、类别平衡、编码器上下文原型初始化 |
+| 当前对比学习样本 | 857 句、1393 个源域三元组，编码器观点跨度覆盖率 100%；pos=1015、neg=328、neu=50；类别权重约 0.413/0.726/1.861 |
+| 当前完整实验目录 | `runs\bgca_aste_stage1_full_contrastive_encoder_v1\rest16_to_laptop14` |
+| 阶段判断标准 | 新提取器高精度伪标签 F1 对比 50.35；最终 raw F1 对比 46.82，fixed F1 对比 48.94 |
 
 ## 0.2 代码版本变更记录
 
@@ -51,7 +52,8 @@ GloVe（全局词向量）极性轴增强低于最佳结果后，当前固定 ra
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
-| 2026-07-13 | `f809beb Balance and instrument sentiment contrastive loss` | 对比学习第二版 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 对比损失降至 0.01；仅源域人工标注参与；按平方根倒频率平衡正负中性；保留样本置信度加权接口；训练日志分别输出生成、领域对抗、对比损失和各类原型准确率；使用独立 `_l001_source_balanced` 标签 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5` | 待跑；对照 raw F1=46.63、fixed F1=48.98 |
+| 2026-07-13 | `c94a094 Apply contextual contrastive learning end to end` | 全流程编码器上下文对比学习 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 预训练 T5 编码器先生成源域观点上下文表示并初始化三类原型；观点跨度大小写兼容定位达到 1393/1393；25 轮初始提取器和最终 5 轮模型都使用源域类别平衡对比损失；伪标签、生成器和掩码增强全部重跑；各阶段支持检查点续训并使用独立目录 | `runs\bgca_aste_stage1_full_contrastive_encoder_v1\rest16_to_laptop14` | 待跑完整流程 |
+| 2026-07-13 | `f809beb Balance and instrument sentiment contrastive loss` | 对比学习第二版 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 对比损失降至 0.01；仅源域人工标注参与；按平方根倒频率平衡正负中性；训练日志分别输出生成、领域对抗、对比损失和各类原型准确率；仅在最终 5 轮使用解码器观点表示 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5` | raw F1=46.82、fixed F1=48.94；召回提高，但中性原型准确率为 0% |
 | 2026-07-12 | `f0e8dc6 Add sentiment prototype contrastive training` | 情感原型对比学习第一版 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 从每个三元组的观点词解码器表示计算三类可训练原型损失；支持 batch size=1；排除增强数据；源域和高精度伪标签参与；权重 0.05 | 完整模型、检查点和专属指标已删除 | raw F1=43.92、fixed F1=46.72；精确率与召回率同时下降 |
 | 2026-07-11 | `33c76e3 Add polarity-aware opinion augmentation` | GloVe 极性轴与观点一致性过滤 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py` | 用 pos-neg 差向量建立极性轴并从带权样本分布估计阈值；增加原观点相似度、无共现严格阈值；观点通道模型过滤新增观点相似度和极性检查；新实验使用独立 `_polarity_axis` 标签 | 保留 `sentiment_vector_diagnostics_glove_polarity_diag_v2.json`；完整增强输出与最终模型已删除 | raw F1=44.70、fixed F1=46.82，低于当前最佳；极性约束有效但方面词-观点词搭配仍不自然 |
 | 2026-07-11 | `38923fb Add GloVe sentiment vector backend` | GloVe 情感向量后端 | `t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、`test_masked_mutual_augment.py`、`实验记录与模型索引_CN.md`、`CD_C3DA_BGCA超越目标路线图_CN.md` | 新增 `--sentiment_vector_backend glove`、`--glove_path` 和 `--sentiment_vector_diagnostics_only`；按需加载 GloVe 词向量，多词观点短语取平均并归一化；source gold 权重 1.0、target pseudo 权重 0.65 构建情感中心；诊断阶段不调用生成器和训练。 | `sentiment_vector_diagnostics_glove_sentiment_diag_m005.json` | 覆盖率 97.18%，但情感中心相似度过高，按预设门槛暂停训练 |

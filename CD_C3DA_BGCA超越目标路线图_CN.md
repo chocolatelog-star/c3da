@@ -1,14 +1,14 @@
 # CD-C3DA 跨域 ASTE 超越 BGCA 目标路线图
 
-## 0. 当前推进重点：情感原型对比学习
+## 0. 当前推进重点：全流程编码器情感原型对比学习
 
 六组 BGCA 风格跨域实验已经跑完，当前平均 `raw F1`（原始 F1）为 49.86，平均 `fixed F1`（修正 F1）为 51.59。主要短板仍然是 `recall`（召回率）偏低，尤其是 `laptop14 -> restaurant`（笔记本到餐馆）方向。
 
-GloVe（全局词向量）极性轴增强的 raw F1=44.70，低于当前最佳 46.63，说明继续单独微调静态词向量阈值收益有限。当前不改数据增强、不改伪标签、不改 DANN（领域对抗），只在最佳最终训练文件上加入 supervised prototype contrastive learning（监督式原型对比学习），做严格单变量消融。
+GloVe（全局词向量）极性轴增强的 raw F1=44.70，低于旧最佳 46.63。只在最终模型加入监督式原型对比学习的第二版得到 raw F1=46.82、fixed F1=48.94，但中性原型准确率最终为 0%，说明晚期解码器约束没有真正解决中性边界。
 
-对比学习从每个三元组的 opinion span（观点词跨度）提取解码器上下文表示，并与 pos/neg/neu（正向/负向/中性）三个可训练原型计算温度缩放交叉熵。第一版使用 source gold（源域人工标注）和高精度 target pseudo（目标域伪标签），`lambda=0.05`，结果为 raw F1=43.92、fixed F1=46.72，精确率与召回率同时低于最佳；对应模型、检查点和专属指标已删除。
+当前版本从预训练 T5 编码器的输入句子中定位 opinion span（观点词跨度），先计算源域上下文表示并以三类均值初始化 pos/neg/neu（正向/负向/中性）原型。随后在 25 轮初始提取器训练中持续优化编码器观点表示和原型，再用该提取器重新生成目标伪标签。生成器仍使用 label-to-text（标签到文本），数据增强仍使用文本式领域前缀和 masked mutual（互相掩码），最终模型再次使用同样的编码器对比约束。
 
-第二版只让 source gold（源域人工标注）参与对比损失，完全排除伪标签和增强数据；对正负中性使用平方根倒频率类别权重，并把对比权重降至 0.01。实际参与的是 857 句、1393 个三元组，其中 pos=1015、neg=328、neu=50，自动类别权重约为 0.413/0.726/1.861。训练日志新增 generation loss（生成损失）、domain adversarial loss（领域对抗损失）、sentiment contrastive loss（情感对比损失）、总体原型准确率和正负中性分类准确率。
+对比损失只使用 source gold（源域人工标注），完全排除伪标签和增强数据；857 句中的 1393 个观点跨度全部成功定位，覆盖率 100%，其中 pos=1015、neg=328、neu=50，平方根倒频率类别权重约为 0.413/0.726/1.861。初始提取器和最终模型的对比权重均为 0.01。首次运行有独立原型初始化进度条和 JSON 记录，中断后从检查点恢复时不会重复初始化。
 
 ```text
 --lambda_sentiment_contrastive 0.01
@@ -17,9 +17,11 @@ GloVe（全局词向量）极性轴增强的 raw F1=44.70，低于当前最佳 4
 --sentiment_contrastive_exclude_augment
 --sentiment_contrastive_source_only
 --sentiment_contrastive_class_balanced
+--sentiment_prototype_initialize_from_context
+--extractor_lambda_sentiment_contrastive 0.01
 ```
 
-本轮复用当前最佳 `final_train_strict_aug150_w020_label_to_text_gen.jsonl` 和对应 dev（验证）文件，只重新训练最终 5 轮模型并评估。对照仍为 raw F1=46.63、fixed F1=48.98。先通过分项日志确认对比损失尺度和三类准确率，再决定是否继续参数搜索。
+本轮使用独立目录 `runs\bgca_aste_stage1_full_contrastive_encoder_v1` 从 prepare（准备数据）开始完整重跑。第一阶段先比较新提取器高精度伪标签 F1 与旧值 50.35；第二阶段比较最终 raw F1 与 46.82、fixed F1 与 48.94。若提取器伪标签没有改善，即使最终分数偶然提升，也不能证明全流程情感表示学习有效。
 
 当前保留并使用的领域前缀：
 
