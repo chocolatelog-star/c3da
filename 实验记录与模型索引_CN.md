@@ -45,6 +45,9 @@
 | 当前对比学习样本 | 857 句、1393 个源域三元组，编码器观点跨度覆盖率 100%；pos=1015、neg=328、neu=50；类别权重约 0.413/0.726/1.861 |
 | 当前完整实验目录 | `runs\bgca_aste_stage1_full_contrastive_encoder_v1\rest16_to_laptop14` |
 | 阶段判断标准 | 新提取器高精度伪标签 F1 对比 50.35；最终 raw F1 对比 46.82，fixed F1 对比 48.94 |
+| 当前消融 A | 新伪标签 + 新增强数据，最终模型关闭对比学习，只保留 DANN；输出 `final_ablation_upstream_only_nocontrast_ep5` |
+| 当前消融 B | 原 46.63 基线训练集，最终模型使用编码器上下文原型对比学习；输出 `final_ablation_encoder_context_contrast_l001_ep5` |
+| 消融判定 | A 低则上游数据是主因；B 低则最终编码器对比损失是主因；A/B 都低则两部分均有负贡献；仅完整组合低则存在交互冲突 |
 
 ## 0.2 代码版本变更记录
 
