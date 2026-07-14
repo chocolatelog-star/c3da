@@ -48,6 +48,7 @@
 | 当前消融 A | 新伪标签 + 新增强数据，最终模型关闭对比学习，只保留 DANN；输出 `final_ablation_upstream_only_nocontrast_ep5` |
 | 当前消融 B | 原 46.63 基线训练集，最终模型使用编码器上下文原型对比学习；输出 `final_ablation_encoder_context_contrast_l001_ep5` |
 | 消融判定 | A 低则上游数据是主因；B 低则最终编码器对比损失是主因；A/B 都低则两部分均有负贡献；仅完整组合低则存在交互冲突 |
+| 无人值守队列 | `run_unattended_ablation_queue.ps1` 串行执行消融 A、消融 B、完整 T5 情感向量流程；独立日志与状态保存在 `runs\unattended_queue_logs`，每步最多自动重试 3 次 |
 
 ## 0.2 代码版本变更记录
 
