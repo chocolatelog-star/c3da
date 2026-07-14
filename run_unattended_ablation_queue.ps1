@@ -49,8 +49,11 @@ function Invoke-PythonStep {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         Write-QueueStatus $Name "running" "attempt $attempt"
         "[$(Get-Date -Format s)] START $Name attempt=$attempt" | Tee-Object -FilePath $LogPath -Append
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & $Python @Arguments 2>&1 | Tee-Object -FilePath $LogPath -Append
         $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorAction
         if ($exitCode -eq 0 -and (Test-AllPaths $ExpectedPaths)) {
             "[$(Get-Date -Format s)] DONE $Name" | Tee-Object -FilePath $LogPath -Append
             Write-QueueStatus $Name "completed"
@@ -83,8 +86,11 @@ function Invoke-Evaluation {
     }
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         Write-QueueStatus $Name "running" "attempt $attempt"
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & $Python "t5_aste_pipeline.py" "evaluate" "--run_dir" $RunDir "--model_path" $ModelPath @CommonEval 2>&1 | Tee-Object -FilePath $LogPath -Append
         $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorAction
         $raw = Join-Path $RunDir "aste_metrics_raw.json"
         $fixed = Join-Path $RunDir "aste_metrics_fixed.json"
         if ($exitCode -eq 0 -and (Test-AllPaths @($raw, $fixed))) {
