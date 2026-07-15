@@ -48,6 +48,7 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+.worktrees/
 
 # Temporary notes
 _tmp_*
