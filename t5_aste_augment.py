@@ -16,6 +16,7 @@ PROMPT_STYLES = {
     "rewrite_aspect",
     "label_composition",
     "label_to_text",
+    "mixed",
     "rsda_t5_label_composition",
     "sentence_fusion_composition",
 }
@@ -1515,9 +1516,58 @@ def build_generator_training_rows(
     rng = random.Random(seed)
     domain_prefix = format_domain_prefix(domain_name, domain_prefix_style)
     if prompt_style not in PROMPT_STYLES:
-        raise ValueError("prompt_style must be one of concept, legacy, masked_mutual, rewrite_aspect, label_composition, label_to_text")
+        raise ValueError(f"prompt_style must be one of {', '.join(sorted(PROMPT_STYLES))}")
     if channel_mode not in CHANNEL_MODES:
         raise ValueError("channel_mode must be one of all, aspect, opinion")
+    if prompt_style == "mixed":
+        indexed_rows = [dict(row, _generator_source_index=index) for index, row in enumerate(rows)]
+        channel_candidates = {
+            "label_to_text_generator": build_generator_training_rows(
+                indexed_rows,
+                seed,
+                prompt_style="label_to_text",
+                channel_mode="all",
+                domain_name=domain_name,
+                domain_prefix_style=domain_prefix_style,
+            ),
+            "masked_aspect_editor": build_generator_training_rows(
+                indexed_rows,
+                seed + 1,
+                prompt_style="masked_mutual",
+                channel_mode="aspect",
+                domain_name=domain_name,
+                domain_prefix_style=domain_prefix_style,
+            ),
+            "masked_opinion_sentiment_editor": build_generator_training_rows(
+                indexed_rows,
+                seed + 2,
+                prompt_style="masked_mutual",
+                channel_mode="opinion",
+                domain_name=domain_name,
+                domain_prefix_style=domain_prefix_style,
+            ),
+        }
+        selected: list[dict] = []
+        selector = random.Random(seed + 3)
+        for source_index in range(len(rows)):
+            for channel in (
+                "label_to_text_generator",
+                "masked_aspect_editor",
+                "masked_opinion_sentiment_editor",
+            ):
+                candidates = [
+                    row
+                    for row in channel_candidates[channel]
+                    if row.get("source_index") == source_index
+                ]
+                if candidates:
+                    selected.append(selector.choice(candidates))
+        return selected
+
+    def attach_source_index(train_row: dict, source_row: dict) -> None:
+        if "_generator_source_index" in source_row:
+            train_row["source_index"] = int(source_row["_generator_source_index"])
+
     aspect_pool = [
         (aspect, sentiment)
         for row in rows
@@ -1550,6 +1600,7 @@ def build_generator_training_rows(
                 train_row["domain_name"] = domain_name
                 train_row["domain_prefix_style"] = domain_prefix_style
                 train_row["domain_prefix"] = domain_prefix
+            attach_source_index(train_row, row)
             train_rows.append(train_row)
             continue
         if prompt_style in {"masked_mutual", "rewrite_aspect"}:
@@ -1595,6 +1646,7 @@ def build_generator_training_rows(
                         train_row["domain_name"] = domain_name
                         train_row["domain_prefix_style"] = domain_prefix_style
                         train_row["domain_prefix"] = domain_prefix
+                    attach_source_index(train_row, row)
                     train_rows.append(train_row)
                 if channel_mode in {"all", "opinion"} and prompt_style == "masked_mutual":
                     new_opinion, new_sentiment = _choose_replacement_opinion(rng, opinion_bank, opinion, sentiment)
@@ -1625,6 +1677,7 @@ def build_generator_training_rows(
                         train_row["domain_name"] = domain_name
                         train_row["domain_prefix_style"] = domain_prefix_style
                         train_row["domain_prefix"] = domain_prefix
+                    attach_source_index(train_row, row)
                     train_rows.append(train_row)
         else:
             if prompt_style == "legacy":
@@ -1645,6 +1698,7 @@ def build_generator_training_rows(
                 train_row["domain_name"] = domain_name
                 train_row["domain_prefix_style"] = domain_prefix_style
                 train_row["domain_prefix"] = domain_prefix
+            attach_source_index(train_row, row)
             train_rows.append(train_row)
     return train_rows
 

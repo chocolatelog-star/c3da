@@ -1,4 +1,5 @@
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from t5_aste_augment import (
@@ -105,6 +106,68 @@ def test_masked_mutual_generator_training_uses_source_masked_prompts():
     assert any("[ASP]" in row["input"] for row in train_rows)
     assert any("[OPI]" in row["input"] for row in train_rows)
     assert {row["channel"] for row in train_rows} == {"masked_aspect_editor", "masked_opinion_sentiment_editor"}
+
+
+def test_mixed_generator_training_balances_three_tasks_per_source():
+    rows = [
+        {
+            "id": "s1",
+            "text": "The battery is great.",
+            "label": "<pos> battery <opinion> great",
+        },
+        {
+            "id": "s2",
+            "text": "The screen is bright.",
+            "label": "<pos> screen <opinion> bright",
+        },
+    ]
+
+    train_rows = build_generator_training_rows(
+        rows,
+        seed=13,
+        prompt_style="mixed",
+        channel_mode="all",
+        domain_name="rest16",
+        domain_prefix_style="text",
+    )
+
+    assert Counter(row["channel"] for row in train_rows) == {
+        "label_to_text_generator": 2,
+        "masked_aspect_editor": 2,
+        "masked_opinion_sentiment_editor": 2,
+    }
+    assert {row["source_index"] for row in train_rows} == {0, 1}
+    assert all(row["domain_name"] == "rest16" for row in train_rows)
+    assert all(row["domain_prefix_style"] == "text" for row in train_rows)
+    assert all(row["domain_prefix"] == "target domain: [rest16] ; " for row in train_rows)
+    assert all(
+        row["target"] != rows[row["source_index"]]["text"]
+        for row in train_rows
+        if row["channel"] != "label_to_text_generator"
+    )
+
+
+def test_mixed_generator_training_is_deterministic_and_caps_each_channel():
+    rows = [
+        {
+            "id": "s1",
+            "text": "The battery is great but the keyboard is stiff.",
+            "label": "<pos> battery <opinion> great ; <neg> keyboard <opinion> stiff",
+        },
+        {
+            "id": "s2",
+            "text": "The screen is bright but the trackpad is awful.",
+            "label": "<pos> screen <opinion> bright ; <neg> trackpad <opinion> awful",
+        },
+    ]
+
+    first = build_generator_training_rows(rows, seed=1000, prompt_style="mixed")
+    second = build_generator_training_rows(rows, seed=1000, prompt_style="mixed")
+
+    assert first == second
+    for source_index in {row["source_index"] for row in first}:
+        source_rows = [row for row in first if row["source_index"] == source_index]
+        assert len(source_rows) == len({row["channel"] for row in source_rows})
 
 
 def test_generator_training_can_add_text_domain_prefix():
