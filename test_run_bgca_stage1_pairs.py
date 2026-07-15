@@ -108,6 +108,21 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--neutral_generation_loss_gain 1.0", output)
         self.assertIn("--neutral_generation_max_effective_weight 2.0", output)
 
+    def test_mixed_generator_uses_isolated_files_model_and_resume(self) -> None:
+        output = self.run_dry("--generator_prompt_style", "mixed")
+
+        self.assertIn("--augment_prompt_style mixed", output)
+        self.assertIn("c3da_generator_train_mixed_l2t_masked_aspect_masked_opinion.jsonl", output)
+        self.assertIn("generator_mixed_l2t_masked_aspect_masked_opinion_ep8", output)
+        self.assertIn("--resume_from_checkpoint auto", output)
+        self.assertIn("--augment_prompt_style masked_mutual", output)
+        self.assertIn("strict_aug150_w020_mixed_l2t_masked_aspect_masked_opinion", output)
+        self.assertIn("--per_device_train_batch_size 1", output)
+        self.assertIn("--per_device_eval_batch_size 2", output)
+        self.assertIn("--gradient_accumulation_steps 16", output)
+        self.assertIn("--fp16", output)
+        self.assertIn("--gradient_checkpointing", output)
+
 
 if __name__ == "__main__":
     unittest.main()

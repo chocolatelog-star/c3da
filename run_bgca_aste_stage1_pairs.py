@@ -69,6 +69,8 @@ def generator_tag(prompt_style: str) -> str:
         return "label_to_text_gen"
     if prompt_style == "masked_mutual":
         return "masked_mutual_gen"
+    if prompt_style == "mixed":
+        return "mixed_l2t_masked_aspect_masked_opinion"
     raise ValueError(f"unsupported generator prompt style: {prompt_style}")
 
 
@@ -800,7 +802,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pairs", default="all", help="all or comma list like rest16:laptop14,laptop14:rest16")
     parser.add_argument("--extractor_model_path", default=r"J:\nlp\models\t5-base-py")
     parser.add_argument("--generator_model_path", default=r"J:\nlp\models\t5-base-py")
-    parser.add_argument("--generator_prompt_style", choices=["label_to_text", "masked_mutual"], default="label_to_text")
+    parser.add_argument(
+        "--generator_prompt_style",
+        choices=["label_to_text", "masked_mutual", "mixed"],
+        default="label_to_text",
+    )
     parser.add_argument("--augment_prompt_style", choices=["label_to_text", "masked_mutual"], default="masked_mutual")
     parser.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     parser.add_argument(
