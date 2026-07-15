@@ -2503,7 +2503,14 @@ def augment(args: argparse.Namespace) -> None:
                 name=args.pseudo_train_source,
             ),
         }
-        dump_json(run_dir / "target_pseudo_used_for_training_analysis.json", pseudo_train_eval)
+        dump_json(
+            tagged_output_path(
+                run_dir,
+                "target_pseudo_used_for_training_analysis.json",
+                args.final_train_output_tag,
+            ),
+            pseudo_train_eval,
+        )
     combined_aug_rows = selected_augmented_rows + extra_aug_rows
     include_source_in_final_train = not args.no_final_train_source
     final_rows = build_final_training_rows(
@@ -2574,11 +2581,18 @@ def evaluate(args: argparse.Namespace) -> None:
     result = evaluate_raw_and_fixed(eval_rows)
     raw_metrics = result["raw_scores"]
     fixed_metrics = result["fixed_scores"]
-    dump_json(run_dir / "aste_metrics.json", raw_metrics)
-    dump_json(run_dir / "aste_metrics_raw.json", raw_metrics)
-    dump_json(run_dir / "aste_metrics_fixed.json", fixed_metrics)
-    write_jsonl(run_dir / "aste_predictions.jsonl", [{"text": row["text"], "gold": row["gold"], "pred": row["pred_raw"]} for row in result["predictions"]])
-    write_jsonl(run_dir / "aste_predictions_raw_fixed.jsonl", result["predictions"])
+    output_tag = args.output_tag
+    dump_json(tagged_output_path(run_dir, "aste_metrics.json", output_tag), raw_metrics)
+    dump_json(tagged_output_path(run_dir, "aste_metrics_raw.json", output_tag), raw_metrics)
+    dump_json(tagged_output_path(run_dir, "aste_metrics_fixed.json", output_tag), fixed_metrics)
+    write_jsonl(
+        tagged_output_path(run_dir, "aste_predictions.jsonl", output_tag),
+        [{"text": row["text"], "gold": row["gold"], "pred": row["pred_raw"]} for row in result["predictions"]],
+    )
+    write_jsonl(
+        tagged_output_path(run_dir, "aste_predictions_raw_fixed.jsonl", output_tag),
+        result["predictions"],
+    )
     print({"raw_scores": raw_metrics, "fixed_scores": fixed_metrics})
 
 
@@ -2736,6 +2750,7 @@ def main() -> None:
     p.add_argument("--cuda", default="0")
     p.add_argument("--no_constrained_decoding", action="store_true")
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--output_tag", default="")
     p.set_defaults(func=evaluate)
 
     p = sub.add_parser("select_pseudo")

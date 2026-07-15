@@ -43,8 +43,10 @@ class GeneratorLabelToTextTest(unittest.TestCase):
                     run_dir=str(run_dir),
                     dev_ratio=0.1,
                     seed=13,
-                    augment_prompt_style="masked_mutual",
+                    augment_prompt_style="label_to_text",
                     augment_channel_mode="all",
+                    domain_prefix_style="none",
+                    generator_output_tag="",
                     no_task_prefix=True,
                 )
                 prepare(args)

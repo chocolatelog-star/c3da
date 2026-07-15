@@ -36,8 +36,15 @@ def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def stage_done(status: dict, stage: str, outputs: list[Path], rerun: bool) -> bool:
-    return bool(status.get(stage)) and not rerun and all(path.exists() for path in outputs)
+def stage_done(
+    status: dict,
+    stage: str,
+    outputs: list[Path],
+    rerun: bool,
+    legacy_stages: tuple[str, ...] = (),
+) -> bool:
+    marked_done = bool(status.get(stage)) or any(bool(status.get(name)) for name in legacy_stages)
+    return marked_done and not rerun and all(path.exists() for path in outputs)
 
 
 def mark_done(status_path: Path, status: dict, stage: str) -> None:
@@ -49,12 +56,36 @@ def pair_run_dir(root: Path, source: str, target: str) -> Path:
     return root / f"{source}_to_{target}"
 
 
+def summary_output_paths(output_root: Path, output_tag: str = "") -> tuple[Path, Path]:
+    suffix = f"_{output_tag}" if output_tag else ""
+    return (
+        output_root / f"results_bgca_aste_stage1{suffix}.csv",
+        output_root / f"results_bgca_aste_stage1{suffix}_CN.md",
+    )
+
+
 def generator_tag(prompt_style: str) -> str:
     if prompt_style == "label_to_text":
         return "label_to_text_gen"
     if prompt_style == "masked_mutual":
         return "masked_mutual_gen"
     raise ValueError(f"unsupported generator prompt style: {prompt_style}")
+
+
+def pseudo_filter_tag(max_triplets: int, max_token_distance: int) -> str:
+    if max_triplets < 1:
+        raise ValueError("high_precision_max_triplets must be at least 1")
+    if max_token_distance < 0:
+        raise ValueError("high_precision_max_token_distance must be non-negative")
+    return f"hp{max_triplets}_dist{max_token_distance}"
+
+
+def legacy_hp1_stage_names(generator_output_tag: str) -> dict[str, tuple[str, ...]]:
+    return {
+        "augment": (f"augment_{generator_output_tag}",),
+        "train_final": (f"train_final_{generator_output_tag}",),
+        "evaluate": (f"evaluate_{generator_output_tag}",),
+    }
 
 
 def augment_experiment_tag(
@@ -153,7 +184,13 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             extractor_tag += "_encoder_context_init"
     extractor_dir = run_dir / "models" / extractor_tag
     extractor_stage = f"train_{extractor_tag}"
-    if not stage_done(status, extractor_stage, [extractor_dir / "best" / "config.json"], args.rerun):
+    if not stage_done(
+        status,
+        extractor_stage,
+        [extractor_dir / "best" / "config.json"],
+        args.rerun,
+        legacy_stages=("train_extractor",),
+    ):
         run_command(
             [
                 py,
@@ -200,7 +237,17 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, extractor_stage)
 
     pseudo_stage = f"pseudo_{extractor_tag}"
-    if not stage_done(status, pseudo_stage, [run_dir / "target_pseudo_high_precision_analysis.json"], args.rerun):
+    if not stage_done(
+        status,
+        pseudo_stage,
+        [
+            run_dir / "target_pseudo.jsonl",
+            run_dir / "target_pseudo_high_precision.jsonl",
+            run_dir / "target_pseudo_high_precision_analysis.json",
+        ],
+        args.rerun,
+        legacy_stages=("pseudo",),
+    ):
         run_command(
             [
                 py,
@@ -231,6 +278,48 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         )
         if not args.dry_run:
             mark_done(status_path, status, pseudo_stage)
+
+    pseudo_tag = pseudo_filter_tag(
+        args.high_precision_max_triplets,
+        args.high_precision_max_token_distance,
+    )
+    use_legacy_pseudo_filter = (
+        args.high_precision_max_triplets == 1
+        and args.high_precision_max_token_distance == 5
+    )
+    pseudo_train_file = run_dir / "target_pseudo_high_precision.jsonl"
+    pseudo_analysis_file = run_dir / "target_pseudo_high_precision_analysis.json"
+    if not use_legacy_pseudo_filter:
+        pseudo_variant_dir = run_dir / "pseudo_variants" / pseudo_tag
+        pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+        pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+        pseudo_filter_stage = f"select_pseudo_{extractor_tag}_{pseudo_tag}"
+        if not stage_done(
+            status,
+            pseudo_filter_stage,
+            [pseudo_train_file, pseudo_analysis_file],
+            args.rerun,
+        ):
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "select_pseudo",
+                    "--run_dir",
+                    str(run_dir),
+                    "--output_dir",
+                    str(pseudo_variant_dir),
+                    "--min_pseudo_weight",
+                    "0.65",
+                    "--high_precision_max_triplets",
+                    str(args.high_precision_max_triplets),
+                    "--high_precision_max_token_distance",
+                    str(args.high_precision_max_token_distance),
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, pseudo_filter_stage)
 
     generator_dir = run_dir / "models" / f"generator_{gen_tag}_ep{args.generator_epochs}"
     if not stage_done(status, f"train_generator_{gen_tag}", [generator_dir / "best" / "config.json"], args.rerun):
@@ -265,8 +354,9 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, f"train_generator_{gen_tag}")
 
+    pseudo_suffix = "" if use_legacy_pseudo_filter else f"_{pseudo_tag}"
     final_tag = augment_experiment_tag(
-        f"strict_aug150_w020_{gen_tag}",
+        f"strict_aug150_w020_{gen_tag}{pseudo_suffix}",
         args.opinion_replacement_mode,
         args.sentiment_vector_backend,
         args.sentiment_vector_use_polarity_axis,
@@ -279,7 +369,15 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         and final_dev_file.exists()
         and not args.rerun
     )
-    if not reuse_for_contrastive and not stage_done(status, f"augment_{final_tag}", [final_train_file], args.rerun):
+    legacy_stage_names = legacy_hp1_stage_names(gen_tag) if use_legacy_pseudo_filter else {}
+    augment_legacy_stages = legacy_stage_names.get("augment", ())
+    if not reuse_for_contrastive and not stage_done(
+        status,
+        f"augment_{final_tag}",
+        [final_train_file],
+        args.rerun,
+        legacy_stages=augment_legacy_stages,
+    ):
         run_command(
             [
                 py,
@@ -328,10 +426,12 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--augment_select_require_model_filter_passed",
                 "--pseudo_train_source",
                 "high_precision",
+                "--pseudo_train_file",
+                str(pseudo_train_file),
                 "--high_precision_max_triplets",
-                "1",
+                str(args.high_precision_max_triplets),
                 "--high_precision_max_token_distance",
-                "5",
+                str(args.high_precision_max_token_distance),
                 "--model_filter_path",
                 str(extractor_dir / "best"),
                 "--model_filter_mode",
@@ -365,7 +465,13 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if args.sentiment_prototype_initialize_from_context:
             result_tag += "_encoder_context_init"
     final_dir = run_dir / "models" / f"final_dann_l0.03_{result_tag}_ep{args.final_epochs}"
-    if not stage_done(status, f"train_final_{result_tag}", [final_dir / "best" / "config.json"], args.rerun):
+    if not stage_done(
+        status,
+        f"train_final_{result_tag}",
+        [final_dir / "best" / "config.json"],
+        args.rerun,
+        legacy_stages=legacy_stage_names.get("train_final", ()),
+    ):
         run_command(
             [
                 py,
@@ -414,9 +520,27 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, f"train_final_{result_tag}")
 
-    raw_metrics_path = run_dir / f"aste_metrics_raw_{result_tag}.json"
-    fixed_metrics_path = run_dir / f"aste_metrics_fixed_{result_tag}.json"
-    if not stage_done(status, f"evaluate_{result_tag}", [raw_metrics_path, fixed_metrics_path], args.rerun):
+    metrics_tag = result_tag
+    raw_metrics_path = run_dir / f"aste_metrics_raw_{metrics_tag}.json"
+    fixed_metrics_path = run_dir / f"aste_metrics_fixed_{metrics_tag}.json"
+    legacy_raw_metrics_path = run_dir / f"aste_metrics_raw_{gen_tag}.json"
+    legacy_fixed_metrics_path = run_dir / f"aste_metrics_fixed_{gen_tag}.json"
+    if (
+        use_legacy_pseudo_filter
+        and args.lambda_sentiment_contrastive == 0
+        and legacy_raw_metrics_path.exists()
+        and legacy_fixed_metrics_path.exists()
+    ):
+        metrics_tag = gen_tag
+        raw_metrics_path = legacy_raw_metrics_path
+        fixed_metrics_path = legacy_fixed_metrics_path
+    if not stage_done(
+        status,
+        f"evaluate_{result_tag}",
+        [raw_metrics_path, fixed_metrics_path],
+        args.rerun,
+        legacy_stages=legacy_stage_names.get("evaluate", ()),
+    ):
         run_command(
             [
                 py,
@@ -436,16 +560,12 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.cuda,
                 "--no_task_prefix",
                 "--no_constrained_decoding",
+                "--output_tag",
+                result_tag,
             ],
             args.dry_run,
         )
         if not args.dry_run:
-            raw_default = run_dir / "aste_metrics_raw.json"
-            fixed_default = run_dir / "aste_metrics_fixed.json"
-            if raw_default.exists():
-                raw_metrics_path.write_text(raw_default.read_text(encoding="utf-8"), encoding="utf-8")
-            if fixed_default.exists():
-                fixed_metrics_path.write_text(fixed_default.read_text(encoding="utf-8"), encoding="utf-8")
             mark_done(status_path, status, f"evaluate_{result_tag}")
 
     return summarize_pair(
@@ -458,6 +578,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         args.augment_prompt_style,
         args.domain_prefix_style,
         args.opinion_replacement_mode,
+        pseudo_analysis_file,
+        metrics_tag,
     )
 
 
@@ -471,12 +593,14 @@ def summarize_pair(
     configured_augment_prompt_style: str,
     configured_domain_prefix_style: str,
     configured_opinion_replacement_mode: str,
+    pseudo_analysis_file: Path,
+    metrics_tag: str,
 ) -> dict:
-    pseudo_hp = read_json(run_dir / "target_pseudo_high_precision_analysis.json")
+    pseudo_hp = read_json(pseudo_analysis_file)
     augment = read_json(run_dir / f"c3da_augment_analysis_{final_tag}.json")
     final_comp = read_json(run_dir / f"final_train_composition_analysis_{final_tag}.json")
-    raw = read_json(run_dir / f"aste_metrics_raw_{result_tag}.json")
-    fixed = read_json(run_dir / f"aste_metrics_fixed_{result_tag}.json")
+    raw = read_json(run_dir / f"aste_metrics_raw_{metrics_tag}.json")
+    fixed = read_json(run_dir / f"aste_metrics_fixed_{metrics_tag}.json")
     hp_eval = pseudo_hp.get("hidden_gold_eval", {})
     hp_raw = hp_eval.get("raw_scores", {})
     return {
@@ -574,9 +698,9 @@ def fmt(value) -> str:
     return f"{float(value) * 100:.2f}"
 
 
-def write_summary(output_root: Path, rows: list[dict]) -> None:
+def write_summary(output_root: Path, rows: list[dict], output_tag: str = "") -> None:
     output_root.mkdir(parents=True, exist_ok=True)
-    csv_path = output_root / "results_bgca_aste_stage1.csv"
+    csv_path, md_path = summary_output_paths(output_root, output_tag)
     fieldnames = list(rows[0].keys()) if rows else [
         "source",
         "target",
@@ -604,7 +728,6 @@ def write_summary(output_root: Path, rows: list[dict]) -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-    md_path = output_root / "results_bgca_aste_stage1_CN.md"
     lines = [
         "# BGCA ASTE 跨域 Stage1 基线结果",
         "",
@@ -676,6 +799,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sentiment_contrastive_class_balanced", action="store_true")
     parser.add_argument("--sentiment_prototype_initialize_from_context", action="store_true")
     parser.add_argument("--sentiment_prototype_init_batch_size", type=int, default=2)
+    parser.add_argument("--high_precision_max_triplets", type=int, default=1)
+    parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")
@@ -698,12 +823,17 @@ def selected_pairs(pairs_text: str) -> list[tuple[str, str]]:
 def main() -> None:
     args = parse_args()
     rows = []
+    pseudo_tag = pseudo_filter_tag(
+        args.high_precision_max_triplets,
+        args.high_precision_max_token_distance,
+    )
+    summary_tag = "" if pseudo_tag == "hp1_dist5" else pseudo_tag
     for source, target in selected_pairs(args.pairs):
         rows.append(run_pair(args, source, target))
         if not args.dry_run:
-            write_summary(Path(args.output_root), rows)
+            write_summary(Path(args.output_root), rows, summary_tag)
     if not args.dry_run:
-        write_summary(Path(args.output_root), rows)
+        write_summary(Path(args.output_root), rows, summary_tag)
 
 
 if __name__ == "__main__":
