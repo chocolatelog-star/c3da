@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `6f2dcd3 Add isolated two-triplet pseudo-label experiment` |
+| 当前代码版本 | `0c49ba6 Add isolated neutral generation weighting` |
 | 当前分支 | `master` |
 | 主实验目录 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14` |
 | 当前六组实验状态 | 已完成 |
@@ -17,9 +17,9 @@
 | 主对比指标 | `raw F1`（原始 F1） |
 | 辅助分析指标 | `fixed F1`（修正 F1） |
 
-## 0.1 当前阶段：高精度伪标签多三元组消融
+## 0.1 当前阶段：中性主生成损失独立增权
 
-当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。它只比无对比版本 raw F1=46.63 高 0.19，尚未经过多随机种子验证。全流程编码器对比、旧数据编码器对比、新上游无对比和 T5 情感向量实验均低于该候选，说明当前优先问题是目标域伪标签覆盖和结构质量，而不是继续强化纯情感聚类。
+当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。第二项 `hp2_dist5` 已完成，raw F1=44.44、fixed F1=46.87，证明直接把每句最多伪标签三元组由 1 放宽到 2 会降低最终召回率。当前进入第三项，只提高中性样本的主生成损失，不改变伪标签、增强、DANN 或对比学习配置。
 
 | 实验项 | 配置或结论 |
 |---|---|
@@ -29,17 +29,20 @@
 | 新上游数据但最终无对比 | raw F1=42.20、fixed F1=44.40，说明新上游数据是主要负面来源 |
 | 旧数据加编码器对比 | raw F1=45.37、fixed F1=48.35，说明编码器对比损失也有负贡献 |
 | 完整 T5 情感向量流程 | raw F1=40.82、fixed F1=43.01，不继续沿该方向调参 |
-| 本轮单变量 | 高精度伪标签每句最多三元组由 1 改为 2；距离上限仍为 5；其余配置固定 |
-| 新参数 | `--high_precision_max_triplets 2 --high_precision_max_token_distance 5` |
-| 复用范围 | 复用旧 25 轮提取器、8 轮标签到文本生成器和目标域原始预测，不重新训练上游模型 |
-| 新伪标签目录 | `pseudo_variants\hp2_dist5` |
-| 新最终模型 | `models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_hp2_dist5_sentiment_contrastive_l001_source_balanced_ep5\best` |
-| 新指标标签 | `strict_aug150_w020_label_to_text_gen_hp2_dist5_sentiment_contrastive_l001_source_balanced` |
-| 新汇总文件 | `results_bgca_aste_stage1_hp2_dist5.csv`、`results_bgca_aste_stage1_hp2_dist5_CN.md` |
-| 隔离保证 | 伪标签、增强、训练集、模型、指标、预测、分析和汇总均带独立标签，不覆盖 hp1 历史结果 |
-| 续跑保证 | 阶段状态跳过已完成筛选与增强；最终训练使用 `--resume_from_checkpoint auto` 自动续训 |
-| 判定标准 | 主指标与 raw F1=46.82 比较；同时检查伪标签精确率、召回率、多三元组数量和类别分布 |
-| 代码版本 | `6f2dcd3 Add isolated two-triplet pseudo-label experiment` |
+| 第二项结果 | `hp2_dist5`：raw P=53.37、raw R=38.08、raw F1=44.44、fixed F1=46.87，低于最佳 2.38 |
+| 第二项诊断 | 新增 104 行；73 条完整双三元组 F1=53.51，31 条被裁剪成单三元组的样本 F1=39.56；新增分布正向 141、负向 36、中性 0 |
+| 中性伪标签诊断 | 原始 904 条目标伪标签只有 2 个中性预测，隐藏金标分析显示二者实际均为负向，因此不降低阈值、不设置强制配额 |
+| 第三项单变量 | `hp1` 训练集不变；只把含中性三元组样本的主生成损失提高，非中性主生成权重保持原值 |
+| 新参数 | `--neutral_generation_loss_gain 1.0 --neutral_generation_max_effective_weight 2.0` |
+| 实际权重 | 49 个中性行平均主生成权重 1.6408、范围 0.4 到 2.0；1377 个非中性行最大权重仍为 1.0 |
+| 复用范围 | 复用 `hp1` 的提取器、伪标签、生成器、增强数据和最终训练集，只重跑最终 5 轮训练与评估 |
+| 新最终模型 | `models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_neutral_gain100_max200_ep5\best` |
+| 新诊断 | 额外输出正向/负向/中性分项 raw/fixed 指标，以及中性否定误判统计与样例 |
+| 新汇总文件 | `results_bgca_aste_stage1_neutral_gain100_max200.csv`、`results_bgca_aste_stage1_neutral_gain100_max200_CN.md` |
+| 隔离保证 | 模型、指标、预测、分类指标、错误分析和汇总均带 `neutral_gain100_max200` 标签 |
+| 续跑保证 | 最终训练使用 `--resume_from_checkpoint auto` 自动续训；评估完成需同时存在总体、分类和错误分析文件 |
+| 判定标准 | 总体 raw F1 与 46.82 比较，同时要求中性 F1 或中性召回获得实质改善 |
+| 代码版本 | `0c49ba6 Add isolated neutral generation weighting` |
 | 当前状态 | 代码和测试完成，正式实验待运行 |
 
 ## 0.2 代码版本变更记录
@@ -48,7 +51,8 @@
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
-| 2026-07-15 | `6f2dcd3 Add isolated two-triplet pseudo-label experiment` | 高精度伪标签最多两个三元组消融 | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py`、3 个测试文件 | 新增可配置三元组上限；从原始预测重筛到独立目录；复用旧提取器和生成器；隔离增强、训练集、模型、指标、预测、分析及汇总；兼容旧阶段状态并支持中断续跑 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\pseudo_variants\hp2_dist5` 及带 `_hp2_dist5` 的输出 | 代码验证完成，正式实验待运行 |
+| 2026-07-15 | `0c49ba6 Add isolated neutral generation weighting` | 中性主生成损失独立增权 | `t5_absa_train.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增只作用于中性样本主生成损失的增益和专用上限；不改变结构损失和非中性多三元组权重；评估新增三类情感指标及中性否定误判；复用 hp1 最终训练集 | 带 `neutral_gain100_max200` 的模型、指标、预测和汇总 | 代码验证完成，正式实验待运行 |
+| 2026-07-15 | `6f2dcd3 Add isolated two-triplet pseudo-label experiment` | 高精度伪标签最多两个三元组消融 | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py`、3 个测试文件 | 新增可配置三元组上限；从原始预测重筛到独立目录；复用旧提取器和生成器；隔离增强、训练集、模型、指标、预测、分析及汇总；兼容旧阶段状态并支持中断续跑 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\pseudo_variants\hp2_dist5` 及带 `_hp2_dist5` 的输出 | 已完成：raw F1=44.44、fixed F1=46.87，低于最佳 2.38 |
 | 2026-07-13 | `c94a094 Apply contextual contrastive learning end to end` | 全流程编码器上下文对比学习 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 预训练 T5 编码器先生成源域观点上下文表示并初始化三类原型；观点跨度大小写兼容定位达到 1393/1393；25 轮初始提取器和最终 5 轮模型都使用源域类别平衡对比损失；伪标签、生成器和掩码增强全部重跑；各阶段支持检查点续训并使用独立目录 | `runs\bgca_aste_stage1_full_contrastive_encoder_v1\rest16_to_laptop14` | 已完成：raw F1=43.74、fixed F1=45.70，低于最佳候选 |
 | 2026-07-13 | `f809beb Balance and instrument sentiment contrastive loss` | 对比学习第二版 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 对比损失降至 0.01；仅源域人工标注参与；按平方根倒频率平衡正负中性；训练日志分别输出生成、领域对抗、对比损失和各类原型准确率；仅在最终 5 轮使用解码器观点表示 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5` | raw F1=46.82、fixed F1=48.94；召回提高，但中性原型准确率为 0% |
 | 2026-07-12 | `f0e8dc6 Add sentiment prototype contrastive training` | 情感原型对比学习第一版 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 从每个三元组的观点词解码器表示计算三类可训练原型损失；支持 batch size=1；排除增强数据；源域和高精度伪标签参与；权重 0.05 | 完整模型、检查点和专属指标已删除 | raw F1=43.92、fixed F1=46.72；精确率与召回率同时下降 |
