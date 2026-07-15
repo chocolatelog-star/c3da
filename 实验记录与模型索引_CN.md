@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `925d596 Route mixed generator stage1 experiment` |
+| 当前代码版本 | `9f3c4db Reuse fixed upstream artifacts for generator ablation` |
 | 当前分支 | `master` |
 | 主实验目录 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14` |
 | 当前六组实验状态 | 已完成 |
@@ -26,11 +26,12 @@
 | 当前最佳候选 | raw P=54.84、raw R=40.85、raw F1=46.82、fixed F1=48.94 |
 | 当前最佳模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5\best` |
 | 第四项唯一变量 | 生成器由纯 `label_to_text` 改为三任务 `mixed`；提取器、hp1 伪标签、150 条增强、增强权重 0.20、DANN 系数 0.03 和最终对比学习保持不变 |
+| 固定上游来源 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14`；只读复用 `extractor_ep25_plain_last\best`、原始伪标签和 hp1 高精度伪标签 |
 | 真实训练通道 | 857 条标签到文本 + 857 条方面词掩码 + 857 条观点词-情感掩码，共 2571 条，比例严格为 1:1:1 |
 | 真实验证通道 | 210 条标签到文本 + 210 条方面词掩码 + 210 条观点词-情感掩码，共 630 条，比例严格为 1:1:1 |
 | 第四项生成器模型 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14\models\generator_mixed_l2t_masked_aspect_masked_opinion_ep8\best` |
 | 第四项最终模型 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_mixed_l2t_masked_aspect_masked_opinion_sentiment_contrastive_l001_source_balanced_ep5\best` |
-| 断点续跑 | 相同总命令会跳过已完成阶段；提取器、生成器和最终训练均使用 `--resume_from_checkpoint auto`（自动从检查点恢复） |
+| 断点续跑 | 相同总命令会跳过已完成阶段；生成器和最终训练使用 `--resume_from_checkpoint auto`（自动从检查点恢复）；提取器不重训 |
 | 第四项验收 | 主指标 raw F1 与 46.82 比较；同时检查增强通道/情感分布和正向、负向、中性分项 F1 |
 | 全流程编码器对比 | raw F1=43.74、fixed F1=45.70，失败 |
 | 新上游数据但最终无对比 | raw F1=42.20、fixed F1=44.40，说明新上游数据是主要负面来源 |
@@ -49,7 +50,7 @@
 | 隔离保证 | 模型、指标、预测、分类指标、错误分析和汇总均带 `neutral_gain100_max200` 标签 |
 | 续跑保证 | 最终训练使用 `--resume_from_checkpoint auto` 自动续训；评估完成需同时存在总体、分类和错误分析文件 |
 | 判定标准 | 总体 raw F1 与 46.82 比较，同时要求中性 F1 或中性召回获得实质改善 |
-| 代码版本 | `e7560c7`（混合数据）、`e320fab`（通道统计）、`925d596`（完整流程） |
+| 代码版本 | `e7560c7`（混合数据）、`e320fab`（通道统计）、`925d596`（完整流程）、`9f3c4db`（固定上游复用） |
 | 第三项总体结果 | raw P=51.54、raw R=37.15、raw F1=43.18、fixed F1=45.76；比最佳 raw 低 3.64 |
 | 第三项分类结果 | 正向 raw F1 49.24→45.06；负向 52.86→50.46；中性 0→0；新增 2 个中性预测但均未完整匹配 |
 | 第三项结论 | 中性主生成损失增权没有建立目标域中性边界，反而破坏正负类别；不继续调中性权重 |
@@ -59,7 +60,7 @@
 完整执行命令（从 CMD（命令提示符）开始，整行执行）：
 
 ```text
-cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_aste_stage1_pairs.py --output_root runs\bgca_aste_stage1_mixed_generator_v1 --pairs rest16:laptop14 --extractor_model_path J:\nlp\models\t5-base-py --generator_model_path J:\nlp\models\t5-base-py --generator_prompt_style mixed --augment_prompt_style masked_mutual --domain_prefix_style text --extractor_epochs 25 --generator_epochs 8 --final_epochs 5 --high_precision_max_triplets 1 --high_precision_max_token_distance 5 --lambda_sentiment_contrastive 0.01 --sentiment_contrastive_source_only --sentiment_contrastive_class_balanced --learning_rate 0.0003 --eval_batch_size 2 --cuda 0 --seed 1000"
+cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_aste_stage1_pairs.py --output_root runs\bgca_aste_stage1_mixed_generator_v1 --pairs rest16:laptop14 --reuse_upstream_run_dir runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14 --extractor_model_path J:\nlp\models\t5-base-py --generator_model_path J:\nlp\models\t5-base-py --generator_prompt_style mixed --augment_prompt_style masked_mutual --domain_prefix_style text --extractor_epochs 25 --generator_epochs 8 --final_epochs 5 --high_precision_max_triplets 1 --high_precision_max_token_distance 5 --lambda_sentiment_contrastive 0.01 --sentiment_contrastive_source_only --sentiment_contrastive_class_balanced --learning_rate 0.0003 --eval_batch_size 2 --cuda 0 --seed 1000"
 ```
 
 ## 0.2 代码版本变更记录
@@ -68,7 +69,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_ast
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
-| 2026-07-15 | `e7560c7`、`e320fab`、`925d596` | 三任务混合生成器训练 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增每个源句每通道最多一行的混合训练；清单记录通道数量和比例；完整流程使用独立文件、模型、状态和结果标签；保留互相掩码增强、8GB 显存参数和自动续训 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14` | 代码完成待跑；真实数据构造为训练 857:857:857、验证 210:210:210；44 项相关测试通过 |
+| 2026-07-15 | `e7560c7`、`e320fab`、`925d596`、`9f3c4db` | 三任务混合生成器训练 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增每个源句每通道最多一行的混合训练；清单记录通道数量和比例；新目录只读复用旧最佳提取器与 hp1 伪标签；新生成器、增强、最终模型和汇总保持隔离；保留 8GB 显存参数和自动续训 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14` | 代码完成待跑；真实数据构造为训练 857:857:857、验证 210:210:210；45 项相关测试通过 |
 | 2026-07-15 | `0c49ba6 Add isolated neutral generation weighting` | 中性主生成损失独立增权 | `t5_absa_train.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增只作用于中性样本主生成损失的增益和专用上限；不改变结构损失和非中性多三元组权重；评估新增三类情感指标及中性否定误判；复用 hp1 最终训练集 | 指标与错误分析保留；模型和专属预测已删除 | 已完成：raw F1=43.18、fixed F1=45.76，中性 F1=0，低于最佳 3.64 |
 | 2026-07-15 | `6f2dcd3 Add isolated two-triplet pseudo-label experiment` | 高精度伪标签最多两个三元组消融 | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py`、3 个测试文件 | 新增可配置三元组上限；从原始预测重筛到独立目录；复用旧提取器和生成器；隔离增强、训练集、模型、指标、预测、分析及汇总；兼容旧阶段状态并支持中断续跑 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\pseudo_variants\hp2_dist5` 及带 `_hp2_dist5` 的输出 | 已完成：raw F1=44.44、fixed F1=46.87，低于最佳 2.38 |
 | 2026-07-13 | `c94a094 Apply contextual contrastive learning end to end` | 全流程编码器上下文对比学习 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 预训练 T5 编码器先生成源域观点上下文表示并初始化三类原型；观点跨度大小写兼容定位达到 1393/1393；25 轮初始提取器和最终 5 轮模型都使用源域类别平衡对比损失；伪标签、生成器和掩码增强全部重跑；各阶段支持检查点续训并使用独立目录 | `runs\bgca_aste_stage1_full_contrastive_encoder_v1\rest16_to_laptop14` | 已完成：raw F1=43.74、fixed F1=45.70，低于最佳候选 |
