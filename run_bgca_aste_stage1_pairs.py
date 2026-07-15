@@ -80,6 +80,12 @@ def pseudo_filter_tag(max_triplets: int, max_token_distance: int) -> str:
     return f"hp{max_triplets}_dist{max_token_distance}"
 
 
+def neutral_weight_tag(neutral_loss_gain: float, neutral_max_effective_weight: float) -> str:
+    gain_tag = int(round(neutral_loss_gain * 100))
+    max_tag = int(round(neutral_max_effective_weight * 100))
+    return f"neutral_gain{gain_tag}_max{max_tag}"
+
+
 def legacy_hp1_stage_names(generator_output_tag: str) -> dict[str, tuple[str, ...]]:
     return {
         "augment": (f"augment_{generator_output_tag}",),
@@ -464,6 +470,17 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             result_tag += "_balanced"
         if args.sentiment_prototype_initialize_from_context:
             result_tag += "_encoder_context_init"
+    use_neutral_weight_variant = (
+        args.neutral_generation_loss_gain > 0
+        or args.neutral_generation_max_effective_weight > 0
+    )
+    if use_neutral_weight_variant:
+        neutral_max_weight = (
+            args.neutral_generation_max_effective_weight
+            if args.neutral_generation_max_effective_weight > 0
+            else 1.0
+        )
+        result_tag += f"_{neutral_weight_tag(args.neutral_generation_loss_gain, neutral_max_weight)}"
     final_dir = run_dir / "models" / f"final_dann_l0.03_{result_tag}_ep{args.final_epochs}"
     if not stage_done(
         status,
@@ -509,6 +526,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 str(args.sentiment_contrastive_temperature),
                 "--sentiment_contrastive_min_weight",
                 str(args.sentiment_contrastive_min_weight),
+                "--neutral_generation_loss_gain",
+                str(args.neutral_generation_loss_gain),
+                "--neutral_generation_max_effective_weight",
+                str(args.neutral_generation_max_effective_weight),
                 *(["--sentiment_contrastive_exclude_augment"] if args.sentiment_contrastive_exclude_augment else []),
                 *(["--sentiment_contrastive_source_only"] if args.sentiment_contrastive_source_only else []),
                 *(["--sentiment_contrastive_class_balanced"] if args.sentiment_contrastive_class_balanced else []),
@@ -523,10 +544,13 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     metrics_tag = result_tag
     raw_metrics_path = run_dir / f"aste_metrics_raw_{metrics_tag}.json"
     fixed_metrics_path = run_dir / f"aste_metrics_fixed_{metrics_tag}.json"
+    sentiment_metrics_path = run_dir / f"aste_metrics_by_sentiment_{metrics_tag}.json"
+    error_analysis_path = run_dir / f"aste_error_analysis_{metrics_tag}.json"
     legacy_raw_metrics_path = run_dir / f"aste_metrics_raw_{gen_tag}.json"
     legacy_fixed_metrics_path = run_dir / f"aste_metrics_fixed_{gen_tag}.json"
     if (
         use_legacy_pseudo_filter
+        and not use_neutral_weight_variant
         and args.lambda_sentiment_contrastive == 0
         and legacy_raw_metrics_path.exists()
         and legacy_fixed_metrics_path.exists()
@@ -537,7 +561,15 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     if not stage_done(
         status,
         f"evaluate_{result_tag}",
-        [raw_metrics_path, fixed_metrics_path],
+        [
+            raw_metrics_path,
+            fixed_metrics_path,
+            *(
+                [sentiment_metrics_path, error_analysis_path]
+                if use_neutral_weight_variant
+                else []
+            ),
+        ],
         args.rerun,
         legacy_stages=legacy_stage_names.get("evaluate", ()),
     ):
@@ -799,6 +831,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sentiment_contrastive_class_balanced", action="store_true")
     parser.add_argument("--sentiment_prototype_initialize_from_context", action="store_true")
     parser.add_argument("--sentiment_prototype_init_batch_size", type=int, default=2)
+    parser.add_argument("--neutral_generation_loss_gain", type=float, default=0.0)
+    parser.add_argument("--neutral_generation_max_effective_weight", type=float, default=0.0)
     parser.add_argument("--high_precision_max_triplets", type=int, default=1)
     parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
@@ -828,6 +862,14 @@ def main() -> None:
         args.high_precision_max_token_distance,
     )
     summary_tag = "" if pseudo_tag == "hp1_dist5" else pseudo_tag
+    if args.neutral_generation_loss_gain > 0 or args.neutral_generation_max_effective_weight > 0:
+        neutral_max_weight = (
+            args.neutral_generation_max_effective_weight
+            if args.neutral_generation_max_effective_weight > 0
+            else 1.0
+        )
+        neutral_tag = neutral_weight_tag(args.neutral_generation_loss_gain, neutral_max_weight)
+        summary_tag = f"{summary_tag}_{neutral_tag}".strip("_")
     for source, target in selected_pairs(args.pairs):
         rows.append(run_pair(args, source, target))
         if not args.dry_run:

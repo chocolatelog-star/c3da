@@ -7,6 +7,7 @@ from t5_absa_train import (
     joint_weighted_loss,
     pairing_contrastive_loss,
     summarize_sample_weights,
+    summarize_generation_weights,
     weighted_loss_mean,
 )
 from t5_aste_pipeline import (
@@ -145,6 +146,43 @@ def test_masked_channels_use_augment_fallback_weight_in_training_summary():
     assert dataset[1]["sample_weight"] == 0.2
     assert summary["c3da_augment"] == 2
     assert summary["c3da_augment_weight_mean"] == 0.2
+
+
+def test_neutral_generation_weight_does_not_enable_multi_triplet_gain_for_other_rows():
+    rows = [
+        {
+            "input": "x",
+            "target": "<pos> a <opinion> good ; <neg> b <opinion> bad",
+            "sample_weight": 1.0,
+        },
+        {
+            "input": "y",
+            "target": "<neu> c <opinion> average",
+            "sample_weight": 1.0,
+        },
+    ]
+    dataset = JsonlSeq2SeqDataset(
+        rows,
+        TinyTokenizer(),
+        16,
+        16,
+        1.0,
+        0.5,
+        0.2,
+        multi_triplet_loss_gain=0.1,
+        max_effective_weight=1.0,
+        neutral_generation_loss_gain=1.0,
+        neutral_generation_max_effective_weight=2.0,
+    )
+
+    assert dataset[0]["domain_weight"] == 1.0
+    assert dataset[1]["domain_weight"] == 2.0
+    assert dataset[0]["structure_weight"] == 1.0
+    assert dataset[1]["structure_weight"] == 1.0
+    summary = summarize_generation_weights(dataset)
+    assert summary["neutral_rows"] == 1
+    assert summary["neutral_weight_mean"] == 2.0
+    assert summary["non_neutral_weight_max"] == 1.0
 
 
 def test_select_high_value_augmented_rows_prefers_raw_exact_and_diverse_bases():

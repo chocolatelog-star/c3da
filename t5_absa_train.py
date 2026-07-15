@@ -58,6 +58,8 @@ class JsonlSeq2SeqDataset(Dataset):
         multi_triplet_loss_gain: float = 0.0,
         neutral_loss_gain: float = 0.0,
         max_effective_weight: float = 1.0,
+        neutral_generation_loss_gain: float = 0.0,
+        neutral_generation_max_effective_weight: float | None = None,
         force_domain_weights: bool = False,
         max_pairing_triplets: int = 4,
         min_pairing_triplets: int = 2,
@@ -77,6 +79,12 @@ class JsonlSeq2SeqDataset(Dataset):
         self.multi_triplet_loss_gain = multi_triplet_loss_gain
         self.neutral_loss_gain = neutral_loss_gain
         self.max_effective_weight = max_effective_weight
+        self.neutral_generation_loss_gain = neutral_generation_loss_gain
+        self.neutral_generation_max_effective_weight = (
+            1.0
+            if neutral_generation_max_effective_weight is None or neutral_generation_max_effective_weight <= 0
+            else neutral_generation_max_effective_weight
+        )
         self.force_domain_weights = force_domain_weights
         self.max_pairing_triplets = max_pairing_triplets
         self.min_pairing_triplets = min_pairing_triplets
@@ -102,14 +110,14 @@ class JsonlSeq2SeqDataset(Dataset):
             truncation=True,
         )
         model_inputs["labels"] = labels["input_ids"]
-        domain_weight = self.sample_weight(row)
-        model_inputs["sample_weight"] = domain_weight
-        model_inputs["domain_weight"] = domain_weight
+        sample_weight = self.sample_weight(row)
+        model_inputs["sample_weight"] = sample_weight
+        model_inputs["domain_weight"] = self.generation_weight(row, sample_weight)
         model_inputs["domain_label"] = self.domain_label(row)
-        model_inputs["structure_weight"] = self.structure_weight(row, domain_weight)
+        model_inputs["structure_weight"] = self.structure_weight(row, sample_weight)
         model_inputs["consistency_group"] = self.consistency_group(row, idx)
         model_inputs.update(self.pairing_features(row))
-        model_inputs.update(self.sentiment_contrastive_features(row, model_inputs["input_ids"], domain_weight))
+        model_inputs.update(self.sentiment_contrastive_features(row, model_inputs["input_ids"], sample_weight))
         return model_inputs
 
     def sample_weight(self, row: dict) -> float:
@@ -138,6 +146,15 @@ class JsonlSeq2SeqDataset(Dataset):
         if any(sentiment == "neu" for _aspect, _opinion, sentiment in triplets):
             multiplier += self.neutral_loss_gain
         return min(domain_weight * multiplier, self.max_effective_weight)
+
+    def generation_weight(self, row: dict, sample_weight: float) -> float:
+        triplets = parse_triplet_text_list(row.get("target", ""))
+        if not any(sentiment == "neu" for _aspect, _opinion, sentiment in triplets):
+            return sample_weight
+        return min(
+            sample_weight * (1.0 + self.neutral_generation_loss_gain),
+            self.neutral_generation_max_effective_weight,
+        )
 
     def consistency_group(self, row: dict, idx: int) -> int:
         if row.get("base_id") is not None:
@@ -778,6 +795,41 @@ def summarize_sample_weights(
     }
 
 
+def summarize_generation_weights(dataset: JsonlSeq2SeqDataset) -> dict:
+    neutral_weights = []
+    non_neutral_weights = []
+    for row in dataset.rows:
+        domain_weight = dataset.sample_weight(row)
+        effective_weight = dataset.generation_weight(row, domain_weight)
+        triplets = parse_triplet_text_list(row.get("target", ""))
+        target = (
+            neutral_weights
+            if any(sentiment == "neu" for _aspect, _opinion, sentiment in triplets)
+            else non_neutral_weights
+        )
+        target.append(effective_weight)
+
+    def weight_stats(name: str, weights: list[float]) -> dict:
+        if not weights:
+            return {
+                f"{name}_rows": 0,
+                f"{name}_weight_mean": None,
+                f"{name}_weight_min": None,
+                f"{name}_weight_max": None,
+            }
+        return {
+            f"{name}_rows": len(weights),
+            f"{name}_weight_mean": sum(weights) / len(weights),
+            f"{name}_weight_min": min(weights),
+            f"{name}_weight_max": max(weights),
+        }
+
+    return {
+        **weight_stats("neutral", neutral_weights),
+        **weight_stats("non_neutral", non_neutral_weights),
+    }
+
+
 def summarize_sentiment_contrastive_rows(
     rows: list[dict],
     min_weight: float,
@@ -874,6 +926,8 @@ def main() -> None:
     parser.add_argument("--multi_triplet_loss_gain", type=float, default=0.1)
     parser.add_argument("--neutral_loss_gain", type=float, default=0.15)
     parser.add_argument("--max_effective_weight", type=float, default=1.0)
+    parser.add_argument("--neutral_generation_loss_gain", type=float, default=0.0)
+    parser.add_argument("--neutral_generation_max_effective_weight", type=float, default=0.0)
     parser.add_argument(
         "--checkpoint_selection",
         choices=["last", "best"],
@@ -956,6 +1010,8 @@ def main() -> None:
             "multi_triplet_loss_gain": args.multi_triplet_loss_gain,
             "neutral_loss_gain": args.neutral_loss_gain,
             "max_effective_weight": args.max_effective_weight,
+            "neutral_generation_loss_gain": args.neutral_generation_loss_gain,
+            "neutral_generation_max_effective_weight": args.neutral_generation_max_effective_weight,
         },
     )
     if args.lambda_sentiment_contrastive > 0:
@@ -984,6 +1040,8 @@ def main() -> None:
         multi_triplet_loss_gain=args.multi_triplet_loss_gain,
         neutral_loss_gain=args.neutral_loss_gain,
         max_effective_weight=args.max_effective_weight,
+        neutral_generation_loss_gain=args.neutral_generation_loss_gain,
+        neutral_generation_max_effective_weight=args.neutral_generation_max_effective_weight,
         force_domain_weights=args.force_domain_weights,
         max_pairing_triplets=args.max_pairing_triplets,
         min_pairing_triplets=args.min_pairing_triplets,
@@ -993,6 +1051,7 @@ def main() -> None:
         sentiment_contrastive_exclude_augment=args.sentiment_contrastive_exclude_augment,
         sentiment_contrastive_source_only=args.sentiment_contrastive_source_only,
     )
+    print("effective generation weights:", summarize_generation_weights(train_data))
     dev_data = JsonlSeq2SeqDataset(
         dev_rows,
         tokenizer,

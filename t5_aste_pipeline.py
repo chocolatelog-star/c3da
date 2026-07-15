@@ -2582,9 +2582,56 @@ def evaluate(args: argparse.Namespace) -> None:
     raw_metrics = result["raw_scores"]
     fixed_metrics = result["fixed_scores"]
     output_tag = args.output_tag
+    sentiment_metrics = {"raw": {}, "fixed": {}}
+    for sentiment in ("pos", "neg", "neu"):
+        gold_labels = [
+            triplets_to_text([triplet for triplet in row["gold_triplets"] if triplet[2] == sentiment])
+            for row in result["predictions"]
+        ]
+        raw_labels = [
+            triplets_to_text([triplet for triplet in row["raw_triplets"] if triplet[2] == sentiment])
+            for row in result["predictions"]
+        ]
+        fixed_labels = [
+            triplets_to_text([triplet for triplet in row["fixed_triplets"] if triplet[2] == sentiment])
+            for row in result["predictions"]
+        ]
+        sentiment_metrics["raw"][sentiment] = micro_f1(raw_labels, gold_labels)
+        sentiment_metrics["fixed"][sentiment] = micro_f1(fixed_labels, gold_labels)
+
+    negation_pattern = re.compile(r"(?:\bno\b|\bnot\b|\bnever\b|n't\b|\bwithout\b)", re.IGNORECASE)
+    neutral_false_positive_triplets = 0
+    neutral_negation_false_positive_rows = 0
+    neutral_negation_examples = []
+    for row in result["predictions"]:
+        gold_neutral = {triplet for triplet in row["gold_triplets"] if triplet[2] == "neu"}
+        false_neutral = [
+            triplet
+            for triplet in row["raw_triplets"]
+            if triplet[2] == "neu" and triplet not in gold_neutral
+        ]
+        neutral_false_positive_triplets += len(false_neutral)
+        if false_neutral and negation_pattern.search(row["text"]):
+            neutral_negation_false_positive_rows += 1
+            if len(neutral_negation_examples) < 20:
+                neutral_negation_examples.append(
+                    {
+                        "text": row["text"],
+                        "gold": row["gold"],
+                        "pred_raw": row["pred_raw"],
+                        "false_neutral_triplets": false_neutral,
+                    }
+                )
+    error_analysis = {
+        "neutral_false_positive_triplets": neutral_false_positive_triplets,
+        "neutral_negation_false_positive_rows": neutral_negation_false_positive_rows,
+        "neutral_negation_examples": neutral_negation_examples,
+    }
     dump_json(tagged_output_path(run_dir, "aste_metrics.json", output_tag), raw_metrics)
     dump_json(tagged_output_path(run_dir, "aste_metrics_raw.json", output_tag), raw_metrics)
     dump_json(tagged_output_path(run_dir, "aste_metrics_fixed.json", output_tag), fixed_metrics)
+    dump_json(tagged_output_path(run_dir, "aste_metrics_by_sentiment.json", output_tag), sentiment_metrics)
+    dump_json(tagged_output_path(run_dir, "aste_error_analysis.json", output_tag), error_analysis)
     write_jsonl(
         tagged_output_path(run_dir, "aste_predictions.jsonl", output_tag),
         [{"text": row["text"], "gold": row["gold"], "pred": row["pred_raw"]} for row in result["predictions"]],
@@ -2593,7 +2640,14 @@ def evaluate(args: argparse.Namespace) -> None:
         tagged_output_path(run_dir, "aste_predictions_raw_fixed.jsonl", output_tag),
         result["predictions"],
     )
-    print({"raw_scores": raw_metrics, "fixed_scores": fixed_metrics})
+    print(
+        {
+            "raw_scores": raw_metrics,
+            "fixed_scores": fixed_metrics,
+            "sentiment_scores": sentiment_metrics,
+            "error_analysis": error_analysis,
+        }
+    )
 
 
 def main() -> None:

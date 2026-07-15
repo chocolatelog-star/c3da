@@ -47,8 +47,21 @@ class EvaluateOutputIsolationTest(unittest.TestCase):
             self.assertTrue((run_dir / "aste_metrics_fixed_hp2_dist5.json").exists())
             self.assertTrue((run_dir / "aste_predictions_hp2_dist5.jsonl").exists())
             self.assertTrue((run_dir / "aste_predictions_raw_fixed_hp2_dist5.jsonl").exists())
+            self.assertTrue((run_dir / "aste_metrics_by_sentiment_hp2_dist5.json").exists())
+            self.assertTrue((run_dir / "aste_error_analysis_hp2_dist5.json").exists())
             self.assertFalse((run_dir / "aste_metrics_raw.json").exists())
             self.assertFalse((run_dir / "aste_predictions.jsonl").exists())
+
+            sentiment_metrics = json.loads(
+                (run_dir / "aste_metrics_by_sentiment_hp2_dist5.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(sentiment_metrics["raw"]["pos"]["micro_f1"], 1.0)
+            self.assertEqual(sentiment_metrics["raw"]["neu"]["tp"], 0)
+
+            error_analysis = json.loads(
+                (run_dir / "aste_error_analysis_hp2_dist5.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(error_analysis["neutral_negation_false_positive_rows"], 0)
 
 
 if __name__ == "__main__":

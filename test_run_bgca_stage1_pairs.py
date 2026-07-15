@@ -96,6 +96,18 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertEqual(csv_path.name, "results_bgca_aste_stage1_hp2_dist5.csv")
         self.assertEqual(md_path.name, "results_bgca_aste_stage1_hp2_dist5_CN.md")
 
+    def test_neutral_weight_experiment_has_independent_model_and_train_args(self) -> None:
+        output = self.run_dry(
+            "--neutral_generation_loss_gain",
+            "1.0",
+            "--neutral_generation_max_effective_weight",
+            "2.0",
+        )
+
+        self.assertIn("neutral_gain100_max200", output)
+        self.assertIn("--neutral_generation_loss_gain 1.0", output)
+        self.assertIn("--neutral_generation_max_effective_weight 2.0", output)
+
 
 if __name__ == "__main__":
     unittest.main()
