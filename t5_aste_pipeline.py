@@ -1930,6 +1930,16 @@ def prepare(args: argparse.Namespace) -> None:
         domain_name=args.source_dataset,
         domain_prefix_style=args.domain_prefix_style,
     )
+    generator_train_channel_counts = dict(Counter(row.get("channel", "unknown") for row in generator_train_rows))
+    generator_dev_channel_counts = dict(Counter(row.get("channel", "unknown") for row in generator_dev_rows))
+    generator_train_channel_ratios = {
+        channel: count / len(generator_train_rows)
+        for channel, count in generator_train_channel_counts.items()
+    } if generator_train_rows else {}
+    generator_dev_channel_ratios = {
+        channel: count / len(generator_dev_rows)
+        for channel, count in generator_dev_channel_counts.items()
+    } if generator_dev_rows else {}
     generator_tag = args.generator_output_tag
     write_jsonl(tagged_output_path(run_dir, "generator_train.jsonl", generator_tag), generator_train_rows)
     write_jsonl(tagged_output_path(run_dir, "generator_dev.jsonl", generator_tag), generator_dev_rows)
@@ -1944,6 +1954,10 @@ def prepare(args: argparse.Namespace) -> None:
         "source_dev": len(source_dev_rows),
         "generator_train": len(generator_train_rows),
         "generator_dev": len(generator_dev_rows),
+        "generator_train_channel_counts": generator_train_channel_counts,
+        "generator_dev_channel_counts": generator_dev_channel_counts,
+        "generator_train_channel_ratios": generator_train_channel_ratios,
+        "generator_dev_channel_ratios": generator_dev_channel_ratios,
         "target_unlabeled": len(target_train_rows),
         "target_test": len(target_test_rows),
         "strict_cross_domain": "target train labels are hidden; target test is used only for final evaluation",
@@ -2669,6 +2683,7 @@ def main() -> None:
             "rewrite_aspect",
             "label_composition",
             "label_to_text",
+            "mixed",
             "rsda_t5_label_composition",
             "sentence_fusion_composition",
         ],
