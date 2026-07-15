@@ -2142,14 +2142,16 @@ def memory(args: argparse.Namespace) -> None:
 
 def augment(args: argparse.Namespace) -> None:
     run_dir = Path(args.run_dir)
-    source_rows = read_jsonl(run_dir / "source_train.jsonl")
-    source_dev_rows = read_jsonl(run_dir / "source_dev.jsonl")
-    pseudo_rows = read_selected_pseudo_rows(run_dir)
-    manifest_path = run_dir / "manifest.json"
+    explicit_input_run_dir = getattr(args, "augmentation_input_run_dir", "")
+    input_run_dir = Path(explicit_input_run_dir) if explicit_input_run_dir else run_dir
+    source_rows = read_jsonl(input_run_dir / "source_train.jsonl")
+    source_dev_rows = read_jsonl(input_run_dir / "source_dev.jsonl")
+    pseudo_rows = read_selected_pseudo_rows(input_run_dir)
+    manifest_path = input_run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     target_domain_name = manifest.get("target_dataset", "")
     domain_memory = None
-    memory_path = Path(args.memory_path) if args.memory_path else run_dir / "c3da_cross_domain_memory.json"
+    memory_path = Path(args.memory_path) if args.memory_path else input_run_dir / "c3da_cross_domain_memory.json"
     if memory_path.exists():
         domain_memory = json.loads(memory_path.read_text(encoding="utf-8"))
     model_path = Path(args.model_path) if args.model_path else Path(args.generator_model_path)
@@ -2434,6 +2436,7 @@ def augment(args: argparse.Namespace) -> None:
     aug_stats = {
         "requests": len(requests),
         "generated": len(generated_texts),
+        "augmentation_input_run_dir": str(input_run_dir),
         "prompt_style": args.augment_prompt_style,
         "augment_channel_mode": args.augment_channel_mode,
         "domain_prefix_style": args.domain_prefix_style,
@@ -2722,6 +2725,7 @@ def main() -> None:
 
     p = sub.add_parser("augment")
     p.add_argument("--run_dir", required=True)
+    p.add_argument("--augmentation_input_run_dir", default="")
     p.add_argument("--model_path", default="")
     p.add_argument("--generator_model_path", default=r"J:\nlp\models\mrm8488-t5-base-finetuned-common_gen")
     p.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")

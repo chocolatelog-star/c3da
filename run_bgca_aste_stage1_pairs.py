@@ -124,6 +124,7 @@ def metric_value(data: dict, *keys: str):
 
 def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     run_dir = pair_run_dir(Path(args.output_root), source, target)
+    upstream_run_dir = Path(args.reuse_upstream_run_dir) if args.reuse_upstream_run_dir else None
     if not args.dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
     status_path = run_dir / "stage_status.json"
@@ -190,9 +191,9 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
         if args.sentiment_prototype_initialize_from_context:
             extractor_tag += "_encoder_context_init"
-    extractor_dir = run_dir / "models" / extractor_tag
+    extractor_dir = (upstream_run_dir or run_dir) / "models" / extractor_tag
     extractor_stage = f"train_{extractor_tag}"
-    if not stage_done(
+    if upstream_run_dir is None and not stage_done(
         status,
         extractor_stage,
         [extractor_dir / "best" / "config.json"],
@@ -245,7 +246,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, extractor_stage)
 
     pseudo_stage = f"pseudo_{extractor_tag}"
-    if not stage_done(
+    if upstream_run_dir is None and not stage_done(
         status,
         pseudo_stage,
         [
@@ -295,14 +296,15 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         args.high_precision_max_triplets == 1
         and args.high_precision_max_token_distance == 5
     )
-    pseudo_train_file = run_dir / "target_pseudo_high_precision.jsonl"
-    pseudo_analysis_file = run_dir / "target_pseudo_high_precision_analysis.json"
+    pseudo_input_run_dir = upstream_run_dir or run_dir
+    pseudo_train_file = pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"
+    pseudo_analysis_file = pseudo_input_run_dir / "target_pseudo_high_precision_analysis.json"
     if not use_legacy_pseudo_filter:
-        pseudo_variant_dir = run_dir / "pseudo_variants" / pseudo_tag
+        pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / pseudo_tag
         pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
         pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
         pseudo_filter_stage = f"select_pseudo_{extractor_tag}_{pseudo_tag}"
-        if not stage_done(
+        if upstream_run_dir is None and not stage_done(
             status,
             pseudo_filter_stage,
             [pseudo_train_file, pseudo_analysis_file],
@@ -328,6 +330,18 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             )
             if not args.dry_run:
                 mark_done(status_path, status, pseudo_filter_stage)
+
+    if upstream_run_dir is not None and not args.dry_run:
+        required_upstream_paths = [
+            extractor_dir / "best" / "config.json",
+            pseudo_input_run_dir / "target_pseudo.jsonl",
+            pseudo_train_file,
+            pseudo_analysis_file,
+        ]
+        missing_paths = [path for path in required_upstream_paths if not path.exists()]
+        if missing_paths:
+            missing_text = ", ".join(str(path) for path in missing_paths)
+            raise FileNotFoundError(f"missing required upstream artifacts: {missing_text}")
 
     generator_dir = run_dir / "models" / f"generator_{gen_tag}_ep{args.generator_epochs}"
     if not stage_done(status, f"train_generator_{gen_tag}", [generator_dir / "best" / "config.json"], args.rerun):
@@ -393,6 +407,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "augment",
                 "--run_dir",
                 str(run_dir),
+                *(
+                    ["--augmentation_input_run_dir", str(upstream_run_dir)]
+                    if upstream_run_dir is not None
+                    else []
+                ),
                 "--model_path",
                 str(generator_dir / "best"),
                 "--nli_model_path",
@@ -800,6 +819,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_root", default=r"runs\bgca_aste_stage1_baseline")
     parser.add_argument("--pairs", default="all", help="all or comma list like rest16:laptop14,laptop14:rest16")
+    parser.add_argument(
+        "--reuse_upstream_run_dir",
+        default="",
+        help="reuse one completed pair run's extractor and pseudo labels while writing new outputs to output_root",
+    )
     parser.add_argument("--extractor_model_path", default=r"J:\nlp\models\t5-base-py")
     parser.add_argument("--generator_model_path", default=r"J:\nlp\models\t5-base-py")
     parser.add_argument(
@@ -863,6 +887,9 @@ def selected_pairs(pairs_text: str) -> list[tuple[str, str]]:
 def main() -> None:
     args = parse_args()
     rows = []
+    pairs = selected_pairs(args.pairs)
+    if args.reuse_upstream_run_dir and len(pairs) != 1:
+        raise ValueError("--reuse_upstream_run_dir requires exactly one source:target pair")
     pseudo_tag = pseudo_filter_tag(
         args.high_precision_max_triplets,
         args.high_precision_max_token_distance,
@@ -876,7 +903,7 @@ def main() -> None:
         )
         neutral_tag = neutral_weight_tag(args.neutral_generation_loss_gain, neutral_max_weight)
         summary_tag = f"{summary_tag}_{neutral_tag}".strip("_")
-    for source, target in selected_pairs(args.pairs):
+    for source, target in pairs:
         rows.append(run_pair(args, source, target))
         if not args.dry_run:
             write_summary(Path(args.output_root), rows, summary_tag)

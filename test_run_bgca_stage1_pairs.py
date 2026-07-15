@@ -123,6 +123,24 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--fp16", output)
         self.assertIn("--gradient_checkpointing", output)
 
+    def test_mixed_generator_can_reuse_upstream_extractor_and_pseudo_labels(self) -> None:
+        upstream = r"runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14"
+
+        output = self.run_dry(
+            "--generator_prompt_style",
+            "mixed",
+            "--reuse_upstream_run_dir",
+            upstream,
+        )
+
+        upstream_extractor = upstream + r"\models\extractor_ep25_plain_last\best"
+        self.assertNotIn("t5_aste_pipeline.py pseudo", output)
+        self.assertNotIn(r"extract_train.jsonl --dev_file", output)
+        self.assertIn(f"--augmentation_input_run_dir {upstream}", output)
+        self.assertIn(f"--pseudo_train_file {upstream}\\target_pseudo_high_precision.jsonl", output)
+        self.assertIn(f"--model_filter_path {upstream_extractor}", output)
+        self.assertIn("generator_mixed_l2t_masked_aspect_masked_opinion_ep8", output)
+
 
 if __name__ == "__main__":
     unittest.main()
