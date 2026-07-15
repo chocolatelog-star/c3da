@@ -7,24 +7,31 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `0c49ba6 Add isolated neutral generation weighting` |
+| 当前代码版本 | `925d596 Route mixed generator stage1 experiment` |
 | 当前分支 | `master` |
-| 主实验目录 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14` |
+| 主实验目录 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14` |
 | 当前六组实验状态 | 已完成 |
-| 生成器训练方式 | `label_to_text`（标签到文本） |
+| 生成器训练方式 | `mixed`（混合）：`label_to_text`（标签到文本）+ `masked_aspect`（方面词掩码）+ `masked_opinion_sentiment`（观点词-情感掩码） |
 | 数据增强方式 | `masked_mutual`（掩码增强） |
-| 最终训练配置 | 高精度伪标签 + 严格增强 + DANN（领域对抗） |
+| 最终训练配置 | 高精度伪标签 + 严格增强 + DANN（领域对抗）+ 源域类别平衡对比学习 |
 | 主对比指标 | `raw F1`（原始 F1） |
 | 辅助分析指标 | `fixed F1`（修正 F1） |
 
-## 0.1 当前阶段：中性增权完成，准备生成器显式互相掩码训练
+## 0.1 当前阶段：混合任务生成器代码完成，准备单方向实验
 
-当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。第二项 `hp2_dist5` 得到 raw F1=44.44；第三项中性主生成损失增权得到 raw F1=43.18、fixed F1=45.76，中性 F1 仍为 0。两项均失败，失败模型、检查点和大型输出已删除，保留小型指标与分析。下一步进入第四项：让生成器显式学习 `masked_mutual`（互相掩码）任务。
+当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。第二项和第三项均失败并已完成清理。第四项代码已经完成：同一个全新 T5（文本到文本转换模型）按 1:1:1 学习标签到文本、方面词掩码编辑、观点词-情感掩码编辑，实际数据增强仍使用 `masked_mutual`（互相掩码）。本轮只改变生成器训练任务，其余配置与当前最佳候选保持一致。
 
 | 实验项 | 配置或结论 |
 |---|---|
 | 当前最佳候选 | raw P=54.84、raw R=40.85、raw F1=46.82、fixed F1=48.94 |
-| 最佳模型 | `models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5\best` |
+| 当前最佳模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5\best` |
+| 第四项唯一变量 | 生成器由纯 `label_to_text` 改为三任务 `mixed`；提取器、hp1 伪标签、150 条增强、增强权重 0.20、DANN 系数 0.03 和最终对比学习保持不变 |
+| 真实训练通道 | 857 条标签到文本 + 857 条方面词掩码 + 857 条观点词-情感掩码，共 2571 条，比例严格为 1:1:1 |
+| 真实验证通道 | 210 条标签到文本 + 210 条方面词掩码 + 210 条观点词-情感掩码，共 630 条，比例严格为 1:1:1 |
+| 第四项生成器模型 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14\models\generator_mixed_l2t_masked_aspect_masked_opinion_ep8\best` |
+| 第四项最终模型 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_mixed_l2t_masked_aspect_masked_opinion_sentiment_contrastive_l001_source_balanced_ep5\best` |
+| 断点续跑 | 相同总命令会跳过已完成阶段；提取器、生成器和最终训练均使用 `--resume_from_checkpoint auto`（自动从检查点恢复） |
+| 第四项验收 | 主指标 raw F1 与 46.82 比较；同时检查增强通道/情感分布和正向、负向、中性分项 F1 |
 | 全流程编码器对比 | raw F1=43.74、fixed F1=45.70，失败 |
 | 新上游数据但最终无对比 | raw F1=42.20、fixed F1=44.40，说明新上游数据是主要负面来源 |
 | 旧数据加编码器对比 | raw F1=45.37、fixed F1=48.35，说明编码器对比损失也有负贡献 |
@@ -36,18 +43,24 @@
 | 新参数 | `--neutral_generation_loss_gain 1.0 --neutral_generation_max_effective_weight 2.0` |
 | 实际权重 | 49 个中性行平均主生成权重 1.6408、范围 0.4 到 2.0；1377 个非中性行最大权重仍为 1.0 |
 | 复用范围 | 复用 `hp1` 的提取器、伪标签、生成器、增强数据和最终训练集，只重跑最终 5 轮训练与评估 |
-| 新最终模型 | `models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_neutral_gain100_max200_ep5\best` |
+| 第三项失败模型 | `models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_neutral_gain100_max200_ep5\best`（已删除） |
 | 新诊断 | 额外输出正向/负向/中性分项 raw/fixed 指标，以及中性否定误判统计与样例 |
 | 新汇总文件 | `results_bgca_aste_stage1_neutral_gain100_max200.csv`、`results_bgca_aste_stage1_neutral_gain100_max200_CN.md` |
 | 隔离保证 | 模型、指标、预测、分类指标、错误分析和汇总均带 `neutral_gain100_max200` 标签 |
 | 续跑保证 | 最终训练使用 `--resume_from_checkpoint auto` 自动续训；评估完成需同时存在总体、分类和错误分析文件 |
 | 判定标准 | 总体 raw F1 与 46.82 比较，同时要求中性 F1 或中性召回获得实质改善 |
-| 代码版本 | `0c49ba6 Add isolated neutral generation weighting` |
+| 代码版本 | `e7560c7`（混合数据）、`e320fab`（通道统计）、`925d596`（完整流程） |
 | 第三项总体结果 | raw P=51.54、raw R=37.15、raw F1=43.18、fixed F1=45.76；比最佳 raw 低 3.64 |
 | 第三项分类结果 | 正向 raw F1 49.24→45.06；负向 52.86→50.46；中性 0→0；新增 2 个中性预测但均未完整匹配 |
 | 第三项结论 | 中性主生成损失增权没有建立目标域中性边界，反而破坏正负类别；不继续调中性权重 |
 | 清理状态 | `hp2` 与中性增权失败模型、检查点、大型增强/训练数据和专属预测已删除，释放约 12.52 GB；指标与分析保留 |
-| 当前状态 | 第三项已结束；第四项“生成器显式互相掩码训练”方案待确认 |
+| 当前状态 | 第四项代码、测试和完整流程预演已完成；等待运行 `rest16 -> laptop14` 单方向实验 |
+
+完整执行命令（从 CMD（命令提示符）开始，整行执行）：
+
+```text
+cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_aste_stage1_pairs.py --output_root runs\bgca_aste_stage1_mixed_generator_v1 --pairs rest16:laptop14 --extractor_model_path J:\nlp\models\t5-base-py --generator_model_path J:\nlp\models\t5-base-py --generator_prompt_style mixed --augment_prompt_style masked_mutual --domain_prefix_style text --extractor_epochs 25 --generator_epochs 8 --final_epochs 5 --high_precision_max_triplets 1 --high_precision_max_token_distance 5 --lambda_sentiment_contrastive 0.01 --sentiment_contrastive_source_only --sentiment_contrastive_class_balanced --learning_rate 0.0003 --eval_batch_size 2 --cuda 0 --seed 1000"
+```
 
 ## 0.2 代码版本变更记录
 
@@ -55,6 +68,7 @@
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
+| 2026-07-15 | `e7560c7`、`e320fab`、`925d596` | 三任务混合生成器训练 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增每个源句每通道最多一行的混合训练；清单记录通道数量和比例；完整流程使用独立文件、模型、状态和结果标签；保留互相掩码增强、8GB 显存参数和自动续训 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14` | 代码完成待跑；真实数据构造为训练 857:857:857、验证 210:210:210；44 项相关测试通过 |
 | 2026-07-15 | `0c49ba6 Add isolated neutral generation weighting` | 中性主生成损失独立增权 | `t5_absa_train.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增只作用于中性样本主生成损失的增益和专用上限；不改变结构损失和非中性多三元组权重；评估新增三类情感指标及中性否定误判；复用 hp1 最终训练集 | 指标与错误分析保留；模型和专属预测已删除 | 已完成：raw F1=43.18、fixed F1=45.76，中性 F1=0，低于最佳 3.64 |
 | 2026-07-15 | `6f2dcd3 Add isolated two-triplet pseudo-label experiment` | 高精度伪标签最多两个三元组消融 | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py`、3 个测试文件 | 新增可配置三元组上限；从原始预测重筛到独立目录；复用旧提取器和生成器；隔离增强、训练集、模型、指标、预测、分析及汇总；兼容旧阶段状态并支持中断续跑 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\pseudo_variants\hp2_dist5` 及带 `_hp2_dist5` 的输出 | 已完成：raw F1=44.44、fixed F1=46.87，低于最佳 2.38 |
 | 2026-07-13 | `c94a094 Apply contextual contrastive learning end to end` | 全流程编码器上下文对比学习 | `t5_absa_train.py`、`run_bgca_aste_stage1_pairs.py`、`test_domain_adversarial_train.py` | 预训练 T5 编码器先生成源域观点上下文表示并初始化三类原型；观点跨度大小写兼容定位达到 1393/1393；25 轮初始提取器和最终 5 轮模型都使用源域类别平衡对比损失；伪标签、生成器和掩码增强全部重跑；各阶段支持检查点续训并使用独立目录 | `runs\bgca_aste_stage1_full_contrastive_encoder_v1\rest16_to_laptop14` | 已完成：raw F1=43.74、fixed F1=45.70，低于最佳候选 |
