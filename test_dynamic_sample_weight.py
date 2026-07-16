@@ -3,6 +3,7 @@ import torch
 from t5_absa_train import (
     DataCollatorForSeq2SeqWithPairing,
     JsonlSeq2SeqDataset,
+    find_token_subsequence_span,
     grouped_representation_consistency_loss,
     joint_weighted_loss,
     pairing_contrastive_loss,
@@ -432,21 +433,77 @@ def test_joint_weighted_loss_adds_structure_loss():
     assert float(loss) == 3.0
 
 
-def test_dataset_returns_pairing_spans_for_multi_triplet_label():
+def test_dataset_returns_encoder_pairing_spans_for_source_multi_triplets():
     rows = [
         {
-            "input": "x",
-            "target": "<pos> battery life <opinion> long ; <neg> screen <opinion> dark",
-            "sample_weight": 0.65,
+            "input": "The battery life is very long but the screen is dark.",
+            "target": "<pos> battery life <opinion> very long ; <neg> screen <opinion> dark",
+            "sample_weight": 1.0,
         }
     ]
-    dataset = JsonlSeq2SeqDataset(rows, TinyTokenizer(), 16, 96, 1.0, 0.5, 0.2, max_pairing_triplets=4)
+    tokenizer = TinyTokenizer()
+    dataset = JsonlSeq2SeqDataset(
+        rows,
+        tokenizer,
+        96,
+        96,
+        1.0,
+        0.5,
+        0.2,
+        max_pairing_triplets=4,
+        pairing_source_only=True,
+    )
 
     item = dataset[0]
 
-    assert item["pairing_aspect_spans"][:2] == [[6, 18], [41, 47]]
-    assert item["pairing_opinion_spans"][:2] == [[29, 33], [58, 62]]
+    input_ids = tokenizer.encode(rows[0]["input"], add_special_tokens=False)
+    assert item["pairing_aspect_spans"] == [
+        list(find_token_subsequence_span(input_ids, tokenizer.encode("battery life", add_special_tokens=False))),
+        list(find_token_subsequence_span(input_ids, tokenizer.encode("screen", add_special_tokens=False))),
+    ]
+    assert item["pairing_opinion_spans"] == [
+        list(find_token_subsequence_span(input_ids, tokenizer.encode("very long", add_special_tokens=False))),
+        list(find_token_subsequence_span(input_ids, tokenizer.encode("dark", add_special_tokens=False))),
+    ]
     assert item["pairing_mask"][:2] == [1, 1]
+
+
+def test_pairing_source_only_excludes_pseudo_augment_and_single_triplets():
+    rows = [
+        {
+            "input": "The battery is long and the screen is dark.",
+            "target": "<pos> battery <opinion> long ; <neg> screen <opinion> dark",
+            "sample_weight": 0.65,
+            "augmentation": "target_pseudo",
+        },
+        {
+            "input": "The battery is long and the screen is dark.",
+            "target": "<pos> battery <opinion> long ; <neg> screen <opinion> dark",
+            "sample_weight": 0.2,
+            "augmentation": "masked_aspect_channel",
+        },
+        {
+            "input": "The battery is long.",
+            "target": "<pos> battery <opinion> long",
+            "sample_weight": 1.0,
+        },
+    ]
+    dataset = JsonlSeq2SeqDataset(
+        rows,
+        TinyTokenizer(),
+        96,
+        96,
+        1.0,
+        0.5,
+        0.2,
+        pairing_source_only=True,
+    )
+
+    for index in range(len(rows)):
+        item = dataset[index]
+        assert item["pairing_aspect_spans"] == []
+        assert item["pairing_opinion_spans"] == []
+        assert item["pairing_mask"] == []
 
 
 def test_dataset_skips_pairing_features_for_low_confidence_or_single_triplet_rows():

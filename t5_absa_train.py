@@ -64,6 +64,7 @@ class JsonlSeq2SeqDataset(Dataset):
         max_pairing_triplets: int = 4,
         min_pairing_triplets: int = 2,
         min_pairing_sample_weight: float = 0.65,
+        pairing_source_only: bool = False,
         domain_adv_exclude_augment: bool = False,
         sentiment_contrastive_min_weight: float = 0.65,
         sentiment_contrastive_exclude_augment: bool = False,
@@ -89,6 +90,7 @@ class JsonlSeq2SeqDataset(Dataset):
         self.max_pairing_triplets = max_pairing_triplets
         self.min_pairing_triplets = min_pairing_triplets
         self.min_pairing_sample_weight = min_pairing_sample_weight
+        self.pairing_source_only = pairing_source_only
         self.domain_adv_exclude_augment = domain_adv_exclude_augment
         self.sentiment_contrastive_min_weight = sentiment_contrastive_min_weight
         self.sentiment_contrastive_exclude_augment = sentiment_contrastive_exclude_augment
@@ -116,7 +118,7 @@ class JsonlSeq2SeqDataset(Dataset):
         model_inputs["domain_label"] = self.domain_label(row)
         model_inputs["structure_weight"] = self.structure_weight(row, sample_weight)
         model_inputs["consistency_group"] = self.consistency_group(row, idx)
-        model_inputs.update(self.pairing_features(row))
+        model_inputs.update(self.pairing_features(row, model_inputs["input_ids"]))
         model_inputs.update(self.sentiment_contrastive_features(row, model_inputs["input_ids"], sample_weight))
         return model_inputs
 
@@ -163,9 +165,18 @@ class JsonlSeq2SeqDataset(Dataset):
             return stable_group_id(row["id"])
         return int(idx)
 
-    def pairing_features(self, row: dict) -> dict:
+    def pairing_features(self, row: dict, input_ids: list[int]) -> dict:
         target = row.get("target", "")
         triplets = parse_triplet_text_list(target)
+        augmentation = row.get("augmentation")
+        if self.pairing_source_only and (
+            augmentation == "target_pseudo" or augmentation in CSA_AUGMENT_CHANNELS
+        ):
+            return {
+                "pairing_aspect_spans": [],
+                "pairing_opinion_spans": [],
+                "pairing_mask": [],
+            }
         if len(triplets) < self.min_pairing_triplets:
             return {
                 "pairing_aspect_spans": [],
@@ -182,19 +193,23 @@ class JsonlSeq2SeqDataset(Dataset):
         opinion_spans: list[list[int]] = []
         mask: list[int] = []
         for aspect, opinion, _sentiment in triplets[: self.max_pairing_triplets]:
-            aspect_span = find_token_subsequence_span(
-                self.tokenizer.encode(target, add_special_tokens=False),
-                self.tokenizer.encode(aspect, add_special_tokens=False),
+            aspect_span = find_fragment_span_in_input(
+                self.tokenizer, row.get("input", ""), input_ids, aspect
             )
-            opinion_span = find_token_subsequence_span(
-                self.tokenizer.encode(target, add_special_tokens=False),
-                self.tokenizer.encode(opinion, add_special_tokens=False),
+            opinion_span = find_fragment_span_in_input(
+                self.tokenizer, row.get("input", ""), input_ids, opinion
             )
             if aspect_span is None or opinion_span is None:
                 continue
             aspect_spans.append(list(aspect_span))
             opinion_spans.append(list(opinion_span))
             mask.append(1)
+        if len(mask) < self.min_pairing_triplets:
+            return {
+                "pairing_aspect_spans": [],
+                "pairing_opinion_spans": [],
+                "pairing_mask": [],
+            }
         return {
             "pairing_aspect_spans": aspect_spans,
             "pairing_opinion_spans": opinion_spans,
@@ -255,14 +270,19 @@ def find_token_subsequence_span(sequence: list[int], subsequence: list[int]) -> 
     return None
 
 
-def find_opinion_span_in_input(tokenizer, text: str, input_ids: list[int], opinion: str) -> tuple[int, int] | None:
-    candidates = [opinion]
+def find_fragment_span_in_input(
+    tokenizer,
+    text: str,
+    input_ids: list[int],
+    fragment: str,
+) -> tuple[int, int] | None:
+    candidates = [fragment]
     lower_text = text.lower()
-    lower_opinion = opinion.lower()
+    lower_fragment = fragment.lower()
     start = 0
-    while lower_opinion and (match_start := lower_text.find(lower_opinion, start)) >= 0:
-        candidates.append(text[match_start : match_start + len(opinion)])
-        start = match_start + max(1, len(opinion))
+    while lower_fragment and (match_start := lower_text.find(lower_fragment, start)) >= 0:
+        candidates.append(text[match_start : match_start + len(fragment)])
+        start = match_start + max(1, len(fragment))
     seen = set()
     for candidate in candidates:
         if candidate in seen:
@@ -272,6 +292,10 @@ def find_opinion_span_in_input(tokenizer, text: str, input_ids: list[int], opini
         if span is not None:
             return span
     return None
+
+
+def find_opinion_span_in_input(tokenizer, text: str, input_ids: list[int], opinion: str) -> tuple[int, int] | None:
+    return find_fragment_span_in_input(tokenizer, text, input_ids, opinion)
 
 
 class DataCollatorForSeq2SeqWithPairing:
