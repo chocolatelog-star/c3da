@@ -385,15 +385,15 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     )
     final_train_file = run_dir / f"final_train_{final_tag}.jsonl"
     final_dev_file = run_dir / f"final_dev_{final_tag}.jsonl"
-    reuse_for_contrastive = (
-        args.lambda_sentiment_contrastive > 0
+    reuse_for_auxiliary_loss = (
+        (args.lambda_sentiment_contrastive > 0 or args.lambda_pairing_loss > 0)
         and final_train_file.exists()
         and final_dev_file.exists()
         and not args.rerun
     )
     legacy_stage_names = legacy_hp1_stage_names(gen_tag) if use_legacy_pseudo_filter else {}
     augment_legacy_stages = legacy_stage_names.get("augment", ())
-    if not reuse_for_contrastive and not stage_done(
+    if not reuse_for_auxiliary_loss and not stage_done(
         status,
         f"augment_{final_tag}",
         [final_train_file],
@@ -491,6 +491,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             result_tag += "_balanced"
         if args.sentiment_prototype_initialize_from_context:
             result_tag += "_encoder_context_init"
+    if args.lambda_pairing_loss > 0:
+        pairing_lambda_tag = str(args.lambda_pairing_loss).replace(".", "")
+        result_tag += f"_pairing_encoder_l{pairing_lambda_tag}"
+        if args.pairing_source_only:
+            result_tag += "_source_only"
     use_neutral_weight_variant = (
         args.neutral_generation_loss_gain > 0
         or args.neutral_generation_max_effective_weight > 0
@@ -543,6 +548,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--domain_adv_exclude_augment",
                 "--lambda_sentiment_contrastive",
                 str(args.lambda_sentiment_contrastive),
+                "--lambda_pairing_loss",
+                str(args.lambda_pairing_loss),
+                "--pairing_temperature",
+                str(args.pairing_temperature),
                 "--sentiment_contrastive_temperature",
                 str(args.sentiment_contrastive_temperature),
                 "--sentiment_contrastive_min_weight",
@@ -555,6 +564,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 *(["--sentiment_contrastive_source_only"] if args.sentiment_contrastive_source_only else []),
                 *(["--sentiment_contrastive_class_balanced"] if args.sentiment_contrastive_class_balanced else []),
                 *(["--sentiment_prototype_initialize_from_context", "--sentiment_prototype_init_batch_size", str(args.sentiment_prototype_init_batch_size)] if args.sentiment_prototype_initialize_from_context else []),
+                *(["--pairing_source_only"] if args.pairing_source_only else []),
                 *common_train,
             ],
             args.dry_run,
@@ -566,6 +576,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     raw_metrics_path = run_dir / f"aste_metrics_raw_{metrics_tag}.json"
     fixed_metrics_path = run_dir / f"aste_metrics_fixed_{metrics_tag}.json"
     sentiment_metrics_path = run_dir / f"aste_metrics_by_sentiment_{metrics_tag}.json"
+    structure_metrics_path = run_dir / f"aste_metrics_by_structure_{metrics_tag}.json"
     error_analysis_path = run_dir / f"aste_error_analysis_{metrics_tag}.json"
     legacy_raw_metrics_path = run_dir / f"aste_metrics_raw_{gen_tag}.json"
     legacy_fixed_metrics_path = run_dir / f"aste_metrics_fixed_{gen_tag}.json"
@@ -573,6 +584,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         use_legacy_pseudo_filter
         and not use_neutral_weight_variant
         and args.lambda_sentiment_contrastive == 0
+        and args.lambda_pairing_loss == 0
         and legacy_raw_metrics_path.exists()
         and legacy_fixed_metrics_path.exists()
     ):
@@ -586,8 +598,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             raw_metrics_path,
             fixed_metrics_path,
             *(
-                [sentiment_metrics_path, error_analysis_path]
-                if use_neutral_weight_variant
+                [sentiment_metrics_path, structure_metrics_path, error_analysis_path]
+                if use_neutral_weight_variant or args.lambda_pairing_loss > 0
                 else []
             ),
         ],
@@ -854,6 +866,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--final_epochs", type=int, default=5)
     parser.add_argument("--extractor_lambda_sentiment_contrastive", type=float, default=0.0)
     parser.add_argument("--lambda_sentiment_contrastive", type=float, default=0.0)
+    parser.add_argument("--lambda_pairing_loss", type=float, default=0.0)
+    parser.add_argument("--pairing_temperature", type=float, default=0.1)
+    parser.add_argument("--pairing_source_only", action="store_true")
     parser.add_argument("--sentiment_contrastive_temperature", type=float, default=0.1)
     parser.add_argument("--sentiment_contrastive_min_weight", type=float, default=0.65)
     parser.add_argument("--sentiment_contrastive_exclude_augment", action="store_true")
@@ -903,6 +918,12 @@ def main() -> None:
         )
         neutral_tag = neutral_weight_tag(args.neutral_generation_loss_gain, neutral_max_weight)
         summary_tag = f"{summary_tag}_{neutral_tag}".strip("_")
+    if args.lambda_pairing_loss > 0:
+        pairing_lambda_tag = str(args.lambda_pairing_loss).replace(".", "")
+        pairing_tag = f"pairing_encoder_l{pairing_lambda_tag}"
+        if args.pairing_source_only:
+            pairing_tag += "_source_only"
+        summary_tag = f"{summary_tag}_{pairing_tag}".strip("_")
     for source, target in pairs:
         rows.append(run_pair(args, source, target))
         if not args.dry_run:

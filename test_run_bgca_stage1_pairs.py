@@ -141,6 +141,77 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn(f"--model_filter_path {upstream_extractor}", output)
         self.assertIn("generator_mixed_l2t_masked_aspect_masked_opinion_ep8", output)
 
+    def test_encoder_pairing_ablation_reuses_best_final_train_and_isolates_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "rest16_to_laptop14"
+            extractor_dir = run_dir / "models" / "extractor_ep25_plain_last" / "best"
+            generator_dir = run_dir / "models" / "generator_label_to_text_gen_ep8" / "best"
+            extractor_dir.mkdir(parents=True)
+            generator_dir.mkdir(parents=True)
+            for path in (
+                run_dir / "extract_train.jsonl",
+                run_dir / "c3da_generator_train_label_to_text_gen.jsonl",
+                run_dir / "c3da_generator_dev_label_to_text_gen.jsonl",
+                run_dir / "target_pseudo.jsonl",
+                run_dir / "target_pseudo_high_precision.jsonl",
+                run_dir / "target_pseudo_high_precision_analysis.json",
+                run_dir / "final_train_strict_aug150_w020_label_to_text_gen.jsonl",
+                run_dir / "final_dev_strict_aug150_w020_label_to_text_gen.jsonl",
+                extractor_dir / "config.json",
+                generator_dir / "config.json",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_label_to_text_gen": true, "train_extractor_ep25_plain_last": true, '
+                '"pseudo_extractor_ep25_plain_last": true, "train_generator_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--generator_prompt_style",
+                "label_to_text",
+                "--augment_prompt_style",
+                "masked_mutual",
+                "--domain_prefix_style",
+                "text",
+                "--lambda_sentiment_contrastive",
+                "0.01",
+                "--sentiment_contrastive_source_only",
+                "--sentiment_contrastive_class_balanced",
+                "--lambda_pairing_loss",
+                "0.01",
+                "--pairing_temperature",
+                "0.1",
+                "--pairing_source_only",
+                "--dry_run",
+            ]
+
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        output = result.stdout
+        command_lines = [line for line in output.splitlines() if line.startswith(sys.executable)]
+        self.assertEqual(len(command_lines), 2)
+        self.assertNotIn("t5_aste_pipeline.py prepare", output)
+        self.assertNotIn("t5_aste_pipeline.py pseudo", output)
+        self.assertNotIn("t5_aste_pipeline.py augment", output)
+        self.assertIn("final_train_strict_aug150_w020_label_to_text_gen.jsonl", output)
+        self.assertIn("--lambda_pairing_loss 0.01", output)
+        self.assertIn("--pairing_temperature 0.1", output)
+        self.assertIn("--pairing_source_only", output)
+        self.assertIn("pairing_encoder_l001_source_only", output)
+
 
 if __name__ == "__main__":
     unittest.main()
