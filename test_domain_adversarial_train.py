@@ -156,6 +156,7 @@ def test_trainer_uses_encoder_pairing_loss_and_tracks_stats():
     trainer.sentiment_contrastive_class_weights = None
     trainer._component_sums = {}
     trainer._component_counts = {}
+    trainer._component_reductions = {}
     inputs = {
         "input_ids": torch.tensor([[1, 2, 3, 4]]),
         "attention_mask": torch.tensor([[1, 1, 1, 1]]),
@@ -174,6 +175,8 @@ def test_trainer_uses_encoder_pairing_loss_and_tracks_stats():
     assert "pairing_loss" in trainer._component_sums
     assert "pairing_aspect_accuracy" in trainer._component_sums
     assert "pairing_opinion_accuracy" in trainer._component_sums
+    assert trainer._component_reductions["pairing_active_rows"] == "sum"
+    assert trainer._component_reductions["pairing_active_pairs"] == "sum"
 
 
 if __name__ == "__main__":

@@ -511,18 +511,24 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.sentiment_contrastive_class_weights = sentiment_contrastive_class_weights
         self._component_sums: dict[str, float] = {}
         self._component_counts: dict[str, int] = {}
+        self._component_reductions: dict[str, str] = {}
 
-    def _track_component(self, name: str, value: torch.Tensor | float) -> None:
+    def _track_component(self, name: str, value: torch.Tensor | float, reduction: str = "mean") -> None:
         numeric = float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
         self._component_sums[name] = self._component_sums.get(name, 0.0) + numeric
         self._component_counts[name] = self._component_counts.get(name, 0) + 1
+        self._component_reductions[name] = reduction
 
     def log(self, logs: dict, *args, **kwargs) -> None:
         if "loss" in logs and self._component_sums:
             for name, total in self._component_sums.items():
-                logs[name] = round(total / max(1, self._component_counts.get(name, 1)), 6)
+                if self._component_reductions.get(name) == "sum":
+                    logs[name] = round(total, 6)
+                else:
+                    logs[name] = round(total / max(1, self._component_counts.get(name, 1)), 6)
             self._component_sums.clear()
             self._component_counts.clear()
+            self._component_reductions.clear()
         super().log(logs, *args, **kwargs)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -587,7 +593,8 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
                 if model.training:
                     self._track_component("pairing_loss", pair_loss)
                     for name, value in pairing_stats.items():
-                        self._track_component(name, value)
+                        reduction = "sum" if name in {"pairing_active_rows", "pairing_active_pairs"} else "mean"
+                        self._track_component(name, value, reduction=reduction)
         if (
             self.lambda_sentiment_contrastive > 0
             and sentiment_contrastive_spans is not None
