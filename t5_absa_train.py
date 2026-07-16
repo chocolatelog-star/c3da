@@ -800,7 +800,7 @@ def encoder_pairing_contrastive_loss(
         active_opinion_spans = opinion_spans[batch_idx].index_select(0, active_idx)
         aspect_same = (active_aspect_spans[:, None, :] == active_aspect_spans[None, :, :]).all(dim=-1)
         opinion_same = (active_opinion_spans[:, None, :] == active_opinion_spans[None, :, :]).all(dim=-1)
-        positive_mask = (aspect_same.to(torch.int32) @ opinion_same.transpose(0, 1).to(torch.int32)).gt(0)
+        positive_mask = (aspect_same[:, None, :] & opinion_same[None, :, :]).any(dim=-1)
         logits = aspects @ opinions.transpose(0, 1) / max(float(temperature), 1e-6)
         aspect_loss, aspect_accuracy, aspect_anchors = _multi_positive_direction_loss(logits, positive_mask)
         opinion_loss, opinion_accuracy, opinion_anchors = _multi_positive_direction_loss(
