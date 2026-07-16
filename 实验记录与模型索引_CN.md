@@ -17,14 +17,21 @@
 | 主对比指标 | `raw F1`（原始 F1） |
 | 辅助分析指标 | `fixed F1`（修正 F1） |
 
-## 0.1 当前阶段：混合任务生成器失败，准备方面词-观点词配对损失
+## 0.1 当前阶段：编码器方面词-观点词配对损失代码完成，准备实验
 
-当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。第四项严格复用同一个提取器和 hp1 伪标签，只把生成器改为 1:1:1 的标签到文本、方面词掩码、观点词-情感掩码混合训练，最终得到 raw F1=44.07、fixed F1=46.06，低于最佳 2.75。失败生成器和最终模型已删除，指标与增强分析保留。下一步按既定路线研究方面词-观点词配对损失。
+当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。第四项混合生成器失败并已完成清理。第五项代码已经完成：在当前最佳最终训练集上，只对源域人工标注多三元组句子增加编码器上下文多正例双向方面词-观点词配对损失；DANN（领域对抗神经网络）、情感对比学习、训练数据和解码参数保持不变。
 
 | 实验项 | 配置或结论 |
 |---|---|
 | 当前最佳候选 | raw P=54.84、raw R=40.85、raw F1=46.82、fixed F1=48.94 |
 | 当前最佳模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5\best` |
+| 第五项唯一变量 | 最终 5 轮增加编码器多正例双向方面词-观点词配对损失，系数 0.01、温度 0.1，只使用源域人工标注 |
+| 复用训练文件 | `final_train_strict_aug150_w020_label_to_text_gen.jsonl` 和 `final_dev_strict_aug150_w020_label_to_text_gen.jsonl` |
+| 配对覆盖率 | 352/352 个源域多三元组训练行成功定位，覆盖率 100%；共 877 个有效配对 |
+| 第五项模型 | `models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_pairing_encoder_l001_source_only_ep5\best` |
+| 新训练日志 | `pairing_loss`、双向配对准确率、日志周期有效行数和有效配对数 |
+| 新评估 | 独立输出单三元组与多三元组子集 raw/fixed 指标 |
+| 第五项验收 | 总体 raw F1 与 46.82 比较，重点检查多三元组子集召回率和配对错误 |
 | 第四项唯一变量 | 生成器由纯 `label_to_text` 改为三任务 `mixed`；提取器、hp1 伪标签、150 条增强、增强权重 0.20、DANN 系数 0.03 和最终对比学习保持不变 |
 | 固定上游来源 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14`；只读复用 `extractor_ep25_plain_last\best`、原始伪标签和 hp1 高精度伪标签 |
 | 真实训练通道 | 857 条标签到文本 + 857 条方面词掩码 + 857 条观点词-情感掩码，共 2571 条，比例严格为 1:1:1 |
@@ -59,7 +66,14 @@
 | 第三项结论 | 中性主生成损失增权没有建立目标域中性边界，反而破坏正负类别；不继续调中性权重 |
 | 清理状态 | `hp2` 与中性增权失败模型、检查点、大型增强/训练数据和专属预测已删除，释放约 12.52 GB；指标与分析保留 |
 | 清理状态 | 第四项失败生成器和最终模型已删除，释放约 11.65 GB；预测、指标、增强数据和分析保留 |
-| 当前状态 | 第四项已结束；第五项“方面词-观点词配对损失”方案待确认 |
+| 第五项代码版本 | `c1082ab`（编码器跨度）、`123ab39`（多正例损失）、`d87e871`（结构评估）、`6075ee0`（单变量路由）、`a358efa`（日志计数） |
+| 当前状态 | 第五项代码、真实覆盖率检查和完整预演已完成；等待运行最终 5 轮实验 |
+
+完整执行命令（从 CMD（命令提示符）开始，整行执行）：
+
+```text
+cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_aste_stage1_pairs.py --output_root runs\bgca_aste_stage1_domain_prompt_text_v1 --pairs rest16:laptop14 --extractor_model_path J:\nlp\models\t5-base-py --generator_model_path J:\nlp\models\t5-base-py --generator_prompt_style label_to_text --augment_prompt_style masked_mutual --domain_prefix_style text --final_epochs 5 --lambda_sentiment_contrastive 0.01 --sentiment_contrastive_source_only --sentiment_contrastive_class_balanced --lambda_pairing_loss 0.01 --pairing_temperature 0.1 --pairing_source_only --learning_rate 0.0003 --eval_batch_size 2 --cuda 0 --seed 1000"
+```
 
 完整执行命令（从 CMD（命令提示符）开始，整行执行）：
 
@@ -73,6 +87,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_ast
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
+| 2026-07-16 | `c1082ab`、`123ab39`、`d87e871`、`6075ee0`、`a358efa` | 编码器上下文多正例配对损失 | `t5_absa_train.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、4 个测试文件 | 从原始输入定位方面词和观点词；共享跨度使用多正例双向对比；只用源域多三元组；新增配对日志和结构子集评估；严格复用当前最佳训练集，只重跑最终模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14` 下带 `_pairing_encoder_l001_source_only` 的独立输出 | 代码完成待跑；352/352 行定位成功，共 877 对；46 项相关测试通过 |
 | 2026-07-15 | `e7560c7`、`e320fab`、`925d596`、`9f3c4db` | 三任务混合生成器训练 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增每个源句每通道最多一行的混合训练；清单记录通道数量和比例；新目录只读复用旧最佳提取器与 hp1 伪标签；新生成器、增强、最终模型和汇总保持隔离；保留 8GB 显存参数和自动续训 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14` | 已完成：raw F1=44.07、fixed F1=46.06；多三元组增强 63→23；失败模型已删除，释放约 11.65 GB |
 | 2026-07-15 | `0c49ba6 Add isolated neutral generation weighting` | 中性主生成损失独立增权 | `t5_absa_train.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增只作用于中性样本主生成损失的增益和专用上限；不改变结构损失和非中性多三元组权重；评估新增三类情感指标及中性否定误判；复用 hp1 最终训练集 | 指标与错误分析保留；模型和专属预测已删除 | 已完成：raw F1=43.18、fixed F1=45.76，中性 F1=0，低于最佳 3.64 |
 | 2026-07-15 | `6f2dcd3 Add isolated two-triplet pseudo-label experiment` | 高精度伪标签最多两个三元组消融 | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py`、3 个测试文件 | 新增可配置三元组上限；从原始预测重筛到独立目录；复用旧提取器和生成器；隔离增强、训练集、模型、指标、预测、分析及汇总；兼容旧阶段状态并支持中断续跑 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\pseudo_variants\hp2_dist5` 及带 `_hp2_dist5` 的输出 | 已完成：raw F1=44.44、fixed F1=46.87，低于最佳 2.38 |
