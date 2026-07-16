@@ -3,6 +3,7 @@ import torch
 from t5_absa_train import (
     DataCollatorForSeq2SeqWithPairing,
     JsonlSeq2SeqDataset,
+    encoder_pairing_contrastive_loss,
     find_token_subsequence_span,
     grouped_representation_consistency_loss,
     joint_weighted_loss,
@@ -575,3 +576,71 @@ def test_pairing_contrastive_loss_prefers_correct_opinion_pair():
     swapped_loss = pairing_contrastive_loss(hidden, aspect_spans, torch.tensor([[[2, 3], [0, 1]]]), mask)
 
     assert good_loss < swapped_loss
+
+
+def test_encoder_pairing_loss_prefers_correct_pairs():
+    hidden = torch.tensor(
+        [[
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ]]
+    )
+    aspect_spans = torch.tensor([[[0, 1], [1, 2]]])
+    opinion_spans = torch.tensor([[[2, 3], [3, 4]]])
+    mask = torch.tensor([[1, 1]])
+
+    good_loss, stats = encoder_pairing_contrastive_loss(
+        hidden, aspect_spans, opinion_spans, mask, return_stats=True
+    )
+    swapped_loss = encoder_pairing_contrastive_loss(
+        hidden,
+        aspect_spans,
+        torch.tensor([[[3, 4], [2, 3]]]),
+        mask,
+    )
+
+    assert good_loss < swapped_loss
+    assert stats["pairing_aspect_accuracy"] == 1.0
+    assert stats["pairing_opinion_accuracy"] == 1.0
+    assert stats["pairing_active_rows"] == 1.0
+    assert stats["pairing_active_pairs"] == 2.0
+
+
+def test_encoder_pairing_loss_supports_multiple_positives():
+    hidden = torch.tensor(
+        [[
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ]]
+    )
+    aspect_spans = torch.tensor([[[0, 1], [0, 1], [3, 4]]])
+    opinion_spans = torch.tensor([[[1, 2], [2, 3], [4, 5]]])
+    mask = torch.tensor([[1, 1, 1]])
+
+    loss, stats = encoder_pairing_contrastive_loss(
+        hidden, aspect_spans, opinion_spans, mask, return_stats=True
+    )
+
+    assert torch.isfinite(loss)
+    assert stats["pairing_aspect_accuracy"] == 1.0
+    assert stats["pairing_opinion_accuracy"] == 1.0
+
+
+def test_encoder_pairing_loss_is_zero_without_real_negatives():
+    hidden = torch.tensor([[[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]])
+    aspect_spans = torch.tensor([[[0, 1], [0, 1]]])
+    opinion_spans = torch.tensor([[[1, 2], [2, 3]]])
+    mask = torch.tensor([[1, 1]])
+
+    loss, stats = encoder_pairing_contrastive_loss(
+        hidden, aspect_spans, opinion_spans, mask, return_stats=True
+    )
+
+    assert torch.isfinite(loss)
+    assert float(loss) == 0.0
+    assert stats["pairing_active_rows"] == 0.0

@@ -1,9 +1,11 @@
 import torch
+from types import SimpleNamespace
 
 from t5_absa_train import (
     DomainAdversarialHead,
     JsonlSeq2SeqDataset,
     SentimentPrototypeHead,
+    WeightedSeq2SeqTrainer,
     build_sentiment_class_weights,
     build_sentiment_prototype_centroids,
     gradient_reverse,
@@ -126,6 +128,52 @@ def test_opinion_span_lookup_uses_original_input_casing():
     span = find_opinion_span_in_input(tokenizer, text, input_ids, "japanese")
 
     assert span is not None
+
+
+def test_trainer_uses_encoder_pairing_loss_and_tracks_stats():
+    class FakeModel:
+        training = True
+
+        def __call__(self, input_ids, attention_mask, labels, return_dict=True, output_hidden_states=False):
+            return SimpleNamespace(
+                logits=torch.zeros((1, 4, 3), requires_grad=True),
+                encoder_last_hidden_state=torch.tensor(
+                    [[[1.0, 0.0], [0.0, 1.0], [0.0, 1.0], [1.0, 0.0]]],
+                    requires_grad=True,
+                ),
+                decoder_hidden_states=None,
+            )
+
+    trainer = object.__new__(WeightedSeq2SeqTrainer)
+    trainer.lambda_structure_loss = 0.0
+    trainer.lambda_consistency_loss = 0.0
+    trainer.lambda_pairing_loss = 0.01
+    trainer.pairing_temperature = 0.1
+    trainer.lambda_domain_adv = 0.0
+    trainer.domain_adv_grl_lambda = 1.0
+    trainer.lambda_sentiment_contrastive = 0.0
+    trainer.sentiment_contrastive_temperature = 0.1
+    trainer.sentiment_contrastive_class_weights = None
+    trainer._component_sums = {}
+    trainer._component_counts = {}
+    inputs = {
+        "input_ids": torch.tensor([[1, 2, 3, 4]]),
+        "attention_mask": torch.tensor([[1, 1, 1, 1]]),
+        "labels": torch.tensor([[0, 1, 2, 0]]),
+        "sample_weight": torch.tensor([1.0]),
+        "domain_weight": torch.tensor([1.0]),
+        "structure_weight": torch.tensor([1.0]),
+        "pairing_aspect_spans": torch.tensor([[[0, 1], [1, 2]]]),
+        "pairing_opinion_spans": torch.tensor([[[2, 3], [3, 4]]]),
+        "pairing_mask": torch.tensor([[1, 1]]),
+    }
+
+    loss = trainer.compute_loss(FakeModel(), inputs)
+
+    assert torch.isfinite(loss)
+    assert "pairing_loss" in trainer._component_sums
+    assert "pairing_aspect_accuracy" in trainer._component_sums
+    assert "pairing_opinion_accuracy" in trainer._component_sums
 
 
 if __name__ == "__main__":

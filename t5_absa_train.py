@@ -118,7 +118,7 @@ class JsonlSeq2SeqDataset(Dataset):
         model_inputs["domain_label"] = self.domain_label(row)
         model_inputs["structure_weight"] = self.structure_weight(row, sample_weight)
         model_inputs["consistency_group"] = self.consistency_group(row, idx)
-        model_inputs.update(self.pairing_features(row, model_inputs["input_ids"]))
+        model_inputs.update(self.pairing_features(row, model_inputs["input_ids"], sample_weight))
         model_inputs.update(self.sentiment_contrastive_features(row, model_inputs["input_ids"], sample_weight))
         return model_inputs
 
@@ -165,7 +165,7 @@ class JsonlSeq2SeqDataset(Dataset):
             return stable_group_id(row["id"])
         return int(idx)
 
-    def pairing_features(self, row: dict, input_ids: list[int]) -> dict:
+    def pairing_features(self, row: dict, input_ids: list[int], sample_weight: float) -> dict:
         target = row.get("target", "")
         triplets = parse_triplet_text_list(target)
         augmentation = row.get("augmentation")
@@ -183,7 +183,7 @@ class JsonlSeq2SeqDataset(Dataset):
                 "pairing_opinion_spans": [],
                 "pairing_mask": [],
             }
-        if float(row.get("sample_weight", 0.0) or 0.0) < self.min_pairing_sample_weight and row.get("augmentation") != "target_pseudo":
+        if sample_weight < self.min_pairing_sample_weight and row.get("augmentation") != "target_pseudo":
             return {
                 "pairing_aspect_spans": [],
                 "pairing_opinion_spans": [],
@@ -491,6 +491,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         lambda_structure_loss: float = 0.0,
         lambda_consistency_loss: float = 0.0,
         lambda_pairing_loss: float = 0.0,
+        pairing_temperature: float = 0.1,
         lambda_domain_adv: float = 0.0,
         domain_adv_grl_lambda: float = 1.0,
         lambda_sentiment_contrastive: float = 0.0,
@@ -502,6 +503,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.lambda_structure_loss = lambda_structure_loss
         self.lambda_consistency_loss = lambda_consistency_loss
         self.lambda_pairing_loss = lambda_pairing_loss
+        self.pairing_temperature = pairing_temperature
         self.lambda_domain_adv = lambda_domain_adv
         self.domain_adv_grl_lambda = domain_adv_grl_lambda
         self.lambda_sentiment_contrastive = lambda_sentiment_contrastive
@@ -538,8 +540,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         sentiment_contrastive_weights = inputs.pop("sentiment_contrastive_weights", None)
         attention_mask = inputs.get("attention_mask")
         labels = inputs.get("labels")
-        needs_decoder_hidden = self.lambda_pairing_loss > 0
-        outputs = model(**inputs, return_dict=True, output_hidden_states=needs_decoder_hidden)
+        outputs = model(**inputs, return_dict=True, output_hidden_states=False)
         logits = outputs.logits
         token_loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)),
@@ -572,15 +573,21 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             )
             loss = loss + self.lambda_consistency_loss * consistency_loss
         if self.lambda_pairing_loss > 0 and pairing_aspect_spans is not None and pairing_opinion_spans is not None:
-            decoder_hidden = outputs.decoder_hidden_states[-1] if outputs.decoder_hidden_states else None
-            if decoder_hidden is not None:
-                pair_loss = pairing_contrastive_loss(
-                    decoder_hidden,
+            encoder_hidden = outputs.encoder_last_hidden_state
+            if encoder_hidden is not None:
+                pair_loss, pairing_stats = encoder_pairing_contrastive_loss(
+                    encoder_hidden,
                     pairing_aspect_spans,
                     pairing_opinion_spans,
                     pairing_mask,
+                    temperature=self.pairing_temperature,
+                    return_stats=True,
                 )
                 loss = loss + self.lambda_pairing_loss * pair_loss
+                if model.training:
+                    self._track_component("pairing_loss", pair_loss)
+                    for name, value in pairing_stats.items():
+                        self._track_component(name, value)
         if (
             self.lambda_sentiment_contrastive > 0
             and sentiment_contrastive_spans is not None
@@ -721,6 +728,98 @@ def pairing_contrastive_loss(
     if not losses:
         return decoder_hidden.new_tensor(0.0)
     return torch.stack(losses).mean()
+
+
+def _multi_positive_direction_loss(
+    logits: torch.Tensor,
+    positive_mask: torch.Tensor,
+) -> tuple[torch.Tensor, float, int]:
+    losses = []
+    correct = 0
+    active_anchors = 0
+    for anchor_idx in range(logits.size(0)):
+        positives = positive_mask[anchor_idx]
+        if not positives.any() or positives.all():
+            continue
+        anchor_logits = logits[anchor_idx]
+        losses.append(torch.logsumexp(anchor_logits, dim=0) - torch.logsumexp(anchor_logits[positives], dim=0))
+        predicted_idx = int(anchor_logits.argmax().item())
+        correct += int(bool(positives[predicted_idx]))
+        active_anchors += 1
+    if not losses:
+        return logits.new_tensor(0.0), 0.0, 0
+    return torch.stack(losses).mean(), correct / active_anchors, active_anchors
+
+
+def encoder_pairing_contrastive_loss(
+    encoder_hidden: torch.Tensor,
+    aspect_spans: torch.Tensor,
+    opinion_spans: torch.Tensor,
+    pairing_mask: torch.Tensor | None,
+    temperature: float = 0.1,
+    return_stats: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+    zero = encoder_hidden.new_tensor(0.0)
+    empty_stats = {
+        "pairing_aspect_accuracy": 0.0,
+        "pairing_opinion_accuracy": 0.0,
+        "pairing_active_rows": 0.0,
+        "pairing_active_pairs": 0.0,
+    }
+    if aspect_spans is None or opinion_spans is None or aspect_spans.numel() == 0 or opinion_spans.numel() == 0:
+        return (zero, empty_stats) if return_stats else zero
+    aspect_spans = aspect_spans.to(encoder_hidden.device)
+    opinion_spans = opinion_spans.to(encoder_hidden.device)
+    if pairing_mask is None:
+        pairing_mask = torch.ones(aspect_spans.shape[:2], device=encoder_hidden.device, dtype=torch.bool)
+    else:
+        pairing_mask = pairing_mask.to(encoder_hidden.device).bool()
+    aspect_repr = F.normalize(span_mean(encoder_hidden, aspect_spans), p=2, dim=-1)
+    opinion_repr = F.normalize(span_mean(encoder_hidden, opinion_spans), p=2, dim=-1)
+    losses = []
+    aspect_correct_weighted = 0.0
+    opinion_correct_weighted = 0.0
+    aspect_anchor_count = 0
+    opinion_anchor_count = 0
+    active_rows = 0
+    active_pairs = 0
+    for batch_idx in range(aspect_repr.size(0)):
+        active_idx = torch.nonzero(pairing_mask[batch_idx], as_tuple=False).view(-1)
+        if active_idx.numel() < 2:
+            continue
+        aspects = aspect_repr[batch_idx].index_select(0, active_idx)
+        opinions = opinion_repr[batch_idx].index_select(0, active_idx)
+        active_aspect_spans = aspect_spans[batch_idx].index_select(0, active_idx)
+        active_opinion_spans = opinion_spans[batch_idx].index_select(0, active_idx)
+        aspect_same = (active_aspect_spans[:, None, :] == active_aspect_spans[None, :, :]).all(dim=-1)
+        opinion_same = (active_opinion_spans[:, None, :] == active_opinion_spans[None, :, :]).all(dim=-1)
+        positive_mask = (aspect_same.to(torch.int32) @ opinion_same.transpose(0, 1).to(torch.int32)).gt(0)
+        logits = aspects @ opinions.transpose(0, 1) / max(float(temperature), 1e-6)
+        aspect_loss, aspect_accuracy, aspect_anchors = _multi_positive_direction_loss(logits, positive_mask)
+        opinion_loss, opinion_accuracy, opinion_anchors = _multi_positive_direction_loss(
+            logits.transpose(0, 1), positive_mask.transpose(0, 1)
+        )
+        row_losses = []
+        if aspect_anchors:
+            row_losses.append(aspect_loss)
+            aspect_correct_weighted += aspect_accuracy * aspect_anchors
+            aspect_anchor_count += aspect_anchors
+        if opinion_anchors:
+            row_losses.append(opinion_loss)
+            opinion_correct_weighted += opinion_accuracy * opinion_anchors
+            opinion_anchor_count += opinion_anchors
+        if row_losses:
+            losses.append(torch.stack(row_losses).mean())
+            active_rows += 1
+            active_pairs += int(active_idx.numel())
+    loss = torch.stack(losses).mean() if losses else zero
+    stats = {
+        "pairing_aspect_accuracy": aspect_correct_weighted / max(1, aspect_anchor_count),
+        "pairing_opinion_accuracy": opinion_correct_weighted / max(1, opinion_anchor_count),
+        "pairing_active_rows": float(active_rows),
+        "pairing_active_pairs": float(active_pairs),
+    }
+    return (loss, stats) if return_stats else loss
 
 
 def sentiment_prototype_contrastive_loss(
@@ -932,6 +1031,8 @@ def main() -> None:
     parser.add_argument("--lambda_structure_loss", type=float, default=0.15)
     parser.add_argument("--lambda_consistency_loss", type=float, default=0.0)
     parser.add_argument("--lambda_pairing_loss", type=float, default=0.0)
+    parser.add_argument("--pairing_temperature", type=float, default=0.1)
+    parser.add_argument("--pairing_source_only", action="store_true")
     parser.add_argument("--lambda_domain_adv", type=float, default=0.0)
     parser.add_argument("--domain_adv_hidden_size", type=int, default=256)
     parser.add_argument("--domain_adv_grl_lambda", type=float, default=1.0)
@@ -1016,6 +1117,8 @@ def main() -> None:
             "lambda_structure_loss": args.lambda_structure_loss,
             "lambda_consistency_loss": args.lambda_consistency_loss,
             "lambda_pairing_loss": args.lambda_pairing_loss,
+            "pairing_temperature": args.pairing_temperature,
+            "pairing_source_only": args.pairing_source_only,
             "lambda_domain_adv": args.lambda_domain_adv,
             "domain_adv_hidden_size": args.domain_adv_hidden_size,
             "domain_adv_grl_lambda": args.domain_adv_grl_lambda,
@@ -1070,6 +1173,7 @@ def main() -> None:
         max_pairing_triplets=args.max_pairing_triplets,
         min_pairing_triplets=args.min_pairing_triplets,
         min_pairing_sample_weight=args.min_pairing_sample_weight,
+        pairing_source_only=args.pairing_source_only,
         domain_adv_exclude_augment=args.domain_adv_exclude_augment,
         sentiment_contrastive_min_weight=args.sentiment_contrastive_min_weight,
         sentiment_contrastive_exclude_augment=args.sentiment_contrastive_exclude_augment,
@@ -1084,6 +1188,10 @@ def main() -> None:
         1.0,
         1.0,
         1.0,
+        max_pairing_triplets=args.max_pairing_triplets,
+        min_pairing_triplets=args.min_pairing_triplets,
+        min_pairing_sample_weight=args.min_pairing_sample_weight,
+        pairing_source_only=args.pairing_source_only,
     )
 
     training_args = Seq2SeqTrainingArguments(
@@ -1117,6 +1225,7 @@ def main() -> None:
         lambda_structure_loss=args.lambda_structure_loss,
         lambda_consistency_loss=args.lambda_consistency_loss,
         lambda_pairing_loss=args.lambda_pairing_loss,
+        pairing_temperature=args.pairing_temperature,
         lambda_domain_adv=args.lambda_domain_adv,
         domain_adv_grl_lambda=args.domain_adv_grl_lambda,
         lambda_sentiment_contrastive=args.lambda_sentiment_contrastive,
