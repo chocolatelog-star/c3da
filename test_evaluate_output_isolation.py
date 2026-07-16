@@ -63,6 +63,54 @@ class EvaluateOutputIsolationTest(unittest.TestCase):
             )
             self.assertEqual(error_analysis["neutral_negation_false_positive_rows"], 0)
 
+    def test_evaluate_writes_single_and_multi_triplet_structure_scores(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir)
+            rows = [
+                {
+                    "id": "single",
+                    "text": "The battery is good.",
+                    "label": "<pos> battery <opinion> good",
+                },
+                {
+                    "id": "multi",
+                    "text": "The screen is bright but the keyboard is stiff.",
+                    "label": "<pos> screen <opinion> bright ; <neg> keyboard <opinion> stiff",
+                },
+            ]
+            (run_dir / "target_test.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            model_dir = run_dir / "model"
+            model_dir.mkdir()
+            args = Namespace(
+                run_dir=str(run_dir),
+                model_path=str(model_dir),
+                batch_size=2,
+                max_new_tokens=96,
+                num_beams=4,
+                length_penalty=1.0,
+                cuda="0",
+                no_constrained_decoding=True,
+                no_task_prefix=True,
+                output_tag="pairing",
+            )
+            original_generate = t5_aste_pipeline.generate_texts
+            t5_aste_pipeline.generate_texts = lambda **kwargs: [row["label"] for row in rows]
+            try:
+                t5_aste_pipeline.evaluate(args)
+            finally:
+                t5_aste_pipeline.generate_texts = original_generate
+
+            path = run_dir / "aste_metrics_by_structure_pairing.json"
+            self.assertTrue(path.exists())
+            metrics = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(metrics["single_triplet_rows"]["rows"], 1)
+            self.assertEqual(metrics["multi_triplet_rows"]["rows"], 1)
+            self.assertEqual(metrics["single_triplet_rows"]["raw"]["micro_f1"], 1.0)
+            self.assertEqual(metrics["multi_triplet_rows"]["fixed"]["micro_f1"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

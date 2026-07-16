@@ -2616,6 +2616,21 @@ def evaluate(args: argparse.Namespace) -> None:
         sentiment_metrics["raw"][sentiment] = micro_f1(raw_labels, gold_labels)
         sentiment_metrics["fixed"][sentiment] = micro_f1(fixed_labels, gold_labels)
 
+    structure_metrics = {}
+    structure_groups = {
+        "single_triplet_rows": [row for row in result["predictions"] if len(row["gold_triplets"]) == 1],
+        "multi_triplet_rows": [row for row in result["predictions"] if len(row["gold_triplets"]) >= 2],
+    }
+    for group_name, group_rows in structure_groups.items():
+        group_golds = [triplets_to_text(row["gold_triplets"]) for row in group_rows]
+        group_raw = [triplets_to_text(row["raw_triplets"]) for row in group_rows]
+        group_fixed = [triplets_to_text(row["fixed_triplets"]) for row in group_rows]
+        structure_metrics[group_name] = {
+            "rows": len(group_rows),
+            "raw": micro_f1(group_raw, group_golds),
+            "fixed": micro_f1(group_fixed, group_golds),
+        }
+
     negation_pattern = re.compile(r"(?:\bno\b|\bnot\b|\bnever\b|n't\b|\bwithout\b)", re.IGNORECASE)
     neutral_false_positive_triplets = 0
     neutral_negation_false_positive_rows = 0
@@ -2648,6 +2663,7 @@ def evaluate(args: argparse.Namespace) -> None:
     dump_json(tagged_output_path(run_dir, "aste_metrics_raw.json", output_tag), raw_metrics)
     dump_json(tagged_output_path(run_dir, "aste_metrics_fixed.json", output_tag), fixed_metrics)
     dump_json(tagged_output_path(run_dir, "aste_metrics_by_sentiment.json", output_tag), sentiment_metrics)
+    dump_json(tagged_output_path(run_dir, "aste_metrics_by_structure.json", output_tag), structure_metrics)
     dump_json(tagged_output_path(run_dir, "aste_error_analysis.json", output_tag), error_analysis)
     write_jsonl(
         tagged_output_path(run_dir, "aste_predictions.jsonl", output_tag),
@@ -2662,6 +2678,7 @@ def evaluate(args: argparse.Namespace) -> None:
             "raw_scores": raw_metrics,
             "fixed_scores": fixed_metrics,
             "sentiment_scores": sentiment_metrics,
+            "structure_scores": structure_metrics,
             "error_analysis": error_analysis,
         }
     )
