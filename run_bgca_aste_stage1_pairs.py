@@ -49,20 +49,43 @@ def stage_done(
     return marked_done and not rerun and all(path.exists() for path in outputs)
 
 
-def pseudo_provenance_matches(
-    analysis_path: Path,
+def validate_pseudo_provenance(
+    run_dir: Path,
     model_path: Path,
     pseudo_source_tag: str,
-) -> bool:
-    try:
-        analysis = read_json(analysis_path)
-        recorded_model_path = Path(analysis.get("model_path", "")).resolve()
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return (
-        recorded_model_path == model_path.resolve()
-        and analysis.get("pseudo_source_tag") == pseudo_source_tag
+) -> tuple[bool, str]:
+    required_paths = (
+        run_dir / "target_pseudo.jsonl",
+        run_dir / "target_pseudo_high_precision.jsonl",
+        run_dir / "target_pseudo_high_precision_analysis.json",
+        run_dir / "target_pseudo_analysis.json",
+        run_dir / "target_pseudo_generation_state.json",
     )
+    missing = [path.name for path in required_paths if not path.exists()]
+    if missing:
+        return False, f"missing required pseudo artifacts: {', '.join(missing)}"
+
+    try:
+        analysis = read_json(run_dir / "target_pseudo_analysis.json")
+        state = read_json(run_dir / "target_pseudo_generation_state.json")
+        if not isinstance(analysis, dict) or not isinstance(state, dict):
+            return False, "pseudo provenance metadata must contain JSON objects"
+        analysis_model_path = Path(analysis.get("model_path", "")).resolve()
+        state_model_path = Path(state.get("resolved_model_path", "")).resolve()
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False, "pseudo provenance metadata is unreadable"
+
+    if state.get("status") != "complete":
+        return False, f"generation state is {state.get('status')!r}, expected 'complete'"
+    if state_model_path != analysis_model_path:
+        return False, "state and analysis model paths do not match"
+    if state.get("pseudo_source_tag") != analysis.get("pseudo_source_tag"):
+        return False, "state and analysis pseudo source tags do not match"
+    if state_model_path != model_path.resolve():
+        return False, "recorded model path does not match the reused extractor best path"
+    if state.get("pseudo_source_tag") != pseudo_source_tag:
+        return False, "recorded pseudo source tag does not match the current extractor tag"
+    return True, ""
 
 
 def mark_done(status_path: Path, status: dict, stage: str) -> None:
@@ -181,6 +204,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         run_dir / "source_train.jsonl",
         run_dir / "source_dev.jsonl",
         run_dir / "target_unlabeled.jsonl",
+        run_dir / "target_train_gold_analysis.jsonl",
         run_dir / "target_test.jsonl",
         generator_train_file,
         generator_dev_file,
@@ -200,9 +224,34 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         prepare_outputs = [
             extract_train_file,
             run_dir / f"extract_train_multitriplet_weight_analysis_{dynamic_config_tag}.json",
-            run_dir / "target_train_gold_analysis.jsonl",
             *shared_prepare_outputs,
         ]
+
+    extractor_tag = "extractor_ep25_plain_last"
+    if dynamic_multitriplet:
+        extractor_tag += f"_{dynamic_config_tag}"
+    if args.extractor_lambda_sentiment_contrastive > 0:
+        extractor_lambda_tag = str(args.extractor_lambda_sentiment_contrastive).replace(".", "")
+        extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
+        if args.sentiment_prototype_initialize_from_context:
+            extractor_tag += "_encoder_context_init"
+    extractor_dir = (upstream_run_dir or run_dir) / "models" / extractor_tag
+    extractor_stage = f"train_{extractor_tag}"
+    if upstream_run_dir is not None:
+        upstream_valid, upstream_reason = validate_pseudo_provenance(
+            upstream_run_dir,
+            extractor_dir / "best",
+            extractor_tag,
+        )
+        if not (extractor_dir / "best" / "config.json").exists():
+            upstream_valid = False
+            upstream_reason = "upstream extractor best/config.json is missing"
+        if not upstream_valid:
+            message = f"cannot validate upstream pseudo provenance: {upstream_reason}"
+            if args.dry_run:
+                print(message, flush=True)
+            else:
+                raise RuntimeError(message)
 
     py = sys.executable
     common_train = [
@@ -271,16 +320,6 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, prepare_stage)
 
-    extractor_tag = "extractor_ep25_plain_last"
-    if dynamic_multitriplet:
-        extractor_tag += f"_{dynamic_config_tag}"
-    if args.extractor_lambda_sentiment_contrastive > 0:
-        extractor_lambda_tag = str(args.extractor_lambda_sentiment_contrastive).replace(".", "")
-        extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
-        if args.sentiment_prototype_initialize_from_context:
-            extractor_tag += "_encoder_context_init"
-    extractor_dir = (upstream_run_dir or run_dir) / "models" / extractor_tag
-    extractor_stage = f"train_{extractor_tag}"
     if upstream_run_dir is None and not stage_done(
         status,
         extractor_stage,
@@ -339,18 +378,18 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         run_dir / "target_pseudo_high_precision.jsonl",
         run_dir / "target_pseudo_high_precision_analysis.json",
     ]
-    pseudo_analysis_path = run_dir / "target_pseudo_analysis.json"
+    provenance_matches, _provenance_reason = validate_pseudo_provenance(
+        run_dir,
+        extractor_dir / "best",
+        extractor_tag,
+    )
     pseudo_is_reusable = stage_done(
         status,
         pseudo_stage,
         pseudo_outputs,
         args.rerun,
         legacy_stages=() if dynamic_multitriplet else ("pseudo",),
-    ) and pseudo_provenance_matches(
-        pseudo_analysis_path,
-        extractor_dir / "best",
-        extractor_tag,
-    )
+    ) and provenance_matches
     if upstream_run_dir is None and not pseudo_is_reusable:
         run_command(
             [

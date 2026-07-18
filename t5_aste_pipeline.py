@@ -2204,6 +2204,15 @@ def pseudo(args: argparse.Namespace) -> None:
         "model_path": str(model_path.resolve()),
         "pseudo_source_tag": getattr(args, "pseudo_source_tag", ""),
     }
+    generation_state_path = run_dir / "target_pseudo_generation_state.json"
+    dump_json(
+        generation_state_path,
+        {
+            "status": "in_progress",
+            "resolved_model_path": pseudo_provenance["model_path"],
+            "pseudo_source_tag": pseudo_provenance["pseudo_source_tag"],
+        },
+    )
     preds = generate_texts(
         model_path=model_path,
         inputs=build_extract_inputs(target_rows, use_task_prefix=not args.no_task_prefix),
@@ -2275,6 +2284,16 @@ def pseudo(args: argparse.Namespace) -> None:
         print(analysis)
     else:
         dump_json(run_dir / "target_pseudo_analysis.json", pseudo_provenance)
+    dump_json(
+        generation_state_path,
+        {
+            "status": "complete",
+            "resolved_model_path": pseudo_provenance["model_path"],
+            "pseudo_source_tag": pseudo_provenance["pseudo_source_tag"],
+            "pseudo_rows": len(pseudo_rows),
+            "high_precision_rows": len(high_precision_rows),
+        },
+    )
     print(f"pseudo rows={len(pseudo_rows)}")
 
 
