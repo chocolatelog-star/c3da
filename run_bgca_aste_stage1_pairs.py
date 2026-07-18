@@ -156,6 +156,14 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     gen_tag = generator_tag(args.generator_prompt_style)
     generator_train_file = run_dir / f"c3da_generator_train_{gen_tag}.jsonl"
     generator_dev_file = run_dir / f"c3da_generator_dev_{gen_tag}.jsonl"
+    prepare_stage = (
+        f"prepare_dynamic_multitriplet_{gen_tag}"
+        if dynamic_multitriplet
+        else f"prepare_{gen_tag}"
+    )
+    prepare_outputs = [run_dir / "extract_train.jsonl", generator_train_file, generator_dev_file]
+    if dynamic_multitriplet:
+        prepare_outputs.append(run_dir / "extract_train_multitriplet_weight_analysis.json")
 
     py = sys.executable
     common_train = [
@@ -177,8 +185,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
 
     if not stage_done(
         status,
-        f"prepare_{gen_tag}",
-        [run_dir / "extract_train.jsonl", generator_train_file, generator_dev_file],
+        prepare_stage,
+        prepare_outputs,
         args.rerun,
     ):
         run_command(
@@ -222,7 +230,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, f"prepare_{gen_tag}")
+            mark_done(status_path, status, prepare_stage)
 
     extractor_tag = "extractor_ep25_plain_last"
     if dynamic_multitriplet:

@@ -101,6 +101,99 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--source_count4plus_weight 1.3", output)
         self.assertIn("extractor_ep25_plain_last_dynamic_multitriplet", output)
 
+    def test_dynamic_prepare_requires_its_own_stage_and_analysis_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "rest16_to_laptop14"
+            run_dir.mkdir(parents=True)
+            for path in (
+                run_dir / "extract_train.jsonl",
+                run_dir / "c3da_generator_train_label_to_text_gen.jsonl",
+                run_dir / "c3da_generator_dev_label_to_text_gen.jsonl",
+            ):
+                path.write_text("{}\n", encoding="utf-8")
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            argv = [
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--dynamic_multitriplet",
+                "--dry_run",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = stage1.parse_args()
+
+            first_output = io.StringIO()
+            with redirect_stdout(first_output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_dynamic_multitriplet_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            missing_analysis_output = io.StringIO()
+            with redirect_stdout(missing_analysis_output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+            (run_dir / "extract_train_multitriplet_weight_analysis.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            old_stage_output = io.StringIO()
+            with redirect_stdout(old_stage_output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_dynamic_multitriplet_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            complete_output = io.StringIO()
+            with redirect_stdout(complete_output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+        self.assertIn("t5_aste_pipeline.py prepare", first_output.getvalue())
+        self.assertIn("t5_aste_pipeline.py prepare", missing_analysis_output.getvalue())
+        self.assertIn("t5_aste_pipeline.py prepare", old_stage_output.getvalue())
+        self.assertNotIn("t5_aste_pipeline.py prepare", complete_output.getvalue())
+
+    def test_legacy_prepare_still_uses_legacy_stage_and_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "rest16_to_laptop14"
+            run_dir.mkdir(parents=True)
+            for path in (
+                run_dir / "extract_train.jsonl",
+                run_dir / "c3da_generator_train_label_to_text_gen.jsonl",
+                run_dir / "c3da_generator_dev_label_to_text_gen.jsonl",
+            ):
+                path.write_text("{}\n", encoding="utf-8")
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            argv = [
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--dry_run",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = stage1.parse_args()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+        self.assertNotIn("t5_aste_pipeline.py prepare", output.getvalue())
+
     def test_run_pair_accepts_legacy_namespace_without_dynamic_attributes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             argv = [
