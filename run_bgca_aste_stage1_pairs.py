@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from t5_aste_pipeline import dynamic_multitriplet_config_tag, positive_finite_float
+
 
 ASTE_PAIRS = [
     ("rest14", "laptop14"),
@@ -156,14 +158,32 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     gen_tag = generator_tag(args.generator_prompt_style)
     generator_train_file = run_dir / f"c3da_generator_train_{gen_tag}.jsonl"
     generator_dev_file = run_dir / f"c3da_generator_dev_{gen_tag}.jsonl"
-    prepare_stage = (
-        f"prepare_dynamic_multitriplet_{gen_tag}"
-        if dynamic_multitriplet
-        else f"prepare_{gen_tag}"
-    )
-    prepare_outputs = [run_dir / "extract_train.jsonl", generator_train_file, generator_dev_file]
+    prepare_stage = f"prepare_{gen_tag}"
+    extract_train_file = run_dir / "extract_train.jsonl"
+    prepare_outputs = [extract_train_file, generator_train_file, generator_dev_file]
+    dynamic_config_tag = ""
     if dynamic_multitriplet:
-        prepare_outputs.append(run_dir / "extract_train_multitriplet_weight_analysis.json")
+        source_weights = (
+            getattr(args, "source_count1_weight", 1.0),
+            getattr(args, "source_count2_weight", 1.15),
+            getattr(args, "source_count3_weight", 1.25),
+            getattr(args, "source_count4plus_weight", 1.30),
+        )
+        dynamic_config_tag = dynamic_multitriplet_config_tag(*source_weights)
+        prepare_stage = f"prepare_{dynamic_config_tag}_{gen_tag}"
+        extract_train_file = run_dir / f"extract_train_{dynamic_config_tag}.jsonl"
+        prepare_outputs = [
+            extract_train_file,
+            run_dir / f"extract_train_multitriplet_weight_analysis_{dynamic_config_tag}.json",
+            run_dir / "extract_dev.jsonl",
+            run_dir / "source_train.jsonl",
+            run_dir / "source_dev.jsonl",
+            run_dir / "target_unlabeled.jsonl",
+            run_dir / "target_train_gold_analysis.jsonl",
+            run_dir / "target_test.jsonl",
+            generator_train_file,
+            generator_dev_file,
+        ]
 
     py = sys.executable
     common_train = [
@@ -215,13 +235,13 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                     [
                         "--dynamic_multitriplet",
                         "--source_count1_weight",
-                        str(getattr(args, "source_count1_weight", 1.0)),
+                        str(source_weights[0]),
                         "--source_count2_weight",
-                        str(getattr(args, "source_count2_weight", 1.15)),
+                        str(source_weights[1]),
                         "--source_count3_weight",
-                        str(getattr(args, "source_count3_weight", 1.25)),
+                        str(source_weights[2]),
                         "--source_count4plus_weight",
-                        str(getattr(args, "source_count4plus_weight", 1.30)),
+                        str(source_weights[3]),
                     ]
                     if dynamic_multitriplet
                     else []
@@ -234,7 +254,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
 
     extractor_tag = "extractor_ep25_plain_last"
     if dynamic_multitriplet:
-        extractor_tag += "_dynamic_multitriplet"
+        extractor_tag += f"_{dynamic_config_tag}"
     if args.extractor_lambda_sentiment_contrastive > 0:
         extractor_lambda_tag = str(args.extractor_lambda_sentiment_contrastive).replace(".", "")
         extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
@@ -247,7 +267,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         extractor_stage,
         [extractor_dir / "best" / "config.json"],
         args.rerun,
-        legacy_stages=("train_extractor",),
+        legacy_stages=() if dynamic_multitriplet else ("train_extractor",),
     ):
         run_command(
             [
@@ -256,7 +276,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--model_path",
                 args.extractor_model_path,
                 "--train_file",
-                str(run_dir / "extract_train.jsonl"),
+                str(extract_train_file),
                 "--dev_file",
                 str(run_dir / "extract_dev.jsonl"),
                 "--output_dir",
@@ -304,7 +324,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             run_dir / "target_pseudo_high_precision_analysis.json",
         ],
         args.rerun,
-        legacy_stages=("pseudo",),
+        legacy_stages=() if dynamic_multitriplet else ("pseudo",),
     ):
         run_command(
             [
@@ -1013,10 +1033,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
     parser.add_argument("--complete_multi_extra_weight", type=float, default=0.0)
     parser.add_argument("--dynamic_multitriplet", action="store_true")
-    parser.add_argument("--source_count1_weight", type=float, default=1.0)
-    parser.add_argument("--source_count2_weight", type=float, default=1.15)
-    parser.add_argument("--source_count3_weight", type=float, default=1.25)
-    parser.add_argument("--source_count4plus_weight", type=float, default=1.30)
+    parser.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
+    parser.add_argument("--source_count2_weight", type=positive_finite_float, default=1.15)
+    parser.add_argument("--source_count3_weight", type=positive_finite_float, default=1.25)
+    parser.add_argument("--source_count4plus_weight", type=positive_finite_float, default=1.30)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")

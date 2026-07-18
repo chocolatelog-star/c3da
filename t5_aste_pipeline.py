@@ -6,6 +6,7 @@ import math
 import os
 import re
 from collections import Counter
+from decimal import Decimal
 from pathlib import Path
 
 from t5_aste_augment import (
@@ -650,6 +651,69 @@ def augmentation_channel_analysis(rows: list[dict]) -> dict:
     return analysis
 
 
+def positive_finite_float(value: str | float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("weight must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("weight must be finite and greater than 0")
+    return parsed
+
+
+def validate_source_triplet_count_weights(
+    count1_weight: float,
+    count2_weight: float,
+    count3_weight: float,
+    count4plus_weight: float,
+) -> tuple[float, float, float, float]:
+    values = (
+        ("count1_weight", count1_weight),
+        ("count2_weight", count2_weight),
+        ("count3_weight", count3_weight),
+        ("count4plus_weight", count4plus_weight),
+    )
+    validated = []
+    for name, value in values:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a number") from exc
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise ValueError(f"{name} must be finite and greater than 0")
+        validated.append(parsed)
+    return tuple(validated)
+
+
+def _dynamic_weight_tag_value(weight: float) -> str:
+    decimal_weight = Decimal(str(weight)).normalize()
+    scaled = decimal_weight * Decimal(100)
+    if scaled == scaled.to_integral_value():
+        return str(int(scaled))
+    return f"d{format(decimal_weight, 'f').replace('.', 'p')}"
+
+
+def dynamic_multitriplet_config_tag(
+    count1_weight: float,
+    count2_weight: float,
+    count3_weight: float,
+    count4plus_weight: float,
+) -> str:
+    weights = validate_source_triplet_count_weights(
+        count1_weight,
+        count2_weight,
+        count3_weight,
+        count4plus_weight,
+    )
+    return (
+        "dynamic_multitriplet"
+        f"_c1w{_dynamic_weight_tag_value(weights[0])}"
+        f"_c2w{_dynamic_weight_tag_value(weights[1])}"
+        f"_c3w{_dynamic_weight_tag_value(weights[2])}"
+        f"_c4pw{_dynamic_weight_tag_value(weights[3])}"
+    )
+
+
 def assign_source_triplet_count_weights(
     rows: list[dict],
     count1_weight: float = 1.0,
@@ -657,6 +721,14 @@ def assign_source_triplet_count_weights(
     count3_weight: float = 1.25,
     count4plus_weight: float = 1.30,
 ) -> tuple[list[dict], dict]:
+    count1_weight, count2_weight, count3_weight, count4plus_weight = (
+        validate_source_triplet_count_weights(
+            count1_weight,
+            count2_weight,
+            count3_weight,
+            count4plus_weight,
+        )
+    )
     bucket_weights = {
         "count1": count1_weight,
         "count2": count2_weight,
@@ -665,6 +737,7 @@ def assign_source_triplet_count_weights(
     }
     grouped_weights = {bucket: [] for bucket in bucket_weights}
     weighted_rows = []
+    source_weighted_rows = []
     for row in rows:
         weighted_row = dict(row)
         is_source_gold = row.get("augmentation") == "source_gold" or "augmentation" not in row
@@ -681,6 +754,7 @@ def assign_source_triplet_count_weights(
                 }
             )
             grouped_weights[bucket].append(selected_weight)
+            source_weighted_rows.append(weighted_row)
         weighted_rows.append(weighted_row)
 
     stats = {}
@@ -691,7 +765,7 @@ def assign_source_triplet_count_weights(
             "weight_min": min(weights) if weights else None,
             "weight_max": max(weights) if weights else None,
         }
-    stats["sample_weight_summary"] = sample_weight_summary(weighted_rows)
+    stats["sample_weight_summary"] = sample_weight_summary(source_weighted_rows)
     return weighted_rows, stats
 
 
@@ -2025,19 +2099,33 @@ def prepare(args: argparse.Namespace) -> None:
     write_jsonl(run_dir / "target_test.jsonl", target_test_rows)
     use_task_prefix = not args.no_task_prefix
     extract_train_rows = to_extract_rows(source_rows, use_task_prefix=use_task_prefix)
-    if getattr(args, "dynamic_multitriplet", False):
+    dynamic_multitriplet = getattr(args, "dynamic_multitriplet", False)
+    extract_train_path = run_dir / "extract_train.jsonl"
+    if dynamic_multitriplet:
+        source_weights = (
+            getattr(args, "source_count1_weight", 1.0),
+            getattr(args, "source_count2_weight", 1.15),
+            getattr(args, "source_count3_weight", 1.25),
+            getattr(args, "source_count4plus_weight", 1.30),
+        )
+        config_tag = dynamic_multitriplet_config_tag(*source_weights)
         extract_train_rows, multitriplet_weight_stats = assign_source_triplet_count_weights(
             extract_train_rows,
-            count1_weight=getattr(args, "source_count1_weight", 1.0),
-            count2_weight=getattr(args, "source_count2_weight", 1.15),
-            count3_weight=getattr(args, "source_count3_weight", 1.25),
-            count4plus_weight=getattr(args, "source_count4plus_weight", 1.30),
+            count1_weight=source_weights[0],
+            count2_weight=source_weights[1],
+            count3_weight=source_weights[2],
+            count4plus_weight=source_weights[3],
         )
+        extract_train_path = tagged_output_path(run_dir, "extract_train.jsonl", config_tag)
         dump_json(
-            run_dir / "extract_train_multitriplet_weight_analysis.json",
+            tagged_output_path(
+                run_dir,
+                "extract_train_multitriplet_weight_analysis.json",
+                config_tag,
+            ),
             multitriplet_weight_stats,
         )
-    write_jsonl(run_dir / "extract_train.jsonl", extract_train_rows)
+    write_jsonl(extract_train_path, extract_train_rows)
     write_jsonl(run_dir / "extract_dev.jsonl", to_extract_rows(source_dev_rows, use_task_prefix=use_task_prefix))
     generator_train_rows = build_generator_training_rows(
         source_rows,
@@ -2958,10 +3046,10 @@ def main() -> None:
     p.add_argument("--generator_output_tag", default="")
     p.add_argument("--no_task_prefix", action="store_true")
     p.add_argument("--dynamic_multitriplet", action="store_true")
-    p.add_argument("--source_count1_weight", type=float, default=1.0)
-    p.add_argument("--source_count2_weight", type=float, default=1.15)
-    p.add_argument("--source_count3_weight", type=float, default=1.25)
-    p.add_argument("--source_count4plus_weight", type=float, default=1.30)
+    p.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
+    p.add_argument("--source_count2_weight", type=positive_finite_float, default=1.15)
+    p.add_argument("--source_count3_weight", type=positive_finite_float, default=1.25)
+    p.add_argument("--source_count4plus_weight", type=positive_finite_float, default=1.30)
     p.set_defaults(func=prepare)
 
     p = sub.add_parser("pseudo")

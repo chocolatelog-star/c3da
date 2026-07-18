@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -37,6 +39,12 @@ class DynamicMultiTripletTest(unittest.TestCase):
                 "augmentation": "target_pseudo",
                 "sample_weight": 0.65,
             },
+            {
+                "id": "a3",
+                "label": three_label,
+                "augmentation": "masked_aspect_channel",
+                "sample_weight": 0.2,
+            },
         ]
 
         weighted, stats = pipeline.assign_source_triplet_count_weights(rows)
@@ -44,7 +52,9 @@ class DynamicMultiTripletTest(unittest.TestCase):
         self.assertEqual(weighted[0]["sample_weight"], 1.0)
         self.assertEqual(weighted[1]["sample_weight"], 1.25)
         self.assertEqual(weighted[2]["sample_weight"], 0.65)
+        self.assertEqual(weighted[3]["sample_weight"], 0.2)
         self.assertNotIn("source_triplet_count", weighted[2])
+        self.assertNotIn("source_triplet_count", weighted[3])
         self.assertEqual([row["label"] for row in weighted], [row["label"] for row in rows])
         self.assertEqual(stats["count1"], {
             "rows": 1,
@@ -61,7 +71,66 @@ class DynamicMultiTripletTest(unittest.TestCase):
                 "weight_min": None,
                 "weight_max": None,
             })
-        self.assertEqual(stats["sample_weight_summary"]["count"], 3)
+        self.assertEqual(stats["sample_weight_summary"]["count"], 2)
+        self.assertEqual(
+            sum(stats[bucket]["rows"] for bucket in ("count1", "count2", "count3", "count4plus")),
+            stats["sample_weight_summary"]["count"],
+        )
+
+    def test_source_triplet_count_weights_reject_non_positive_or_non_finite_weights(self):
+        rows = [{"id": "s1", "label": _label(("food", "great", "pos"))}]
+        defaults = {
+            "count1_weight": 1.0,
+            "count2_weight": 1.15,
+            "count3_weight": 1.25,
+            "count4plus_weight": 1.30,
+        }
+        for name in defaults:
+            for invalid in (float("nan"), float("inf"), 0.0, -0.1):
+                with self.subTest(name=name, invalid=invalid):
+                    weights = {**defaults, name: invalid}
+                    with self.assertRaises(ValueError):
+                        pipeline.assign_source_triplet_count_weights(rows, **weights)
+
+    def test_dynamic_multitriplet_config_tag_is_deterministic_and_decimal_safe(self):
+        self.assertEqual(
+            pipeline.dynamic_multitriplet_config_tag(1.0, 1.15, 1.25, 1.30),
+            "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130",
+        )
+        self.assertNotEqual(
+            pipeline.dynamic_multitriplet_config_tag(1.0, 1.15, 1.251, 1.30),
+            pipeline.dynamic_multitriplet_config_tag(1.0, 1.15, 1.252, 1.30),
+        )
+
+    def test_pipeline_prepare_cli_rejects_invalid_source_weights(self):
+        script = Path(__file__).resolve().parent / "t5_aste_pipeline.py"
+        invalid_cases = (
+            ("--source_count1_weight", "nan"),
+            ("--source_count2_weight", "inf"),
+            ("--source_count3_weight", "0"),
+            ("--source_count4plus_weight", "-1"),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for option, value in invalid_cases:
+                with self.subTest(option=option, value=value):
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(script),
+                            "prepare",
+                            "--source_dataset",
+                            "rest16",
+                            "--target_dataset",
+                            "laptop14",
+                            "--run_dir",
+                            temp_dir,
+                            option,
+                            value,
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
 
     @staticmethod
     def _prepare_args(run_dir: Path, **overrides) -> Namespace:
@@ -122,8 +191,12 @@ class DynamicMultiTripletTest(unittest.TestCase):
             with patch.object(pipeline, "load_split", side_effect=lambda dataset, split: splits[(dataset, split)]):
                 pipeline.prepare(args)
 
-            extract_rows = [json.loads(line) for line in (run_dir / "extract_train.jsonl").read_text(encoding="utf-8").splitlines()]
-            analysis = json.loads((run_dir / "extract_train_multitriplet_weight_analysis.json").read_text(encoding="utf-8"))
+            config_tag = pipeline.dynamic_multitriplet_config_tag(1.0, 1.15, 1.25, 1.30)
+            extract_path = run_dir / f"extract_train_{config_tag}.jsonl"
+            analysis_path = run_dir / f"extract_train_multitriplet_weight_analysis_{config_tag}.json"
+            extract_rows = [json.loads(line) for line in extract_path.read_text(encoding="utf-8").splitlines()]
+            analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+            legacy_extract_exists = (run_dir / "extract_train.jsonl").exists()
 
         self.assertEqual([row["sample_weight"] for row in extract_rows], [1.0, 1.25])
         self.assertEqual(extract_rows[1]["source_triplet_count"], 3)
@@ -133,6 +206,63 @@ class DynamicMultiTripletTest(unittest.TestCase):
         )
         self.assertEqual(extract_rows[1]["target"], expected_extract_rows[1]["target"])
         self.assertEqual(analysis["count3"]["rows"], 1)
+        self.assertFalse(legacy_extract_exists)
+
+    def test_prepare_keeps_legacy_and_dynamic_files_isolated_in_both_orders(self):
+        splits = self._split_rows()
+        config_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
+        dynamic_name = f"extract_train_{config_tag}.jsonl"
+
+        def run_prepare(run_dir: Path, dynamic: bool) -> None:
+            args = self._prepare_args(
+                run_dir,
+                dynamic_multitriplet=dynamic,
+                source_count1_weight=1.0,
+                source_count2_weight=1.15,
+                source_count3_weight=1.25,
+                source_count4plus_weight=1.30,
+            )
+            pipeline.prepare(args)
+
+        with patch.object(pipeline, "load_split", side_effect=lambda dataset, split: splits[(dataset, split)]):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                for index, sequence in enumerate(((True, False, True), (False, True, False))):
+                    with self.subTest(sequence=sequence):
+                        run_dir = Path(temp_dir) / str(index)
+                        snapshots = {}
+                        for dynamic in sequence:
+                            run_prepare(run_dir, dynamic)
+                            current_name = dynamic_name if dynamic else "extract_train.jsonl"
+                            current_path = run_dir / current_name
+                            self.assertTrue(current_path.exists())
+                            for name, content in snapshots.items():
+                                self.assertEqual((run_dir / name).read_bytes(), content)
+                            snapshots[current_name] = current_path.read_bytes()
+
+    def test_prepare_keeps_different_dynamic_weight_configs_isolated(self):
+        splits = self._split_rows()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "configs"
+            with patch.object(pipeline, "load_split", side_effect=lambda dataset, split: splits[(dataset, split)]):
+                for count3_weight in (1.25, 1.251):
+                    pipeline.prepare(
+                        self._prepare_args(
+                            run_dir,
+                            dynamic_multitriplet=True,
+                            source_count1_weight=1.0,
+                            source_count2_weight=1.15,
+                            source_count3_weight=count3_weight,
+                            source_count4plus_weight=1.30,
+                        )
+                    )
+
+            first_tag = pipeline.dynamic_multitriplet_config_tag(1.0, 1.15, 1.25, 1.30)
+            second_tag = pipeline.dynamic_multitriplet_config_tag(1.0, 1.15, 1.251, 1.30)
+            first_rows = [json.loads(line) for line in (run_dir / f"extract_train_{first_tag}.jsonl").read_text(encoding="utf-8").splitlines()]
+            second_rows = [json.loads(line) for line in (run_dir / f"extract_train_{second_tag}.jsonl").read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(first_rows[1]["sample_weight"], 1.25)
+        self.assertEqual(second_rows[1]["sample_weight"], 1.251)
 
     def test_prepare_legacy_namespace_keeps_extract_train_compatible(self):
         splits = self._split_rows()

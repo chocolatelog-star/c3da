@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -99,14 +100,55 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--source_count2_weight 1.15", output)
         self.assertIn("--source_count3_weight 1.25", output)
         self.assertIn("--source_count4plus_weight 1.3", output)
-        self.assertIn("extractor_ep25_plain_last_dynamic_multitriplet", output)
+        config_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
+        self.assertIn(f"extract_train_{config_tag}.jsonl", output)
+        self.assertIn(f"extractor_ep25_plain_last_{config_tag}", output)
+
+    def test_runner_cli_rejects_invalid_source_weights(self) -> None:
+        invalid_cases = (
+            ("--source_count1_weight", "nan"),
+            ("--source_count2_weight", "inf"),
+            ("--source_count3_weight", "0"),
+            ("--source_count4plus_weight", "-1"),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for option, value in invalid_cases:
+                with self.subTest(option=option, value=value):
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(SCRIPT),
+                            "--output_root",
+                            temp_dir,
+                            "--pairs",
+                            "rest16:laptop14",
+                            "--dynamic_multitriplet",
+                            option,
+                            value,
+                            "--dry_run",
+                        ],
+                        cwd=PROJECT_ROOT,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_dynamic_prepare_requires_its_own_stage_and_analysis_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "rest16_to_laptop14"
             run_dir.mkdir(parents=True)
+            config_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
+            dynamic_stage = f"prepare_{config_tag}_label_to_text_gen"
+            dynamic_extract = run_dir / f"extract_train_{config_tag}.jsonl"
+            dynamic_analysis = run_dir / f"extract_train_multitriplet_weight_analysis_{config_tag}.json"
             for path in (
                 run_dir / "extract_train.jsonl",
+                run_dir / "extract_dev.jsonl",
+                run_dir / "source_train.jsonl",
+                run_dir / "source_dev.jsonl",
+                run_dir / "target_unlabeled.jsonl",
+                run_dir / "target_train_gold_analysis.jsonl",
+                run_dir / "target_test.jsonl",
                 run_dir / "c3da_generator_train_label_to_text_gen.jsonl",
                 run_dir / "c3da_generator_dev_label_to_text_gen.jsonl",
             ):
@@ -131,18 +173,16 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
             with redirect_stdout(first_output):
                 stage1.run_pair(args, "rest16", "laptop14")
 
+            dynamic_extract.write_text("{}\n", encoding="utf-8")
             (run_dir / "stage_status.json").write_text(
-                '{"prepare_dynamic_multitriplet_label_to_text_gen": true}',
+                json.dumps({dynamic_stage: True}),
                 encoding="utf-8",
             )
             missing_analysis_output = io.StringIO()
             with redirect_stdout(missing_analysis_output):
                 stage1.run_pair(args, "rest16", "laptop14")
 
-            (run_dir / "extract_train_multitriplet_weight_analysis.json").write_text(
-                "{}\n",
-                encoding="utf-8",
-            )
+            dynamic_analysis.write_text("{}\n", encoding="utf-8")
             (run_dir / "stage_status.json").write_text(
                 '{"prepare_label_to_text_gen": true}',
                 encoding="utf-8",
@@ -152,7 +192,7 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
                 stage1.run_pair(args, "rest16", "laptop14")
 
             (run_dir / "stage_status.json").write_text(
-                '{"prepare_dynamic_multitriplet_label_to_text_gen": true}',
+                json.dumps({dynamic_stage: True}),
                 encoding="utf-8",
             )
             complete_output = io.StringIO()
@@ -163,6 +203,98 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("t5_aste_pipeline.py prepare", missing_analysis_output.getvalue())
         self.assertIn("t5_aste_pipeline.py prepare", old_stage_output.getvalue())
         self.assertNotIn("t5_aste_pipeline.py prepare", complete_output.getvalue())
+
+    def test_different_dynamic_weight_config_does_not_reuse_stage_or_model(self) -> None:
+        first_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
+        second_tag = "dynamic_multitriplet_c1w100_c2w115_c3wd1p251_c4pw130"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "rest16_to_laptop14"
+            first_model = run_dir / "models" / f"extractor_ep25_plain_last_{first_tag}" / "best" / "config.json"
+            first_model.parent.mkdir(parents=True)
+            first_model.write_text("{}\n", encoding="utf-8")
+            (run_dir / "stage_status.json").write_text(
+                json.dumps(
+                    {
+                        f"prepare_{first_tag}_label_to_text_gen": True,
+                        f"train_extractor_ep25_plain_last_{first_tag}": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            argv = [
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--dynamic_multitriplet",
+                "--source_count3_weight",
+                "1.251",
+                "--dry_run",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = stage1.parse_args()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+        text_output = output.getvalue()
+        self.assertIn("t5_aste_pipeline.py prepare", text_output)
+        self.assertIn(f"extract_train_{second_tag}.jsonl", text_output)
+        self.assertIn(f"extractor_ep25_plain_last_{second_tag}", text_output)
+
+    def test_dynamic_pseudo_does_not_accept_legacy_pseudo_stage(self) -> None:
+        config_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "rest16_to_laptop14"
+            extractor_tag = f"extractor_ep25_plain_last_{config_tag}"
+            extractor_config = run_dir / "models" / extractor_tag / "best" / "config.json"
+            extractor_config.parent.mkdir(parents=True)
+            required_prepare_outputs = (
+                run_dir / f"extract_train_{config_tag}.jsonl",
+                run_dir / f"extract_train_multitriplet_weight_analysis_{config_tag}.json",
+                run_dir / "extract_dev.jsonl",
+                run_dir / "source_train.jsonl",
+                run_dir / "source_dev.jsonl",
+                run_dir / "target_unlabeled.jsonl",
+                run_dir / "target_train_gold_analysis.jsonl",
+                run_dir / "target_test.jsonl",
+                run_dir / "c3da_generator_train_label_to_text_gen.jsonl",
+                run_dir / "c3da_generator_dev_label_to_text_gen.jsonl",
+                extractor_config,
+                run_dir / "target_pseudo.jsonl",
+                run_dir / "target_pseudo_high_precision.jsonl",
+                run_dir / "target_pseudo_high_precision_analysis.json",
+            )
+            for path in required_prepare_outputs:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+            (run_dir / "stage_status.json").write_text(
+                json.dumps(
+                    {
+                        f"prepare_{config_tag}_label_to_text_gen": True,
+                        f"train_{extractor_tag}": True,
+                        "pseudo": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            argv = [
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--dynamic_multitriplet",
+                "--dry_run",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = stage1.parse_args()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+        self.assertIn("t5_aste_pipeline.py pseudo", output.getvalue())
 
     def test_legacy_prepare_still_uses_legacy_stage_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
