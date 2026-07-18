@@ -51,16 +51,59 @@ TAG_INIT_WORDS = {
 SENTIMENT_LABEL_IDS = {"pos": 0, "neg": 1, "neu": 2}
 
 
+def decode_keep_aste_task_tokens(tokenizer, token_ids) -> str:
+    text = tokenizer.decode(token_ids, skip_special_tokens=False)
+    for token in (
+        tokenizer.pad_token,
+        tokenizer.eos_token,
+        tokenizer.unk_token,
+        "<s>",
+    ):
+        if token:
+            text = text.replace(token, " ")
+    return " ".join(text.split())
+
+
+def _metric_input_to_numpy(value, name: str) -> np.ndarray:
+    if isinstance(value, tuple):
+        if not value:
+            raise ValueError(f"{name} tuple must not be empty")
+        value = value[0]
+    if torch.is_tensor(value):
+        value = value.detach().cpu().numpy()
+    try:
+        return np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be convertible to a numpy array") from exc
+
+
 def build_aste_compute_metrics(tokenizer):
+    if tokenizer.pad_token_id is None:
+        raise ValueError("tokenizer.pad_token_id must be defined for ASTE metrics")
+
     def compute_metrics(eval_prediction):
-        predictions = eval_prediction.predictions
-        if isinstance(predictions, tuple):
-            predictions = predictions[0]
-        labels = np.asarray(eval_prediction.label_ids).copy()
+        predictions = _metric_input_to_numpy(eval_prediction.predictions, "predictions")
+        labels = _metric_input_to_numpy(eval_prediction.label_ids, "labels")
+        if predictions.ndim == 3:
+            if predictions.shape[-1] == 0:
+                raise ValueError("predictions logits dimension must not be empty")
+            predictions = predictions.argmax(axis=-1)
+        if predictions.ndim != 2:
+            raise ValueError(
+                f"predictions dimension must be 2 for token ids or 3 for logits; got {predictions.ndim}"
+            )
+        if labels.ndim != 2:
+            raise ValueError(f"labels dimension must be 2; got {labels.ndim}")
+        if predictions.shape[0] != labels.shape[0]:
+            raise ValueError(
+                "predictions and labels batch lengths must match; "
+                f"got {predictions.shape[0]} and {labels.shape[0]}"
+            )
+        labels = labels.copy()
         labels[labels == -100] = tokenizer.pad_token_id
 
-        prediction_texts = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-        gold_texts = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        prediction_texts = [decode_keep_aste_task_tokens(tokenizer, row) for row in predictions]
+        gold_texts = [decode_keep_aste_task_tokens(tokenizer, row) for row in labels]
         overall = micro_f1(prediction_texts, gold_texts)
         grouped = micro_f1_by_triplet_count(prediction_texts, gold_texts)
         diagnostics = triplet_count_diagnostics(prediction_texts, gold_texts)

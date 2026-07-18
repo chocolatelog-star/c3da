@@ -47,7 +47,7 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
 
     @staticmethod
     def _dynamic_ready_run(run_dir: Path, config_tag: str) -> tuple[str, Path]:
-        extractor_tag = f"extractor_ep25_plain_last_{config_tag}"
+        extractor_tag = f"extractor_ep25_aste_f1_{config_tag}"
         extractor_best = run_dir / "models" / extractor_tag / "best"
         required_outputs = (
             run_dir / f"extract_train_{config_tag}.jsonl",
@@ -210,9 +210,10 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--source_count4plus_weight 1.3", output)
         config_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
         self.assertIn(f"extract_train_{config_tag}.jsonl", output)
-        self.assertIn(f"extractor_ep25_plain_last_{config_tag}", output)
+        self.assertIn(f"extractor_ep25_aste_f1_{config_tag}", output)
+        self.assertNotIn(f"extractor_ep25_plain_last_{config_tag}", output)
         training_commands = [line for line in output.splitlines() if "t5_absa_train.py" in line]
-        extractor_command = next(line for line in training_commands if f"extractor_ep25_plain_last_{config_tag}" in line)
+        extractor_command = next(line for line in training_commands if f"extractor_ep25_aste_f1_{config_tag}" in line)
         generator_command = next(line for line in training_commands if "generator_label_to_text_gen_ep8" in line)
         final_command = next(line for line in training_commands if "final_dann" in line)
         self.assertIn("--checkpoint_selection aste_f1", extractor_command)
@@ -324,14 +325,14 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         second_tag = "dynamic_multitriplet_c1w100_c2w115_c3wd1p251_c4pw130"
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "rest16_to_laptop14"
-            first_model = run_dir / "models" / f"extractor_ep25_plain_last_{first_tag}" / "best" / "config.json"
+            first_model = run_dir / "models" / f"extractor_ep25_aste_f1_{first_tag}" / "best" / "config.json"
             first_model.parent.mkdir(parents=True)
             first_model.write_text("{}\n", encoding="utf-8")
             (run_dir / "stage_status.json").write_text(
                 json.dumps(
                     {
                         f"prepare_{first_tag}_label_to_text_gen": True,
-                        f"train_extractor_ep25_plain_last_{first_tag}": True,
+                        f"train_extractor_ep25_aste_f1_{first_tag}": True,
                     }
                 ),
                 encoding="utf-8",
@@ -356,13 +357,13 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         text_output = output.getvalue()
         self.assertIn("t5_aste_pipeline.py prepare", text_output)
         self.assertIn(f"extract_train_{second_tag}.jsonl", text_output)
-        self.assertIn(f"extractor_ep25_plain_last_{second_tag}", text_output)
+        self.assertIn(f"extractor_ep25_aste_f1_{second_tag}", text_output)
 
     def test_dynamic_pseudo_does_not_accept_legacy_pseudo_stage(self) -> None:
         config_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "rest16_to_laptop14"
-            extractor_tag = f"extractor_ep25_plain_last_{config_tag}"
+            extractor_tag = f"extractor_ep25_aste_f1_{config_tag}"
             extractor_config = run_dir / "models" / extractor_tag / "best" / "config.json"
             extractor_config.parent.mkdir(parents=True)
             required_prepare_outputs = (
@@ -460,7 +461,7 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "rest16_to_laptop14"
             extractor_a, _extractor_a_best = self._dynamic_ready_run(run_dir, config_a)
-            extractor_b = f"extractor_ep25_plain_last_{config_b}"
+            extractor_b = f"extractor_ep25_aste_f1_{config_b}"
             extractor_b_best = run_dir / "models" / extractor_b / "best"
             status = {
                 f"prepare_{config_a}_label_to_text_gen": True,
@@ -490,7 +491,7 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "rest16_to_laptop14"
             extractor_a, extractor_a_best = self._dynamic_ready_run(run_dir, config_a)
-            extractor_b = f"extractor_ep25_plain_last_{config_b}"
+            extractor_b = f"extractor_ep25_aste_f1_{config_b}"
             extractor_b_best = run_dir / "models" / extractor_b / "best"
             (run_dir / "stage_status.json").write_text(
                 json.dumps(

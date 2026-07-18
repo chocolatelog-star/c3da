@@ -227,7 +227,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             *shared_prepare_outputs,
         ]
 
-    extractor_tag = "extractor_ep25_plain_last"
+    extractor_tag = (
+        "extractor_ep25_aste_f1"
+        if dynamic_multitriplet
+        else "extractor_ep25_plain_last"
+    )
     if dynamic_multitriplet:
         extractor_tag += f"_{dynamic_config_tag}"
     if args.extractor_lambda_sentiment_contrastive > 0:

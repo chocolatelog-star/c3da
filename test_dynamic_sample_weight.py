@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from transformers import EvalPrediction
+from transformers import AutoTokenizer, EvalPrediction
 
 import t5_absa_train as train
 
@@ -38,15 +38,26 @@ class TinyTokenizer:
 
 class FakeMetricTokenizer:
     pad_token_id = 0
+    pad_token = "<pad>"
+    eos_token = "</s>"
+    unk_token = "<unk>"
+    task_tokens = ("<pos>", "<neg>", "<neu>", "<opinion>")
 
     def __init__(self, decoded: dict[int, str]):
         self.decoded = decoded
         self.decode_calls = []
 
+    def decode(self, token_ids, skip_special_tokens=True):
+        row = np.asarray(token_ids).tolist()
+        self.decode_calls.append((row, skip_special_tokens))
+        text = self.decoded.get(next((token for token in row if token), 0), "")
+        if skip_special_tokens:
+            for token in self.task_tokens:
+                text = text.replace(token, " ")
+        return f"{self.pad_token} {text} {self.eos_token}"
+
     def batch_decode(self, token_ids, skip_special_tokens=True):
-        rows = np.asarray(token_ids).tolist()
-        self.decode_calls.append((rows, skip_special_tokens))
-        return [self.decoded.get(next((token for token in row if token), 0), "") for row in rows]
+        return [self.decode(row, skip_special_tokens=skip_special_tokens) for row in token_ids]
 
 
 def test_aste_compute_metrics_reports_structure_groups():
@@ -92,8 +103,8 @@ def test_aste_compute_metrics_handles_empty_tuple_and_ignore_tokens():
     )
 
     assert metrics["micro_f1"] == 1.0
-    assert tokenizer.decode_calls[1][0] == [[1, tokenizer.pad_token_id]]
-    assert all(call[1] is True for call in tokenizer.decode_calls)
+    assert tokenizer.decode_calls[1][0] == [1, tokenizer.pad_token_id]
+    assert all(call[1] is False for call in tokenizer.decode_calls)
 
     empty_metrics = compute_metrics(
         EvalPrediction(
@@ -104,6 +115,61 @@ def test_aste_compute_metrics_handles_empty_tuple_and_ignore_tokens():
     assert empty_metrics["micro_f1"] == 0.0
     assert empty_metrics["multi_micro_f1"] == 0.0
     assert empty_metrics["exact_count_accuracy"] == 0.0
+
+
+def test_aste_compute_metrics_preserves_tokens_with_local_t5_tokenizer():
+    tokenizer = AutoTokenizer.from_pretrained(
+        r"J:\nlp\models\t5-base-py",
+        local_files_only=True,
+    )
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["<pos>", "<neg>", "<neu>", "<opinion>"]}
+    )
+    label = "<pos> battery life <opinion> long"
+    token_ids = np.asarray([tokenizer.encode(label, add_special_tokens=True)])
+
+    metrics = train.build_aste_compute_metrics(tokenizer)(
+        EvalPrediction(predictions=token_ids, label_ids=token_ids.copy())
+    )
+
+    assert metrics["micro_f1"] == 1.0
+    assert metrics["selection_score"] > 0.0
+
+
+def test_aste_compute_metrics_handles_torch_logits_and_validates_inputs():
+    label = "<pos> battery <opinion> long"
+    tokenizer = FakeMetricTokenizer({1: label})
+    logits = torch.tensor(
+        [[[0.0, 5.0, 1.0], [5.0, 0.0, 1.0]]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([[1, -100]])
+    metrics = train.build_aste_compute_metrics(tokenizer)(
+        EvalPrediction(predictions=(logits,), label_ids=(labels,))
+    )
+    assert metrics["micro_f1"] == 1.0
+
+    no_pad = FakeMetricTokenizer({1: label})
+    no_pad.pad_token_id = None
+    try:
+        train.build_aste_compute_metrics(no_pad)
+    except ValueError as exc:
+        assert "pad_token_id" in str(exc)
+    else:
+        raise AssertionError("missing pad_token_id must be rejected")
+
+    compute_metrics = train.build_aste_compute_metrics(tokenizer)
+    invalid_cases = (
+        EvalPrediction(predictions=np.array([1, 0]), label_ids=np.array([[1, 0]])),
+        EvalPrediction(predictions=np.array([[1, 0], [1, 0]]), label_ids=np.array([[1, 0]])),
+    )
+    for prediction in invalid_cases:
+        try:
+            compute_metrics(prediction)
+        except ValueError as exc:
+            assert "dimension" in str(exc) or "batch" in str(exc)
+        else:
+            raise AssertionError("invalid metric inputs must be rejected")
 
 
 def test_checkpoint_selection_config_supports_aste_f1_without_loading_t5():
