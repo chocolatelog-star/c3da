@@ -7,7 +7,7 @@
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `62113b4 Add complete multi-triplet and strict ablations` |
+| 当前代码版本 | `4258bc6 Fix complete multi-triplet metric isolation` |
 | 当前分支 | `feature/complete-multitriplet-ablation` |
 | 主实验目录 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14` |
 | 当前六组实验状态 | 已完成 |
@@ -17,11 +17,11 @@
 | 主对比指标 | `raw F1`（原始 F1） |
 | 辅助分析指标 | `fixed F1`（修正 F1） |
 
-## 0.1 当前阶段：完整双三元组补充与严格模块消融已就绪
+## 0.1 当前阶段：完整双三元组补充取得新最佳
 
-当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。编码器三元组覆盖分类头实验 raw F1=44.37、fixed F1=46.72；训练日志显示分类头从第 1 轮起几乎全部预测为单三元组，2 个和 3 个以上类别准确率长期为 0，因此该方向失败，模型已删除并保留指标。当前改为直接补充完整双三元组训练目标，同时补齐最佳数据上的严格模块消融。
+严格模块消融和完整双三元组补充均已完成。消融证明增强是主要独立正贡献，DANN 单独有害但与增强形成明显正协同，情感对比在旧 hp1 数据上只提高 0.19 个 raw F1。随后在原 421 条 hp1 伪标签上增加 73 条完整双三元组、排除 31 条裁剪样本：关闭情感对比时 raw F1=48.01；重新加入最终阶段源域平衡情感对比后 raw F1=48.93、fixed F1=50.21，成为当前新最佳。多三元组 raw F1 同时从旧最佳 42.65 提高到 46.13。
 
-| 近期改进方法 | raw F1 | 相对当前最佳 | 阶段结论 |
+| 近期改进方法 | raw F1 | 相对上一最佳 46.82 | 阶段结论 |
 |---|---:|---:|---|
 | 文本式领域前缀 | 46.63 | -0.19 | 比无前缀六组同方向基线 46.14 有改善，保留为主流程输入形式 |
 | 括号式领域前缀 | 45.26 | -1.56 | 不如自然语言式领域前缀 |
@@ -35,19 +35,23 @@
 | 三任务混合生成器 | 44.07 | -2.75 | 1:1:1 混合削弱多三元组和负向结构，不进入主流程 |
 | 编码器方面词-观点词配对 | 46.49 | -0.34 | 精确率提高、召回率下降；机制有效但不作为最佳模型 |
 | 编码器三元组覆盖分类头 | 44.37 | -2.45 | 分类头坍缩为单三元组，未传递到自回归生成；模型已删除 |
-| hp1 + 完整双三元组补充 | 待训练 | - | 数据构建完成：421+73=494 条，排除 31 条裁剪样本，伪标签隐藏金标 F1=51.08 |
+| hp1 + 完整双三元组，不加情感对比 | 48.01 | +1.19 | 多三元组召回 35.57%、F1 44.80，直接补充完整结构有效 |
+| hp1 + 完整双三元组 + 情感对比 | **48.93** | **+2.11** | 当前新最佳；多三元组召回 35.85%、F1 46.13 |
 
 | 实验项 | 配置或结论 |
 |---|---|
-| 当前最佳候选 | raw P=54.84、raw R=40.85、raw F1=46.82、fixed F1=48.94 |
-| 当前最佳模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5\best` |
+| 当前最佳候选 | raw P=58.31、raw R=42.14、raw F1=48.93、fixed F1=50.21 |
+| 当前最佳模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_sentiment_contrastive_l001_source_balanced_ep5\best` |
 | 新主实验训练集 | `final_train_strict_aug150_w020_label_to_text_gen_complete_multi2_w025.jsonl`，1499 行 |
 | 新主实验伪标签 | `pseudo_variants\hp1_complete2_dist5_w025\target_pseudo_high_precision.jsonl`，494 行 |
 | 新主实验数据诊断 | 基础 hp1 421 行；完整双三元组新增 73 行；裁剪样本排除 31 行；隐藏金标 raw F1 50.35→51.08 |
 | 新主实验唯一变量 | 复用原 150 条严格增强，只增加 73 条完整双三元组伪标签，新增样本权重 0.25 |
+| 完整双三元组 D 骨架结果 | raw P=55.45、raw R=42.33、raw F1=48.01、fixed F1=50.37；多三元组 raw R=35.57、F1=44.80 |
+| 完整双三元组 + 情感对比结果 | raw P=58.31、raw R=42.14、raw F1=48.93、fixed F1=50.21；多三元组 raw R=35.85、F1=46.13 |
+| 相对旧最佳 | raw F1 +2.11；TP 221→228，FP 182→163，FN 320→313；首次得到 1 个中性正确三元组 |
 | 严格消融矩阵 | A：源域+伪标签；B：A+增强；C：A+DANN；D：A+增强+DANN；E：D+最终阶段情感对比（当前最佳） |
 | 严格消融输出 | `results_strict_module_ablation.csv` 和 `results_strict_module_ablation_CN.md`，四组完成后自动整体生成 |
-| 新代码版本 | `722e460`（中文设计和计划）、`62113b4`（完整双三元组与严格消融实现） |
+| 新代码版本 | `722e460`（中文设计和计划）、`62113b4`（完整双三元组与严格消融实现）、`4258bc6`（旧指标复用与汇总隔离修复） |
 | 第五项唯一变量 | 最终 5 轮增加编码器多正例双向方面词-观点词配对损失，系数 0.01、温度 0.1，只使用源域人工标注 |
 | 复用训练文件 | `final_train_strict_aug150_w020_label_to_text_gen.jsonl` 和 `final_dev_strict_aug150_w020_label_to_text_gen.jsonl` |
 | 配对覆盖率 | 352/352 个源域多三元组训练行成功定位，覆盖率 100%；共 877 个有效配对 |
