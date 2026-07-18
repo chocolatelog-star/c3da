@@ -23,6 +23,51 @@ def _label(*triplets):
 
 
 class DynamicMultiTripletTest(unittest.TestCase):
+    def test_pseudo_analysis_records_resolved_model_path_and_source_tag(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            model_path = run_dir / "models" / "extractor_a" / "best"
+            model_path.mkdir(parents=True)
+            target_row = {"id": "t1", "text": "Bright screen."}
+            pipeline.write_jsonl(run_dir / "target_unlabeled.jsonl", [target_row])
+            pipeline.write_jsonl(
+                run_dir / "target_train_gold_analysis.jsonl",
+                [{**target_row, "label": _label(("screen", "bright", "pos"))}],
+            )
+            args = Namespace(
+                run_dir=str(run_dir),
+                model_path=str(model_path / ".." / "best"),
+                pseudo_model_variant="last",
+                max_target_unlabeled=0,
+                no_task_prefix=True,
+                batch_size=1,
+                max_new_tokens=32,
+                num_beams=1,
+                cuda="0",
+                no_constrained_decoding=True,
+                length_penalty=1.0,
+                pseudo_base_weight=0.5,
+                high_precision_max_triplets=1,
+                high_precision_max_token_distance=5,
+                fixed_changed_min_score=0.65,
+                fixed_changed_weight=0.35,
+                pseudo_source_tag="extractor_a",
+            )
+
+            with patch.object(
+                pipeline,
+                "generate_texts",
+                return_value=[_label(("screen", "bright", "pos"))],
+            ):
+                pipeline.pseudo(args)
+
+            analysis = json.loads(
+                (run_dir / "target_pseudo_analysis.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(analysis["model_path"], str(model_path.resolve()))
+        self.assertEqual(analysis["pseudo_source_tag"], "extractor_a")
+
     def test_source_triplet_count_weights_only_change_source_gold_rows(self):
         one_label = _label(("food", "great", "pos"))
         three_label = _label(

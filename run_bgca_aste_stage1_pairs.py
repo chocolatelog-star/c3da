@@ -49,6 +49,22 @@ def stage_done(
     return marked_done and not rerun and all(path.exists() for path in outputs)
 
 
+def pseudo_provenance_matches(
+    analysis_path: Path,
+    model_path: Path,
+    pseudo_source_tag: str,
+) -> bool:
+    try:
+        analysis = read_json(analysis_path)
+        recorded_model_path = Path(analysis.get("model_path", "")).resolve()
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        recorded_model_path == model_path.resolve()
+        and analysis.get("pseudo_source_tag") == pseudo_source_tag
+    )
+
+
 def mark_done(status_path: Path, status: dict, stage: str) -> None:
     status[stage] = True
     write_json(status_path, status)
@@ -160,7 +176,16 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     generator_dev_file = run_dir / f"c3da_generator_dev_{gen_tag}.jsonl"
     prepare_stage = f"prepare_{gen_tag}"
     extract_train_file = run_dir / "extract_train.jsonl"
-    prepare_outputs = [extract_train_file, generator_train_file, generator_dev_file]
+    shared_prepare_outputs = [
+        run_dir / "extract_dev.jsonl",
+        run_dir / "source_train.jsonl",
+        run_dir / "source_dev.jsonl",
+        run_dir / "target_unlabeled.jsonl",
+        run_dir / "target_test.jsonl",
+        generator_train_file,
+        generator_dev_file,
+    ]
+    prepare_outputs = [extract_train_file, *shared_prepare_outputs]
     dynamic_config_tag = ""
     if dynamic_multitriplet:
         source_weights = (
@@ -175,14 +200,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         prepare_outputs = [
             extract_train_file,
             run_dir / f"extract_train_multitriplet_weight_analysis_{dynamic_config_tag}.json",
-            run_dir / "extract_dev.jsonl",
-            run_dir / "source_train.jsonl",
-            run_dir / "source_dev.jsonl",
-            run_dir / "target_unlabeled.jsonl",
             run_dir / "target_train_gold_analysis.jsonl",
-            run_dir / "target_test.jsonl",
-            generator_train_file,
-            generator_dev_file,
+            *shared_prepare_outputs,
         ]
 
     py = sys.executable
@@ -315,17 +334,24 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, extractor_stage)
 
     pseudo_stage = f"pseudo_{extractor_tag}"
-    if upstream_run_dir is None and not stage_done(
+    pseudo_outputs = [
+        run_dir / "target_pseudo.jsonl",
+        run_dir / "target_pseudo_high_precision.jsonl",
+        run_dir / "target_pseudo_high_precision_analysis.json",
+    ]
+    pseudo_analysis_path = run_dir / "target_pseudo_analysis.json"
+    pseudo_is_reusable = stage_done(
         status,
         pseudo_stage,
-        [
-            run_dir / "target_pseudo.jsonl",
-            run_dir / "target_pseudo_high_precision.jsonl",
-            run_dir / "target_pseudo_high_precision_analysis.json",
-        ],
+        pseudo_outputs,
         args.rerun,
         legacy_stages=() if dynamic_multitriplet else ("pseudo",),
-    ):
+    ) and pseudo_provenance_matches(
+        pseudo_analysis_path,
+        extractor_dir / "best",
+        extractor_tag,
+    )
+    if upstream_run_dir is None and not pseudo_is_reusable:
         run_command(
             [
                 py,
@@ -347,6 +373,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--no_task_prefix",
                 "--pseudo_model_variant",
                 "last",
+                "--pseudo_source_tag",
+                extractor_tag,
                 "--high_precision_max_triplets",
                 "1",
                 "--high_precision_max_token_distance",

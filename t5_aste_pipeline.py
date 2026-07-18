@@ -2200,6 +2200,10 @@ def pseudo(args: argparse.Namespace) -> None:
         explicit_model_path=args.model_path,
         variant=args.pseudo_model_variant,
     )
+    pseudo_provenance = {
+        "model_path": str(model_path.resolve()),
+        "pseudo_source_tag": getattr(args, "pseudo_source_tag", ""),
+    }
     preds = generate_texts(
         model_path=model_path,
         inputs=build_extract_inputs(target_rows, use_task_prefix=not args.no_task_prefix),
@@ -2246,6 +2250,7 @@ def pseudo(args: argparse.Namespace) -> None:
     if gold_path.exists():
         gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
         analysis, analysis_rows = build_pseudo_analysis(target_rows, pseudo_rows, gold_rows)
+        analysis.update(pseudo_provenance)
         analysis["sample_weight_summary"] = sample_weight_summary(pseudo_rows)
         selected_stats["hidden_gold_eval"] = evaluate_selected_pseudo_against_hidden_gold(
             selected_rows,
@@ -2268,6 +2273,8 @@ def pseudo(args: argparse.Namespace) -> None:
         dump_json(run_dir / "target_pseudo_train_selected_analysis.json", train_selected_stats)
         write_jsonl(run_dir / "target_pseudo_predictions_analysis.jsonl", analysis_rows)
         print(analysis)
+    else:
+        dump_json(run_dir / "target_pseudo_analysis.json", pseudo_provenance)
     print(f"pseudo rows={len(pseudo_rows)}")
 
 
@@ -3064,6 +3071,7 @@ def main() -> None:
     p.add_argument("--no_constrained_decoding", action="store_true")
     p.add_argument("--pseudo_base_weight", type=float, default=0.5)
     p.add_argument("--pseudo_model_variant", choices=["best", "last"], default="best")
+    p.add_argument("--pseudo_source_tag", default="")
     p.add_argument("--high_precision_max_triplets", type=int, default=1)
     p.add_argument("--high_precision_max_token_distance", type=int, default=5)
     p.add_argument("--fixed_changed_min_score", type=float, default=0.65)
