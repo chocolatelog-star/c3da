@@ -358,7 +358,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--neutral_loss_gain",
                 "0",
                 "--checkpoint_selection",
-                "last",
+                "aste_f1" if dynamic_multitriplet else "last",
                 "--resume_from_checkpoint",
                 "auto",
                 "--lambda_sentiment_contrastive",

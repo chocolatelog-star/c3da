@@ -1,4 +1,8 @@
+import numpy as np
 import torch
+from transformers import EvalPrediction
+
+import t5_absa_train as train
 
 from t5_absa_train import (
     DataCollatorForSeq2SeqWithPairing,
@@ -30,6 +34,96 @@ class TinyTokenizer:
 
     def encode(self, text, add_special_tokens=False):
         return [ord(ch) % 97 + 1 for ch in str(text)]
+
+
+class FakeMetricTokenizer:
+    pad_token_id = 0
+
+    def __init__(self, decoded: dict[int, str]):
+        self.decoded = decoded
+        self.decode_calls = []
+
+    def batch_decode(self, token_ids, skip_special_tokens=True):
+        rows = np.asarray(token_ids).tolist()
+        self.decode_calls.append((rows, skip_special_tokens))
+        return [self.decoded.get(next((token for token in row if token), 0), "") for row in rows]
+
+
+def test_aste_compute_metrics_reports_structure_groups():
+    single = "<pos> battery <opinion> long"
+    triple = (
+        "<pos> screen <opinion> bright ; "
+        "<neg> keyboard <opinion> stiff ; "
+        "<neu> price <opinion> average"
+    )
+    missing_one = "<pos> screen <opinion> bright ; <neg> keyboard <opinion> stiff"
+    tokenizer = FakeMetricTokenizer({1: single, 2: missing_one, 3: triple})
+    compute_metrics = train.build_aste_compute_metrics(tokenizer)
+
+    metrics = compute_metrics(
+        EvalPrediction(
+            predictions=np.array([[1, 0], [2, 0]]),
+            label_ids=np.array([[1, -100], [3, -100]]),
+        )
+    )
+
+    assert abs(metrics["micro_f1"] - (6 / 7)) < 1e-12
+    assert metrics["precision"] == 1.0
+    assert metrics["recall"] == 0.75
+    assert metrics["multi_micro_f1"] == 0.8
+    assert metrics["count1_micro_f1"] == 1.0
+    assert metrics["count3_micro_f1"] == 0.8
+    assert metrics["exact_count_accuracy"] == 0.5
+    assert metrics["under_generated_rows"] == 1
+    assert metrics["over_generated_rows"] == 0
+    assert abs(metrics["selection_score"] - ((6 / 7) + 0.001 * 0.8)) < 1e-12
+
+
+def test_aste_compute_metrics_handles_empty_tuple_and_ignore_tokens():
+    label = "<pos> battery <opinion> long"
+    tokenizer = FakeMetricTokenizer({1: label})
+    compute_metrics = train.build_aste_compute_metrics(tokenizer)
+
+    metrics = compute_metrics(
+        EvalPrediction(
+            predictions=(np.array([[1, 0]]), np.array([[99]])),
+            label_ids=np.array([[1, -100]]),
+        )
+    )
+
+    assert metrics["micro_f1"] == 1.0
+    assert tokenizer.decode_calls[1][0] == [[1, tokenizer.pad_token_id]]
+    assert all(call[1] is True for call in tokenizer.decode_calls)
+
+    empty_metrics = compute_metrics(
+        EvalPrediction(
+            predictions=(np.empty((0, 2), dtype=int),),
+            label_ids=np.empty((0, 2), dtype=int),
+        )
+    )
+    assert empty_metrics["micro_f1"] == 0.0
+    assert empty_metrics["multi_micro_f1"] == 0.0
+    assert empty_metrics["exact_count_accuracy"] == 0.0
+
+
+def test_checkpoint_selection_config_supports_aste_f1_without_loading_t5():
+    last = train.build_checkpoint_selection_config("last")
+    best = train.build_checkpoint_selection_config("best")
+    aste_f1 = train.build_checkpoint_selection_config("aste_f1")
+
+    assert last["load_best_model_at_end"] is False
+    assert last["metric_for_best_model"] == "eval_loss"
+    assert best["load_best_model_at_end"] is True
+    assert best["metric_for_best_model"] == "eval_loss"
+    assert best["greater_is_better"] is False
+    assert aste_f1 == {
+        "predict_with_generate": True,
+        "generation_num_beams": 1,
+        "generation_max_length": 128,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_selection_score",
+        "greater_is_better": True,
+    }
 
 
 def test_pseudo_quality_sets_bounded_dynamic_weight():

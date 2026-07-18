@@ -184,6 +184,11 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertNotIn("--dynamic_multitriplet", output)
         self.assertNotIn("--source_count1_weight", output)
         self.assertNotIn("dynamic_multitriplet", output)
+        extractor_command = next(
+            line for line in output.splitlines()
+            if "t5_absa_train.py" in line and "extractor_ep25_plain_last" in line
+        )
+        self.assertIn("--checkpoint_selection last", extractor_command)
 
     def test_dynamic_multitriplet_prepare_and_extractor_are_isolated(self) -> None:
         output = self.run_dry(
@@ -206,6 +211,13 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         config_tag = "dynamic_multitriplet_c1w100_c2w115_c3w125_c4pw130"
         self.assertIn(f"extract_train_{config_tag}.jsonl", output)
         self.assertIn(f"extractor_ep25_plain_last_{config_tag}", output)
+        training_commands = [line for line in output.splitlines() if "t5_absa_train.py" in line]
+        extractor_command = next(line for line in training_commands if f"extractor_ep25_plain_last_{config_tag}" in line)
+        generator_command = next(line for line in training_commands if "generator_label_to_text_gen_ep8" in line)
+        final_command = next(line for line in training_commands if "final_dann" in line)
+        self.assertIn("--checkpoint_selection aste_f1", extractor_command)
+        self.assertIn("--checkpoint_selection best", generator_command)
+        self.assertIn("--checkpoint_selection best", final_command)
 
     def test_runner_cli_rejects_invalid_source_weights(self) -> None:
         invalid_cases = (

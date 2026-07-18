@@ -8,6 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,7 +23,12 @@ from transformers import (
 )
 
 from t5_absa_data import read_jsonl
-from t5_aste_data import parse_triplet_text_list
+from t5_aste_data import (
+    micro_f1,
+    micro_f1_by_triplet_count,
+    parse_triplet_text_list,
+    triplet_count_diagnostics,
+)
 
 
 TASK_SPECIAL_TOKENS = ["<pos>", "<neg>", "<neu>", "<opinion>", "<aspect>"]
@@ -43,6 +49,65 @@ TAG_INIT_WORDS = {
     "<aspect>": "aspect",
 }
 SENTIMENT_LABEL_IDS = {"pos": 0, "neg": 1, "neu": 2}
+
+
+def build_aste_compute_metrics(tokenizer):
+    def compute_metrics(eval_prediction):
+        predictions = eval_prediction.predictions
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+        labels = np.asarray(eval_prediction.label_ids).copy()
+        labels[labels == -100] = tokenizer.pad_token_id
+
+        prediction_texts = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        gold_texts = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        overall = micro_f1(prediction_texts, gold_texts)
+        grouped = micro_f1_by_triplet_count(prediction_texts, gold_texts)
+        diagnostics = triplet_count_diagnostics(prediction_texts, gold_texts)
+
+        multi_predictions = []
+        multi_golds = []
+        for prediction, gold in zip(prediction_texts, gold_texts):
+            if len(parse_triplet_text_list(gold)) >= 2:
+                multi_predictions.append(prediction)
+                multi_golds.append(gold)
+        multi = micro_f1(multi_predictions, multi_golds)
+
+        metrics = {
+            "micro_f1": overall["micro_f1"],
+            "precision": overall["precision"],
+            "recall": overall["recall"],
+            "multi_micro_f1": multi["micro_f1"],
+            "exact_count_accuracy": diagnostics["exact_count_accuracy"],
+            "under_generated_rows": diagnostics["under_generated_rows"],
+            "over_generated_rows": diagnostics["over_generated_rows"],
+        }
+        for bucket in ("count1", "count2", "count3", "count4plus"):
+            metrics[f"{bucket}_micro_f1"] = grouped[bucket]["micro_f1"]
+        metrics["selection_score"] = metrics["micro_f1"] + 0.001 * metrics["multi_micro_f1"]
+        return metrics
+
+    return compute_metrics
+
+
+def build_checkpoint_selection_config(checkpoint_selection: str) -> dict:
+    if checkpoint_selection not in {"last", "best", "aste_f1"}:
+        raise ValueError(f"unsupported checkpoint selection: {checkpoint_selection}")
+    if checkpoint_selection == "aste_f1":
+        return {
+            "predict_with_generate": True,
+            "generation_num_beams": 1,
+            "generation_max_length": 128,
+            "load_best_model_at_end": True,
+            "metric_for_best_model": "eval_selection_score",
+            "greater_is_better": True,
+        }
+    return {
+        "predict_with_generate": True,
+        "load_best_model_at_end": checkpoint_selection == "best",
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+    }
 
 
 class JsonlSeq2SeqDataset(Dataset):
@@ -1062,9 +1127,12 @@ def main() -> None:
     parser.add_argument("--neutral_generation_max_effective_weight", type=float, default=0.0)
     parser.add_argument(
         "--checkpoint_selection",
-        choices=["last", "best"],
+        choices=["last", "best", "aste_f1"],
         default="last",
-        help="last saves the model after the final training step; best saves the checkpoint with the lowest dev eval_loss.",
+        help=(
+            "last saves the final training step; best selects the lowest dev eval_loss; "
+            "aste_f1 selects the highest dev ASTE micro-F1 with multi-triplet F1 as a near-tie breaker."
+        ),
     )
     args = parser.parse_args()
 
@@ -1201,6 +1269,7 @@ def main() -> None:
         pairing_source_only=args.pairing_source_only,
     )
 
+    checkpoint_selection_config = build_checkpoint_selection_config(args.checkpoint_selection)
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
         overwrite_output_dir=True,
@@ -1212,14 +1281,11 @@ def main() -> None:
         logging_steps=args.logging_steps,
         evaluation_strategy="epoch",
         save_strategy="epoch",
-        load_best_model_at_end=args.checkpoint_selection == "best",
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
         save_total_limit=args.save_total_limit,
-        predict_with_generate=True,
         fp16=bool(args.fp16 and torch.cuda.is_available()),
         report_to=[],
         seed=args.seed,
+        **checkpoint_selection_config,
     )
     collator = DataCollatorForSeq2SeqWithPairing(DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model))
     trainer = WeightedSeq2SeqTrainer(
@@ -1238,6 +1304,11 @@ def main() -> None:
         lambda_sentiment_contrastive=args.lambda_sentiment_contrastive,
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
         sentiment_contrastive_class_weights=sentiment_class_weights,
+        compute_metrics=(
+            build_aste_compute_metrics(tokenizer)
+            if args.checkpoint_selection == "aste_f1"
+            else None
+        ),
     )
     if resume_from_checkpoint:
         print(f"resuming from latest checkpoint in {output_dir}")
