@@ -190,7 +190,9 @@ def triplet_count_bucket(count: int) -> str:
     return "count4plus"
 
 
-def micro_f1_by_triplet_count(predictions: list[str], golds: list[str]) -> dict[str, dict]:
+def micro_f1_by_triplet_count(
+    predictions: list[str], golds: list[str]
+) -> dict[str, dict[str, int | float]]:
     grouped: dict[str, tuple[list[str], list[str]]] = {
         bucket: ([], [])
         for bucket in ("count1", "count2", "count3", "count4plus")
