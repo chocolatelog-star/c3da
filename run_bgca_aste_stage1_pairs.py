@@ -88,6 +88,12 @@ def neutral_weight_tag(neutral_loss_gain: float, neutral_max_effective_weight: f
     return f"neutral_gain{gain_tag}_max{max_tag}"
 
 
+def complete_multi_weight_tag(extra_weight: float) -> str:
+    if extra_weight <= 0 or extra_weight > 1:
+        raise ValueError("complete_multi_extra_weight must be in (0, 1]")
+    return f"complete_multi2_w{int(round(extra_weight * 100)):03d}"
+
+
 def legacy_hp1_stage_names(generator_output_tag: str) -> dict[str, tuple[str, ...]]:
     return {
         "augment": (f"augment_{generator_output_tag}",),
@@ -331,6 +337,44 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             if not args.dry_run:
                 mark_done(status_path, status, pseudo_filter_stage)
 
+    complete_multi_tag = ""
+    if args.complete_multi_extra_weight > 0:
+        if not use_legacy_pseudo_filter:
+            raise ValueError("complete multi-triplet supplementation requires the hp1_dist5 base filter")
+        complete_multi_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
+        pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / f"hp1_{complete_multi_tag.replace('complete_multi2', 'complete2_dist5')}"
+        pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+        pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+        complete_stage = f"select_pseudo_{extractor_tag}_{complete_multi_tag}"
+        if upstream_run_dir is None and not stage_done(
+            status,
+            complete_stage,
+            [pseudo_train_file, pseudo_analysis_file],
+            args.rerun,
+        ):
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "select_complete_multi_pseudo",
+                    "--run_dir",
+                    str(run_dir),
+                    "--output_dir",
+                    str(pseudo_variant_dir),
+                    "--base_pseudo_file",
+                    str(run_dir / "target_pseudo_high_precision.jsonl"),
+                    "--min_pseudo_weight",
+                    "0.65",
+                    "--high_precision_max_token_distance",
+                    "5",
+                    "--complete_multi_extra_weight",
+                    str(args.complete_multi_extra_weight),
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, complete_stage)
+
     if upstream_run_dir is not None and not args.dry_run:
         required_upstream_paths = [
             extractor_dir / "best" / "config.json",
@@ -377,6 +421,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, f"train_generator_{gen_tag}")
 
     pseudo_suffix = "" if use_legacy_pseudo_filter else f"_{pseudo_tag}"
+    if complete_multi_tag:
+        pseudo_suffix = f"_{complete_multi_tag}"
     final_tag = augment_experiment_tag(
         f"strict_aug150_w020_{gen_tag}{pseudo_suffix}",
         args.opinion_replacement_mode,
@@ -393,7 +439,41 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     )
     legacy_stage_names = legacy_hp1_stage_names(gen_tag) if use_legacy_pseudo_filter else {}
     augment_legacy_stages = legacy_stage_names.get("augment", ())
-    if not reuse_for_auxiliary_loss and not stage_done(
+    if complete_multi_tag:
+        base_augment_tag = augment_experiment_tag(
+            f"strict_aug150_w020_{gen_tag}",
+            args.opinion_replacement_mode,
+            args.sentiment_vector_backend,
+            args.sentiment_vector_use_polarity_axis,
+        )
+        selected_augment_file = run_dir / f"c3da_two_channel_augmented_selected_{base_augment_tag}.jsonl"
+        build_final_stage = f"build_final_{final_tag}"
+        if not stage_done(
+            status,
+            build_final_stage,
+            [final_train_file, final_dev_file],
+            args.rerun,
+        ):
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "build_final_train_from_files",
+                    "--run_dir",
+                    str(run_dir),
+                    "--pseudo_train_file",
+                    str(pseudo_train_file),
+                    "--selected_augment_file",
+                    str(selected_augment_file),
+                    "--final_train_output_tag",
+                    final_tag,
+                    "--no_task_prefix",
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, build_final_stage)
+    elif not reuse_for_auxiliary_loss and not stage_done(
         status,
         f"augment_{final_tag}",
         [final_train_file],
@@ -880,6 +960,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neutral_generation_max_effective_weight", type=float, default=0.0)
     parser.add_argument("--high_precision_max_triplets", type=int, default=1)
     parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
+    parser.add_argument("--complete_multi_extra_weight", type=float, default=0.0)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")
@@ -924,6 +1005,9 @@ def main() -> None:
         if args.pairing_source_only:
             pairing_tag += "_source_only"
         summary_tag = f"{summary_tag}_{pairing_tag}".strip("_")
+    if args.complete_multi_extra_weight > 0:
+        complete_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
+        summary_tag = f"{summary_tag}_{complete_tag}".strip("_")
     for source, target in pairs:
         rows.append(run_pair(args, source, target))
         if not args.dry_run:

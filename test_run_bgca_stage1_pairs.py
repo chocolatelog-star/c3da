@@ -212,6 +212,72 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--pairing_source_only", output)
         self.assertIn("pairing_encoder_l001_source_only", output)
 
+    def test_complete_multi_ablation_reuses_upstream_and_only_rebuilds_final_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "rest16_to_laptop14"
+            extractor_dir = run_dir / "models" / "extractor_ep25_plain_last" / "best"
+            generator_dir = run_dir / "models" / "generator_label_to_text_gen_ep8" / "best"
+            for path in (
+                run_dir / "extract_train.jsonl",
+                run_dir / "c3da_generator_train_label_to_text_gen.jsonl",
+                run_dir / "c3da_generator_dev_label_to_text_gen.jsonl",
+                run_dir / "target_pseudo.jsonl",
+                run_dir / "target_pseudo_high_precision.jsonl",
+                run_dir / "target_pseudo_high_precision_analysis.json",
+                run_dir / "source_train.jsonl",
+                run_dir / "source_dev.jsonl",
+                run_dir / "c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl",
+                extractor_dir / "config.json",
+                generator_dir / "config.json",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_label_to_text_gen": true, "train_extractor_ep25_plain_last": true, '
+                '"pseudo_extractor_ep25_plain_last": true, "train_generator_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--generator_prompt_style",
+                "label_to_text",
+                "--augment_prompt_style",
+                "masked_mutual",
+                "--domain_prefix_style",
+                "text",
+                "--lambda_sentiment_contrastive",
+                "0.01",
+                "--sentiment_contrastive_source_only",
+                "--sentiment_contrastive_class_balanced",
+                "--complete_multi_extra_weight",
+                "0.25",
+                "--dry_run",
+            ]
+
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        output = result.stdout
+        command_lines = [line for line in output.splitlines() if line.startswith(sys.executable)]
+        self.assertEqual(len(command_lines), 4)
+        self.assertIn("select_complete_multi_pseudo", output)
+        self.assertIn("hp1_complete2_dist5_w025", output)
+        self.assertIn("build_final_train_from_files", output)
+        self.assertIn("c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl", output)
+        self.assertNotIn("t5_aste_pipeline.py augment", output)
+        self.assertIn("complete_multi2_w025", output)
+        self.assertIn("--resume_from_checkpoint auto", output)
+
 
 if __name__ == "__main__":
     unittest.main()

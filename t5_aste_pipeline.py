@@ -861,6 +861,71 @@ def select_high_precision_pseudo_rows(
     return selected, stats
 
 
+def _pseudo_row_identity(row: dict) -> tuple[str, str]:
+    row_id = str(row.get("id", "")).strip()
+    if row_id:
+        return "id", row_id
+    return "text", " ".join(str(row.get("text", "")).lower().split())
+
+
+def build_complete_multitriplet_pseudo_rows(
+    base_rows: list[dict],
+    candidate_rows: list[dict],
+    extra_weight: float = 0.25,
+) -> tuple[list[dict], dict]:
+    if not math.isfinite(extra_weight) or extra_weight <= 0:
+        raise ValueError("extra_weight must be a positive finite number")
+
+    merged_rows = [dict(row) for row in base_rows]
+    seen = {_pseudo_row_identity(row) for row in base_rows}
+    complete_candidates = 0
+    cropped_rejected = 0
+    changed_rejected = 0
+    duplicate_rejected = 0
+
+    for row in candidate_rows:
+        before = int(row.get("high_precision_triplet_count_before", 0) or 0)
+        after = int(row.get("high_precision_triplet_count_after", 0) or 0)
+        if before != 2 or after != 2:
+            if before == 2:
+                cropped_rejected += 1
+            continue
+        complete_candidates += 1
+        label = canonicalize_triplet_text(row.get("label", ""))
+        original_label = canonicalize_triplet_text(row.get("high_precision_original_label", label))
+        if label != original_label:
+            changed_rejected += 1
+            continue
+        identity = _pseudo_row_identity(row)
+        if identity in seen:
+            duplicate_rejected += 1
+            continue
+        seen.add(identity)
+        merged_rows.append(
+            {
+                **row,
+                "label": label,
+                "sample_weight": extra_weight,
+                "pseudo_mix_source": "complete_multi2_extra",
+            }
+        )
+
+    analysis = {
+        "base_rows": len(base_rows),
+        "candidate_rows": len(candidate_rows),
+        "complete_multi2_candidates": complete_candidates,
+        "cropped_multi2_rejected": cropped_rejected,
+        "changed_multi2_rejected": changed_rejected,
+        "duplicate_rows_rejected": duplicate_rejected,
+        "extra_rows": len(merged_rows) - len(base_rows),
+        "final_rows": len(merged_rows),
+        "extra_weight": extra_weight,
+        "sample_weight_summary": sample_weight_summary(merged_rows),
+        "sentiment_distribution": sentiment_distribution(merged_rows),
+    }
+    return merged_rows, analysis
+
+
 def pseudo_confidence_score(row: dict) -> float:
     label = canonicalize_triplet_text(row.get("label", ""))
     triplets = parse_triplet_text_list(label)
@@ -2116,6 +2181,125 @@ def select_pseudo(args: argparse.Namespace) -> None:
     )
 
 
+def select_complete_multi_pseudo(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir)
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir
+        else run_dir / "pseudo_variants" / "hp1_complete2_dist5_w025"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_path = (
+        Path(args.base_pseudo_file)
+        if args.base_pseudo_file
+        else run_dir / "target_pseudo_high_precision.jsonl"
+    )
+    base_rows = read_jsonl(base_path)
+    raw_rows = read_jsonl(run_dir / "target_pseudo.jsonl")
+    hp2_rows, hp2_stats = select_high_precision_pseudo_rows(
+        raw_rows,
+        min_weight=args.min_pseudo_weight,
+        max_triplets=2,
+        max_token_distance=args.high_precision_max_token_distance,
+    )
+    merged_rows, analysis = build_complete_multitriplet_pseudo_rows(
+        base_rows,
+        hp2_rows,
+        extra_weight=args.complete_multi_extra_weight,
+    )
+    analysis.update(
+        {
+            "base_pseudo_file": str(base_path),
+            "source_pseudo_file": str(run_dir / "target_pseudo.jsonl"),
+            "max_token_distance": args.high_precision_max_token_distance,
+            "hp2_filter_stats": hp2_stats,
+        }
+    )
+    gold_path = run_dir / "target_train_gold_analysis.jsonl"
+    if gold_path.exists():
+        gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
+        analysis["hidden_gold_eval"] = evaluate_selected_pseudo_against_hidden_gold(
+            merged_rows,
+            gold_rows,
+            name="hp1_complete_multi2",
+        )
+    write_jsonl(output_dir / "target_pseudo_high_precision.jsonl", merged_rows)
+    dump_json(output_dir / "target_pseudo_high_precision_analysis.json", analysis)
+    print(
+        {
+            "output_dir": str(output_dir),
+            "base_rows": analysis["base_rows"],
+            "extra_rows": analysis["extra_rows"],
+            "final_rows": analysis["final_rows"],
+            "hidden_gold_eval": analysis.get("hidden_gold_eval", {}),
+        }
+    )
+
+
+def build_final_train_from_files(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir)
+    source_rows = read_jsonl(run_dir / "source_train.jsonl")
+    source_dev_rows = read_jsonl(run_dir / "source_dev.jsonl")
+    pseudo_path = Path(args.pseudo_train_file)
+    pseudo_rows = read_jsonl(pseudo_path)
+    augment_path = Path(args.selected_augment_file) if args.selected_augment_file else None
+    augmented_rows = read_jsonl(augment_path) if augment_path is not None else []
+    include_source = not args.no_final_train_source
+    final_rows = build_final_training_rows(
+        source_rows,
+        pseudo_rows,
+        augmented_rows,
+        include_source=include_source,
+    )
+    final_rows, weight_stats = assign_final_training_weights(
+        final_rows,
+        multi_triplet_gain=args.final_multi_triplet_gain,
+        neutral_gain=args.final_neutral_gain,
+        max_weight=args.final_max_weight,
+    )
+    output_tag = args.final_train_output_tag
+    pseudo_eval = {"enabled": False}
+    gold_path = run_dir / "target_train_gold_analysis.jsonl"
+    if gold_path.exists():
+        gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
+        pseudo_eval = {
+            "enabled": True,
+            **evaluate_selected_pseudo_against_hidden_gold(
+                pseudo_rows,
+                gold_rows,
+                name=output_tag or "file_pseudo",
+            ),
+        }
+        dump_json(
+            tagged_output_path(run_dir, "target_pseudo_used_for_training_analysis.json", output_tag),
+            pseudo_eval,
+        )
+    manifest = {
+        "builder": "build_final_train_from_files",
+        "pseudo_train_file": str(pseudo_path),
+        "selected_augment_file": str(augment_path) if augment_path is not None else "",
+        "source_rows_available": len(source_rows),
+        "source_rows_used": len(source_rows) if include_source else 0,
+        "final_train_include_source": include_source,
+        "pseudo_rows_used": len(pseudo_rows),
+        "selected_augmented_rows": len(augmented_rows),
+        "final_train_rows": len(final_rows),
+        "pseudo_train_hidden_gold_eval": pseudo_eval,
+        "final_weight_stats": weight_stats,
+    }
+    dump_json(tagged_output_path(run_dir, "final_train_weight_analysis.json", output_tag), weight_stats)
+    dump_json(tagged_output_path(run_dir, "final_train_composition_analysis.json", output_tag), manifest)
+    write_jsonl(
+        tagged_output_path(run_dir, "final_train.jsonl", output_tag),
+        to_extract_rows(final_rows, use_task_prefix=not args.no_task_prefix),
+    )
+    write_jsonl(
+        tagged_output_path(run_dir, "final_dev.jsonl", output_tag),
+        to_extract_rows(source_dev_rows, use_task_prefix=not args.no_task_prefix),
+    )
+    print(manifest)
+
+
 def memory(args: argparse.Namespace) -> None:
     run_dir = Path(args.run_dir)
     source_rows = read_jsonl(run_dir / "source_train.jsonl")
@@ -2852,6 +3036,27 @@ def main() -> None:
     p.add_argument("--fixed_changed_min_score", type=float, default=0.65)
     p.add_argument("--fixed_changed_weight", type=float, default=0.35)
     p.set_defaults(func=select_pseudo)
+
+    p = sub.add_parser("select_complete_multi_pseudo")
+    p.add_argument("--run_dir", required=True)
+    p.add_argument("--output_dir", default="")
+    p.add_argument("--base_pseudo_file", default="")
+    p.add_argument("--min_pseudo_weight", type=float, default=0.65)
+    p.add_argument("--high_precision_max_token_distance", type=int, default=5)
+    p.add_argument("--complete_multi_extra_weight", type=float, default=0.25)
+    p.set_defaults(func=select_complete_multi_pseudo)
+
+    p = sub.add_parser("build_final_train_from_files")
+    p.add_argument("--run_dir", required=True)
+    p.add_argument("--pseudo_train_file", required=True)
+    p.add_argument("--selected_augment_file", default="")
+    p.add_argument("--final_train_output_tag", required=True)
+    p.add_argument("--no_final_train_source", action="store_true")
+    p.add_argument("--final_multi_triplet_gain", type=float, default=0.0)
+    p.add_argument("--final_neutral_gain", type=float, default=0.0)
+    p.add_argument("--final_max_weight", type=float, default=1.0)
+    p.add_argument("--no_task_prefix", action="store_true")
+    p.set_defaults(func=build_final_train_from_files)
 
     args = parser.parse_args()
     args.func(args)
