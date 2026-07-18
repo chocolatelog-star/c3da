@@ -919,6 +919,7 @@ def build_complete_multitriplet_pseudo_rows(
         "duplicate_rows_rejected": duplicate_rejected,
         "extra_rows": len(merged_rows) - len(base_rows),
         "final_rows": len(merged_rows),
+        "selected_rows": len(merged_rows),
         "extra_weight": extra_weight,
         "sample_weight_summary": sample_weight_summary(merged_rows),
         "sentiment_distribution": sentiment_distribution(merged_rows),

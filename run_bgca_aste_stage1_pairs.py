@@ -94,6 +94,23 @@ def complete_multi_weight_tag(extra_weight: float) -> str:
     return f"complete_multi2_w{int(round(extra_weight * 100)):03d}"
 
 
+def append_sentiment_summary_tag(
+    summary_tag: str,
+    loss_weight: float,
+    source_only: bool,
+    class_balanced: bool,
+) -> str:
+    if loss_weight <= 0:
+        return summary_tag
+    loss_tag = str(loss_weight).replace(".", "")
+    suffix = f"sentiment_contrastive_l{loss_tag}"
+    if source_only:
+        suffix += "_source"
+    if class_balanced:
+        suffix += "_balanced"
+    return f"{summary_tag}_{suffix}".strip("_")
+
+
 def legacy_hp1_stage_names(generator_output_tag: str) -> dict[str, tuple[str, ...]]:
     return {
         "augment": (f"augment_{generator_output_tag}",),
@@ -437,7 +454,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         and final_dev_file.exists()
         and not args.rerun
     )
-    legacy_stage_names = legacy_hp1_stage_names(gen_tag) if use_legacy_pseudo_filter else {}
+    legacy_stage_names = (
+        legacy_hp1_stage_names(gen_tag)
+        if use_legacy_pseudo_filter and not complete_multi_tag
+        else {}
+    )
     augment_legacy_stages = legacy_stage_names.get("augment", ())
     if complete_multi_tag:
         base_augment_tag = augment_experiment_tag(
@@ -662,6 +683,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     legacy_fixed_metrics_path = run_dir / f"aste_metrics_fixed_{gen_tag}.json"
     if (
         use_legacy_pseudo_filter
+        and not complete_multi_tag
         and not use_neutral_weight_variant
         and args.lambda_sentiment_contrastive == 0
         and args.lambda_pairing_loss == 0
@@ -761,7 +783,10 @@ def summarize_pair(
         "pseudo_hp_precision": hp_raw.get("precision", ""),
         "pseudo_hp_recall": hp_raw.get("recall", ""),
         "pseudo_hp_f1": hp_raw.get("micro_f1", ""),
-        "augment_selected_rows": augment.get("selected_augmented_rows", ""),
+        "augment_selected_rows": augment.get(
+            "selected_augmented_rows",
+            final_comp.get("selected_augmented_rows", ""),
+        ),
         "final_train_rows": final_comp.get("final_train_rows", ""),
         "raw_precision": raw.get("precision", ""),
         "raw_recall": raw.get("recall", ""),
@@ -1008,6 +1033,12 @@ def main() -> None:
     if args.complete_multi_extra_weight > 0:
         complete_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
         summary_tag = f"{summary_tag}_{complete_tag}".strip("_")
+        summary_tag = append_sentiment_summary_tag(
+            summary_tag,
+            args.lambda_sentiment_contrastive,
+            args.sentiment_contrastive_source_only,
+            args.sentiment_contrastive_class_balanced,
+        )
     for source, target in pairs:
         rows.append(run_pair(args, source, target))
         if not args.dry_run:

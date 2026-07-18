@@ -96,6 +96,19 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertEqual(csv_path.name, "results_bgca_aste_stage1_hp2_dist5.csv")
         self.assertEqual(md_path.name, "results_bgca_aste_stage1_hp2_dist5_CN.md")
 
+    def test_complete_multi_contrastive_summary_tag_is_isolated(self) -> None:
+        tag = stage1.append_sentiment_summary_tag(
+            "complete_multi2_w025",
+            0.01,
+            source_only=True,
+            class_balanced=True,
+        )
+
+        self.assertEqual(
+            tag,
+            "complete_multi2_w025_sentiment_contrastive_l001_source_balanced",
+        )
+
     def test_neutral_weight_experiment_has_independent_model_and_train_args(self) -> None:
         output = self.run_dry(
             "--neutral_generation_loss_gain",
@@ -227,6 +240,8 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
                 run_dir / "source_train.jsonl",
                 run_dir / "source_dev.jsonl",
                 run_dir / "c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl",
+                run_dir / "aste_metrics_raw_label_to_text_gen.json",
+                run_dir / "aste_metrics_fixed_label_to_text_gen.json",
                 extractor_dir / "config.json",
                 generator_dir / "config.json",
             ):
@@ -234,7 +249,8 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
                 path.write_text("{}\n", encoding="utf-8")
             (run_dir / "stage_status.json").write_text(
                 '{"prepare_label_to_text_gen": true, "train_extractor_ep25_plain_last": true, '
-                '"pseudo_extractor_ep25_plain_last": true, "train_generator_label_to_text_gen": true}',
+                '"pseudo_extractor_ep25_plain_last": true, "train_generator_label_to_text_gen": true, '
+                '"evaluate_label_to_text_gen": true}',
                 encoding="utf-8",
             )
             command = [
@@ -250,10 +266,6 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
                 "masked_mutual",
                 "--domain_prefix_style",
                 "text",
-                "--lambda_sentiment_contrastive",
-                "0.01",
-                "--sentiment_contrastive_source_only",
-                "--sentiment_contrastive_class_balanced",
                 "--complete_multi_extra_weight",
                 "0.25",
                 "--dry_run",

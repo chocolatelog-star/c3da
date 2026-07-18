@@ -134,6 +134,7 @@ class CompleteMultitripletPseudoTest(unittest.TestCase):
             analysis = json.loads((output_dir / "target_pseudo_high_precision_analysis.json").read_text(encoding="utf-8"))
             self.assertEqual([row["id"] for row in rows], ["base-1", "double-good"])
             self.assertEqual(analysis["extra_rows"], 1)
+            self.assertEqual(analysis["selected_rows"], 2)
             self.assertEqual(analysis["hidden_gold_eval"]["selected_rows"], 2)
 
     def test_build_final_train_reuses_selected_augment_without_generation(self) -> None:
