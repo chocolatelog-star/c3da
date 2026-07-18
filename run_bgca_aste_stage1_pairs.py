@@ -148,6 +148,7 @@ def metric_value(data: dict, *keys: str):
 def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     run_dir = pair_run_dir(Path(args.output_root), source, target)
     upstream_run_dir = Path(args.reuse_upstream_run_dir) if args.reuse_upstream_run_dir else None
+    dynamic_multitriplet = getattr(args, "dynamic_multitriplet", False)
     if not args.dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
     status_path = run_dir / "stage_status.json"
@@ -202,6 +203,21 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--generator_output_tag",
                 gen_tag,
                 "--no_task_prefix",
+                *(
+                    [
+                        "--dynamic_multitriplet",
+                        "--source_count1_weight",
+                        str(getattr(args, "source_count1_weight", 1.0)),
+                        "--source_count2_weight",
+                        str(getattr(args, "source_count2_weight", 1.15)),
+                        "--source_count3_weight",
+                        str(getattr(args, "source_count3_weight", 1.25)),
+                        "--source_count4plus_weight",
+                        str(getattr(args, "source_count4plus_weight", 1.30)),
+                    ]
+                    if dynamic_multitriplet
+                    else []
+                ),
             ],
             args.dry_run,
         )
@@ -209,6 +225,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, f"prepare_{gen_tag}")
 
     extractor_tag = "extractor_ep25_plain_last"
+    if dynamic_multitriplet:
+        extractor_tag += "_dynamic_multitriplet"
     if args.extractor_lambda_sentiment_contrastive > 0:
         extractor_lambda_tag = str(args.extractor_lambda_sentiment_contrastive).replace(".", "")
         extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
@@ -986,6 +1004,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--high_precision_max_triplets", type=int, default=1)
     parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
     parser.add_argument("--complete_multi_extra_weight", type=float, default=0.0)
+    parser.add_argument("--dynamic_multitriplet", action="store_true")
+    parser.add_argument("--source_count1_weight", type=float, default=1.0)
+    parser.add_argument("--source_count2_weight", type=float, default=1.15)
+    parser.add_argument("--source_count3_weight", type=float, default=1.25)
+    parser.add_argument("--source_count4plus_weight", type=float, default=1.30)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")

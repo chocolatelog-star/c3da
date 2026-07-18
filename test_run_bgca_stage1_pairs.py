@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 import run_bgca_aste_stage1_pairs as stage1
 from run_bgca_aste_stage1_pairs import stage_done
@@ -74,6 +77,56 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertNotIn("t5_aste_pipeline.py select_pseudo", output)
         self.assertNotIn("hp1_dist5", output)
         self.assertIn("strict_aug150_w020_label_to_text_gen", output)
+        self.assertNotIn("--dynamic_multitriplet", output)
+        self.assertNotIn("--source_count1_weight", output)
+        self.assertNotIn("dynamic_multitriplet", output)
+
+    def test_dynamic_multitriplet_prepare_and_extractor_are_isolated(self) -> None:
+        output = self.run_dry(
+            "--dynamic_multitriplet",
+            "--source_count1_weight",
+            "1.0",
+            "--source_count2_weight",
+            "1.15",
+            "--source_count3_weight",
+            "1.25",
+            "--source_count4plus_weight",
+            "1.3",
+        )
+
+        self.assertIn("--dynamic_multitriplet", output)
+        self.assertIn("--source_count1_weight 1.0", output)
+        self.assertIn("--source_count2_weight 1.15", output)
+        self.assertIn("--source_count3_weight 1.25", output)
+        self.assertIn("--source_count4plus_weight 1.3", output)
+        self.assertIn("extractor_ep25_plain_last_dynamic_multitriplet", output)
+
+    def test_run_pair_accepts_legacy_namespace_without_dynamic_attributes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            argv = [
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--dry_run",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = stage1.parse_args()
+            for name in (
+                "dynamic_multitriplet",
+                "source_count1_weight",
+                "source_count2_weight",
+                "source_count3_weight",
+                "source_count4plus_weight",
+            ):
+                delattr(args, name)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                stage1.run_pair(args, "rest16", "laptop14")
+
+        self.assertNotIn("dynamic_multitriplet", output.getvalue())
 
     def test_hp2_creates_independent_pseudo_and_final_outputs(self) -> None:
         output = self.run_dry(

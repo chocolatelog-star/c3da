@@ -26,6 +26,7 @@ from t5_aste_data import (
     read_jsonl,
     split_train_dev,
     to_extract_rows,
+    triplet_count_bucket,
     triplets_to_text,
     write_jsonl,
 )
@@ -647,6 +648,51 @@ def augmentation_channel_analysis(rows: list[dict]) -> dict:
             "sample_weight_summary": sample_weight_summary(channel_rows),
         }
     return analysis
+
+
+def assign_source_triplet_count_weights(
+    rows: list[dict],
+    count1_weight: float = 1.0,
+    count2_weight: float = 1.15,
+    count3_weight: float = 1.25,
+    count4plus_weight: float = 1.30,
+) -> tuple[list[dict], dict]:
+    bucket_weights = {
+        "count1": count1_weight,
+        "count2": count2_weight,
+        "count3": count3_weight,
+        "count4plus": count4plus_weight,
+    }
+    grouped_weights = {bucket: [] for bucket in bucket_weights}
+    weighted_rows = []
+    for row in rows:
+        weighted_row = dict(row)
+        is_source_gold = row.get("augmentation") == "source_gold" or "augmentation" not in row
+        if is_source_gold:
+            triplet_count = len(parse_triplet_text_list(row.get("label", "")))
+            bucket = triplet_count_bucket(triplet_count)
+            selected_weight = float(bucket_weights[bucket])
+            weighted_row.update(
+                {
+                    "sample_weight": selected_weight,
+                    "source_triplet_count": triplet_count,
+                    "source_triplet_count_bucket": bucket,
+                    "source_triplet_count_weight": selected_weight,
+                }
+            )
+            grouped_weights[bucket].append(selected_weight)
+        weighted_rows.append(weighted_row)
+
+    stats = {}
+    for bucket, weights in grouped_weights.items():
+        stats[bucket] = {
+            "rows": len(weights),
+            "weight_mean": sum(weights) / len(weights) if weights else None,
+            "weight_min": min(weights) if weights else None,
+            "weight_max": max(weights) if weights else None,
+        }
+    stats["sample_weight_summary"] = sample_weight_summary(weighted_rows)
+    return weighted_rows, stats
 
 
 OPINION_AUGMENT_CHANNELS = {
@@ -1978,7 +2024,20 @@ def prepare(args: argparse.Namespace) -> None:
     write_jsonl(run_dir / "target_train_gold_analysis.jsonl", target_train_rows)
     write_jsonl(run_dir / "target_test.jsonl", target_test_rows)
     use_task_prefix = not args.no_task_prefix
-    write_jsonl(run_dir / "extract_train.jsonl", to_extract_rows(source_rows, use_task_prefix=use_task_prefix))
+    extract_train_rows = to_extract_rows(source_rows, use_task_prefix=use_task_prefix)
+    if getattr(args, "dynamic_multitriplet", False):
+        extract_train_rows, multitriplet_weight_stats = assign_source_triplet_count_weights(
+            extract_train_rows,
+            count1_weight=getattr(args, "source_count1_weight", 1.0),
+            count2_weight=getattr(args, "source_count2_weight", 1.15),
+            count3_weight=getattr(args, "source_count3_weight", 1.25),
+            count4plus_weight=getattr(args, "source_count4plus_weight", 1.30),
+        )
+        dump_json(
+            run_dir / "extract_train_multitriplet_weight_analysis.json",
+            multitriplet_weight_stats,
+        )
+    write_jsonl(run_dir / "extract_train.jsonl", extract_train_rows)
     write_jsonl(run_dir / "extract_dev.jsonl", to_extract_rows(source_dev_rows, use_task_prefix=use_task_prefix))
     generator_train_rows = build_generator_training_rows(
         source_rows,
@@ -2898,6 +2957,11 @@ def main() -> None:
     p.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     p.add_argument("--generator_output_tag", default="")
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--dynamic_multitriplet", action="store_true")
+    p.add_argument("--source_count1_weight", type=float, default=1.0)
+    p.add_argument("--source_count2_weight", type=float, default=1.15)
+    p.add_argument("--source_count3_weight", type=float, default=1.25)
+    p.add_argument("--source_count4plus_weight", type=float, default=1.30)
     p.set_defaults(func=prepare)
 
     p = sub.add_parser("pseudo")

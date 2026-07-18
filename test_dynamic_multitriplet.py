@@ -1,5 +1,12 @@
+import json
+import tempfile
 import unittest
+from argparse import Namespace
+from pathlib import Path
 from typing import get_type_hints
+from unittest.mock import patch
+
+import t5_aste_pipeline as pipeline
 
 from t5_aste_data import (
     micro_f1_by_triplet_count,
@@ -14,6 +21,136 @@ def _label(*triplets):
 
 
 class DynamicMultiTripletTest(unittest.TestCase):
+    def test_source_triplet_count_weights_only_change_source_gold_rows(self):
+        one_label = _label(("food", "great", "pos"))
+        three_label = _label(
+            ("food", "great", "pos"),
+            ("service", "slow", "neg"),
+            ("room", "clean", "pos"),
+        )
+        rows = [
+            {"id": "s1", "label": one_label, "augmentation": "source_gold"},
+            {"id": "s3", "label": three_label, "augmentation": "source_gold"},
+            {
+                "id": "p3",
+                "label": three_label,
+                "augmentation": "target_pseudo",
+                "sample_weight": 0.65,
+            },
+        ]
+
+        weighted, stats = pipeline.assign_source_triplet_count_weights(rows)
+
+        self.assertEqual(weighted[0]["sample_weight"], 1.0)
+        self.assertEqual(weighted[1]["sample_weight"], 1.25)
+        self.assertEqual(weighted[2]["sample_weight"], 0.65)
+        self.assertNotIn("source_triplet_count", weighted[2])
+        self.assertEqual([row["label"] for row in weighted], [row["label"] for row in rows])
+        self.assertEqual(stats["count1"], {
+            "rows": 1,
+            "weight_mean": 1.0,
+            "weight_min": 1.0,
+            "weight_max": 1.0,
+        })
+        self.assertEqual(stats["count3"]["rows"], 1)
+        self.assertEqual(stats["count3"]["weight_mean"], 1.25)
+        for bucket in ("count2", "count4plus"):
+            self.assertEqual(stats[bucket], {
+                "rows": 0,
+                "weight_mean": None,
+                "weight_min": None,
+                "weight_max": None,
+            })
+        self.assertEqual(stats["sample_weight_summary"]["count"], 3)
+
+    @staticmethod
+    def _prepare_args(run_dir: Path, **overrides) -> Namespace:
+        values = {
+            "source_dataset": "rest16",
+            "target_dataset": "laptop14",
+            "run_dir": str(run_dir),
+            "dev_ratio": 0.1,
+            "seed": 13,
+            "augment_prompt_style": "label_to_text",
+            "augment_channel_mode": "all",
+            "domain_prefix_style": "none",
+            "generator_output_tag": "",
+            "no_task_prefix": True,
+        }
+        values.update(overrides)
+        return Namespace(**values)
+
+    @staticmethod
+    def _split_rows():
+        three_label = _label(
+            ("food", "great", "pos"),
+            ("service", "slow", "neg"),
+            ("room", "clean", "pos"),
+        )
+        source_train = [
+            {"id": "s1", "text": "Great food.", "label": _label(("food", "great", "pos"))},
+            {"id": "s3", "text": "Mixed stay.", "label": three_label},
+        ]
+        source_dev = [
+            {"id": "d1", "text": "Slow service.", "label": _label(("service", "slow", "neg"))},
+        ]
+        target_train = [
+            {"id": "t1", "text": "Bright screen.", "label": _label(("screen", "bright", "pos"))},
+        ]
+        target_test = [
+            {"id": "u1", "text": "Loud fan.", "label": _label(("fan", "loud", "neg"))},
+        ]
+        return {
+            ("rest16", "train"): source_train,
+            ("rest16", "dev"): source_dev,
+            ("laptop14", "train"): target_train,
+            ("laptop14", "test"): target_test,
+        }
+
+    def test_prepare_dynamic_multitriplet_writes_weighted_extract_train_and_analysis(self):
+        splits = self._split_rows()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "dynamic"
+            args = self._prepare_args(
+                run_dir,
+                dynamic_multitriplet=True,
+                source_count1_weight=1.0,
+                source_count2_weight=1.15,
+                source_count3_weight=1.25,
+                source_count4plus_weight=1.30,
+            )
+            with patch.object(pipeline, "load_split", side_effect=lambda dataset, split: splits[(dataset, split)]):
+                pipeline.prepare(args)
+
+            extract_rows = [json.loads(line) for line in (run_dir / "extract_train.jsonl").read_text(encoding="utf-8").splitlines()]
+            analysis = json.loads((run_dir / "extract_train_multitriplet_weight_analysis.json").read_text(encoding="utf-8"))
+
+        self.assertEqual([row["sample_weight"] for row in extract_rows], [1.0, 1.25])
+        self.assertEqual(extract_rows[1]["source_triplet_count"], 3)
+        self.assertEqual(extract_rows[1]["source_triplet_count_bucket"], "count3")
+        expected_extract_rows = pipeline.to_extract_rows(
+            splits[("rest16", "train")], use_task_prefix=False
+        )
+        self.assertEqual(extract_rows[1]["target"], expected_extract_rows[1]["target"])
+        self.assertEqual(analysis["count3"]["rows"], 1)
+
+    def test_prepare_legacy_namespace_keeps_extract_train_compatible(self):
+        splits = self._split_rows()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "legacy"
+            args = self._prepare_args(run_dir)
+            with patch.object(pipeline, "load_split", side_effect=lambda dataset, split: splits[(dataset, split)]):
+                pipeline.prepare(args)
+
+            extract_rows = [json.loads(line) for line in (run_dir / "extract_train.jsonl").read_text(encoding="utf-8").splitlines()]
+            analysis_exists = (run_dir / "extract_train_multitriplet_weight_analysis.json").exists()
+
+        self.assertEqual(
+            extract_rows,
+            pipeline.to_extract_rows(splits[("rest16", "train")], use_task_prefix=False),
+        )
+        self.assertFalse(analysis_exists)
+
     def test_triplet_count_bucket_boundaries(self):
         expected = {
             0: "count1",
