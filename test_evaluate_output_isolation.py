@@ -6,6 +6,8 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
+from transformers import AutoTokenizer
+
 import t5_absa_train
 import t5_aste_pipeline
 
@@ -137,6 +139,15 @@ class EvaluateOutputIsolationTest(unittest.TestCase):
         self.assertNotIn("pairing_mask", cleaned)
         self.assertNotIn("sentiment_contrastive_weights", cleaned)
         self.assertIn("sample_weight", inputs)
+
+    def test_decode_keep_aste_task_tokens_replaces_negative_ids(self) -> None:
+        tokenizer = AutoTokenizer.from_pretrained(
+            r"J:\nlp\models\t5-base-py",
+            local_files_only=True,
+        )
+        text = t5_absa_train.decode_keep_aste_task_tokens(tokenizer, [-100, tokenizer.eos_token_id])
+
+        self.assertEqual(text, "")
 
 
 if __name__ == "__main__":

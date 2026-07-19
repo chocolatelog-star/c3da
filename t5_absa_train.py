@@ -52,6 +52,7 @@ SENTIMENT_LABEL_IDS = {"pos": 0, "neg": 1, "neu": 2}
 
 
 def decode_keep_aste_task_tokens(tokenizer, token_ids) -> str:
+    token_ids = [tokenizer.pad_token_id if int(token) < 0 else int(token) for token in token_ids]
     text = tokenizer.decode(token_ids, skip_special_tokens=False)
     for token in (
         tokenizer.pad_token,
