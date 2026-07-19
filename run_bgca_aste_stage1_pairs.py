@@ -7,7 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from t5_aste_pipeline import dynamic_multitriplet_config_tag, positive_finite_float
+from t5_aste_pipeline import (
+    dynamic_multitriplet_config_tag,
+    dynamic_pseudo_filter_tag,
+    positive_finite_float,
+)
 
 
 ASTE_PAIRS = [
@@ -85,6 +89,44 @@ def validate_pseudo_provenance(
         return False, "recorded model path does not match the reused extractor best path"
     if state.get("pseudo_source_tag") != pseudo_source_tag:
         return False, "recorded pseudo source tag does not match the current extractor tag"
+    return True, ""
+
+
+def validate_dynamic_pseudo_selection(
+    output_dir: Path,
+    pseudo_source_tag: str,
+    min_pseudo_weight: float,
+    max_token_distance: int,
+) -> tuple[bool, str]:
+    required_paths = (
+        output_dir / "target_pseudo_high_precision.jsonl",
+        output_dir / "target_pseudo_high_precision_analysis.json",
+        output_dir / "target_pseudo_generation_state.json",
+    )
+    missing = [path.name for path in required_paths if not path.exists()]
+    if missing:
+        return False, f"missing required dynamic pseudo artifacts: {', '.join(missing)}"
+
+    try:
+        state = read_json(output_dir / "target_pseudo_generation_state.json")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False, "dynamic pseudo selection state is unreadable"
+
+    if state.get("status") != "complete":
+        return False, f"dynamic pseudo selection state is {state.get('status')!r}, expected 'complete'"
+    if state.get("selection_mode") != "dynamic_high_precision":
+        return False, "dynamic pseudo selection mode does not match"
+    if state.get("base_pseudo_source_tag") != pseudo_source_tag:
+        return False, "dynamic pseudo selection source tag does not match"
+    try:
+        recorded_min_weight = float(state.get("min_pseudo_weight", -1.0))
+        recorded_token_distance = int(state.get("max_token_distance", -1))
+    except (TypeError, ValueError):
+        return False, "dynamic pseudo selection parameters are invalid"
+    if recorded_min_weight != float(min_pseudo_weight):
+        return False, "dynamic pseudo min weight does not match"
+    if recorded_token_distance != int(max_token_distance):
+        return False, "dynamic pseudo token distance does not match"
     return True, ""
 
 
@@ -428,18 +470,57 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, pseudo_stage)
 
+    pseudo_input_run_dir = upstream_run_dir or run_dir
+    pseudo_train_file = pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"
+    pseudo_analysis_file = pseudo_input_run_dir / "target_pseudo_high_precision_analysis.json"
     pseudo_tag = pseudo_filter_tag(
         args.high_precision_max_triplets,
         args.high_precision_max_token_distance,
     )
     use_legacy_pseudo_filter = (
-        args.high_precision_max_triplets == 1
+        not dynamic_multitriplet
+        and args.high_precision_max_triplets == 1
         and args.high_precision_max_token_distance == 5
     )
-    pseudo_input_run_dir = upstream_run_dir or run_dir
-    pseudo_train_file = pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"
-    pseudo_analysis_file = pseudo_input_run_dir / "target_pseudo_high_precision_analysis.json"
-    if not use_legacy_pseudo_filter:
+    if dynamic_multitriplet:
+        pseudo_tag = dynamic_pseudo_filter_tag(args.high_precision_max_token_distance)
+        pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / pseudo_tag
+        pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+        pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+        pseudo_selection_state_file = pseudo_variant_dir / "target_pseudo_generation_state.json"
+        pseudo_filter_stage = f"select_dynamic_pseudo_{extractor_tag}_{pseudo_tag}"
+        selection_valid, _selection_reason = validate_dynamic_pseudo_selection(
+            pseudo_variant_dir,
+            extractor_tag,
+            0.65,
+            args.high_precision_max_token_distance,
+        )
+        dynamic_selection_reusable = stage_done(
+            status,
+            pseudo_filter_stage,
+            [pseudo_train_file, pseudo_analysis_file, pseudo_selection_state_file],
+            args.rerun,
+        ) and selection_valid
+        if upstream_run_dir is None and not dynamic_selection_reusable:
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "select_dynamic_pseudo",
+                    "--run_dir",
+                    str(run_dir),
+                    "--output_dir",
+                    str(pseudo_variant_dir),
+                    "--min_pseudo_weight",
+                    "0.65",
+                    "--high_precision_max_token_distance",
+                    str(args.high_precision_max_token_distance),
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, pseudo_filter_stage)
+    elif not use_legacy_pseudo_filter:
         pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / pseudo_tag
         pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
         pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
@@ -516,10 +597,21 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             pseudo_train_file,
             pseudo_analysis_file,
         ]
+        if dynamic_multitriplet:
+            required_upstream_paths.append(pseudo_selection_state_file)
         missing_paths = [path for path in required_upstream_paths if not path.exists()]
         if missing_paths:
             missing_text = ", ".join(str(path) for path in missing_paths)
             raise FileNotFoundError(f"missing required upstream artifacts: {missing_text}")
+        if dynamic_multitriplet:
+            selection_valid, selection_reason = validate_dynamic_pseudo_selection(
+                pseudo_train_file.parent,
+                extractor_tag,
+                0.65,
+                args.high_precision_max_token_distance,
+            )
+            if not selection_valid:
+                raise RuntimeError(f"cannot validate upstream dynamic pseudo selection: {selection_reason}")
 
     generator_dir = run_dir / "models" / f"generator_{gen_tag}_ep{args.generator_epochs}"
     if not stage_done(status, f"train_generator_{gen_tag}", [generator_dir / "best" / "config.json"], args.rerun):

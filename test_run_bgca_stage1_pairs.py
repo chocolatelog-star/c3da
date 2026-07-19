@@ -219,6 +219,10 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--checkpoint_selection aste_f1", extractor_command)
         self.assertIn("--checkpoint_selection best", generator_command)
         self.assertIn("--checkpoint_selection best", final_command)
+        self.assertIn("t5_aste_pipeline.py select_dynamic_pseudo", output)
+        self.assertIn("pseudo_variants\\dynamic_dist5", output)
+        self.assertIn("--pseudo_train_file", output)
+        self.assertIn("strict_aug150_w020_label_to_text_gen_dynamic_dist5", output)
 
     def test_runner_cli_rejects_invalid_source_weights(self) -> None:
         invalid_cases = (
@@ -529,6 +533,46 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("t5_aste_pipeline.py pseudo", interrupted_output.getvalue())
         self.assertIn("t5_aste_pipeline.py pseudo", other_complete_output.getvalue())
         self.assertNotIn("t5_aste_pipeline.py pseudo", matching_output.getvalue())
+
+    def test_dynamic_selection_validation_rejects_in_progress_or_wrong_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "dynamic_dist5"
+            output_dir.mkdir(parents=True)
+            for path in (
+                output_dir / "target_pseudo_high_precision.jsonl",
+                output_dir / "target_pseudo_high_precision_analysis.json",
+            ):
+                path.write_text("{}\n", encoding="utf-8")
+            state_path = output_dir / "target_pseudo_generation_state.json"
+            state = {
+                "status": "in_progress",
+                "selection_mode": "dynamic_high_precision",
+                "base_pseudo_source_tag": "extractor_a",
+                "min_pseudo_weight": 0.65,
+                "max_token_distance": 5,
+            }
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            valid, reason = stage1.validate_dynamic_pseudo_selection(
+                output_dir,
+                "extractor_a",
+                0.65,
+                5,
+            )
+            self.assertFalse(valid)
+            self.assertIn("in_progress", reason)
+
+            state["status"] = "complete"
+            state["base_pseudo_source_tag"] = "extractor_b"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            valid, reason = stage1.validate_dynamic_pseudo_selection(
+                output_dir,
+                "extractor_a",
+                0.65,
+                5,
+            )
+            self.assertFalse(valid)
+            self.assertIn("source tag", reason)
 
     def test_legacy_prepare_requires_every_shared_output(self) -> None:
         required_names = (

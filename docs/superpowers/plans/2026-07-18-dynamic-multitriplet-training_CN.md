@@ -254,13 +254,15 @@ compute_metrics=build_aste_compute_metrics(tokenizer)
 
 **文件：**
 - 修改：`t5_aste_pipeline.py`
+- 修改：`run_bgca_aste_stage1_pairs.py`
 - 修改：`test_dynamic_multitriplet.py`
+- 修改：`test_run_bgca_stage1_pairs.py`
 
-- [ ] **步骤1：编写无数量上限测试**
+- [x] **步骤1：编写无数量上限测试**
 
 构造一条含4个合法三元组的伪标签，调用 `select_dynamic_high_precision_pseudo_rows`，断言该行保留4个三元组且没有 `too_many_triplets`。
 
-- [ ] **步骤2：编写部分删除测试**
+- [x] **步骤2：编写部分删除测试**
 
 构造一条含3个三元组的伪标签，其中两个距离合法、一个距离超限。断言输出行保留两个合法三元组，并写入：
 
@@ -268,18 +270,18 @@ compute_metrics=build_aste_compute_metrics(tokenizer)
 {
     "dynamic_triplet_count_before": 3,
     "dynamic_triplet_count_after": 2,
-    "dynamic_removed_triplets": 1,
+    "dynamic_removed_triplets": [{"triplet": "...", "reason": "..."}],
     "dynamic_retention_ratio": 2 / 3,
 }
 ```
 
-- [ ] **步骤3：运行测试并确认失败**
+- [x] **步骤3：运行测试并确认失败**
 
 运行：`J:\conda\envs\c3da\python.exe -m unittest test_dynamic_multitriplet.py -v`
 
 预期：动态筛选函数不存在。
 
-- [ ] **步骤4：实现动态筛选**
+- [x] **步骤4：实现动态筛选**
 
 新增 `select_dynamic_high_precision_pseudo_rows(rows, min_weight=0.65, max_token_distance=5)`：
 
@@ -297,16 +299,17 @@ sample_weight = round(max(0.25, base_weight * retention_ratio * change_factor), 
 
 5. 统计输入、输出、部分删除、完全删除、各删除原因、各数量分组和权重摘要。
 
-- [ ] **步骤5：明确动态模式不复用双三元组专用函数**
+- [x] **步骤5：明确动态模式不复用双三元组专用函数**
 
 动态模式不得调用 `build_complete_multitriplet_pseudo_rows`。旧函数保留用于复现48.93实验；新产物写入：
 
 ```text
 pseudo_variants\dynamic_dist5\target_pseudo_high_precision.jsonl
 pseudo_variants\dynamic_dist5\target_pseudo_high_precision_analysis.json
+pseudo_variants\dynamic_dist5\target_pseudo_generation_state.json
 ```
 
-- [ ] **步骤6：运行测试并提交**
+- [x] **步骤6：运行测试并提交**
 
 运行：`J:\conda\envs\c3da\python.exe -m unittest test_dynamic_multitriplet.py test_complete_multitriplet_pseudo.py -v`
 

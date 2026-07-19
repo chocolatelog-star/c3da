@@ -373,6 +373,141 @@ class DynamicMultiTripletTest(unittest.TestCase):
         )
         self.assertFalse(analysis_exists)
 
+    def test_dynamic_high_precision_keeps_valid_four_triplets_and_filters_bad_triplet(self):
+        four_label = _label(
+            ("food", "Good", "pos"),
+            ("service", "slow", "neg"),
+            ("room", "clean", "pos"),
+            ("staff", "friendly", "pos"),
+        )
+        partial_label = _label(
+            ("keyboard", "cramped", "neg"),
+            ("screen", "bright", "pos"),
+            ("battery", "bright", "pos"),
+        )
+        rows = [
+            {
+                "id": "full",
+                "text": "Good food, slow service, clean room, and friendly staff.",
+                "label": four_label,
+                "sample_weight": 0.65,
+                "quality_flags": {"all_terms_in_text": True},
+            },
+            {
+                "id": "partial",
+                "text": "The battery runs all day, but the keyboard is cramped and the screen is bright.",
+                "label": partial_label,
+                "sample_weight": 0.65,
+                "quality_flags": {"all_terms_in_text": True},
+            },
+        ]
+        original_rows = [dict(row) for row in rows]
+
+        selected, stats = pipeline.select_dynamic_high_precision_pseudo_rows(
+            rows,
+            min_weight=0.65,
+            max_token_distance=5,
+        )
+
+        by_id = {row["id"]: row for row in selected}
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(by_id["full"]["label"], pipeline.canonicalize_triplet_text(four_label))
+        self.assertEqual(by_id["full"]["dynamic_triplet_count_after"], 4)
+        self.assertEqual(by_id["partial"]["dynamic_triplet_count_before"], 3)
+        self.assertEqual(by_id["partial"]["dynamic_triplet_count_after"], 2)
+        self.assertIn("battery", by_id["partial"]["dynamic_original_label"])
+        self.assertNotIn("battery", by_id["partial"]["label"])
+        self.assertAlmostEqual(by_id["partial"]["sample_weight"], 0.368333, places=6)
+        self.assertEqual(stats["fully_kept_rows"], 1)
+        self.assertEqual(stats["partially_kept_rows"], 1)
+        self.assertEqual(stats["removed_triplets_by_distance_too_far"], 1)
+        self.assertEqual(rows, original_rows)
+
+    def test_select_dynamic_pseudo_command_writes_complete_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            output_dir = run_dir / "pseudo_variants" / "dynamic_dist5"
+            row = {
+                "id": "t1",
+                "text": "Bright screen and cramped keyboard.",
+                "label": _label(("screen", "Bright", "pos"), ("keyboard", "cramped", "neg")),
+                "sample_weight": 0.65,
+                "quality_flags": {"all_terms_in_text": True},
+            }
+            pipeline.write_jsonl(run_dir / "target_pseudo.jsonl", [row])
+            pipeline.write_jsonl(
+                run_dir / "target_train_gold_analysis.jsonl",
+                [{**row, "label": _label(("screen", "Bright", "pos"), ("keyboard", "cramped", "neg"))}],
+            )
+            (run_dir / "target_pseudo_analysis.json").write_text(
+                json.dumps(
+                    {
+                        "model_path": str((run_dir / "models" / "extractor" / "best").resolve()),
+                        "pseudo_source_tag": "extractor_tag",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "target_pseudo_generation_state.json").write_text(
+                json.dumps({"status": "complete"}),
+                encoding="utf-8",
+            )
+
+            pipeline.select_dynamic_pseudo(
+                Namespace(
+                    run_dir=str(run_dir),
+                    output_dir=str(output_dir),
+                    min_pseudo_weight=0.65,
+                    high_precision_max_token_distance=5,
+                )
+            )
+
+            rows = [json.loads(line) for line in (output_dir / "target_pseudo_high_precision.jsonl").read_text(encoding="utf-8").splitlines()]
+            analysis = json.loads((output_dir / "target_pseudo_high_precision_analysis.json").read_text(encoding="utf-8"))
+            state = json.loads((output_dir / "target_pseudo_generation_state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["dynamic_high_precision_pseudo"])
+        self.assertEqual(state["status"], "complete")
+        self.assertEqual(state["selection_mode"], "dynamic_high_precision")
+        self.assertEqual(state["base_pseudo_source_tag"], "extractor_tag")
+        self.assertIn("hidden_gold_eval", analysis)
+
+    def test_select_dynamic_pseudo_rejects_incomplete_base_generation_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            output_dir = run_dir / "pseudo_variants" / "dynamic_dist5"
+            pipeline.write_jsonl(
+                run_dir / "target_pseudo.jsonl",
+                [
+                    {
+                        "id": "t1",
+                        "text": "Bright screen.",
+                        "label": _label(("screen", "Bright", "pos")),
+                        "sample_weight": 0.65,
+                        "quality_flags": {"all_terms_in_text": True},
+                    }
+                ],
+            )
+            (run_dir / "target_pseudo_generation_state.json").write_text(
+                json.dumps({"status": "in_progress"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "in_progress"):
+                pipeline.select_dynamic_pseudo(
+                    Namespace(
+                        run_dir=str(run_dir),
+                        output_dir=str(output_dir),
+                        min_pseudo_weight=0.65,
+                        high_precision_max_token_distance=5,
+                    )
+                )
+
+            state = json.loads((output_dir / "target_pseudo_generation_state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(state["status"], "in_progress")
+
     def test_triplet_count_bucket_boundaries(self):
         expected = {
             0: "count1",
