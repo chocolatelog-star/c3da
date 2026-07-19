@@ -593,6 +593,21 @@ def mean_pool_encoder_hidden(hidden: torch.Tensor, attention_mask: torch.Tensor 
 
 
 class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
+    _generation_only_input_keys = {
+        "sample_weight",
+        "domain_weight",
+        "domain_label",
+        "structure_weight",
+        "consistency_group",
+        "pairing_aspect_spans",
+        "pairing_opinion_spans",
+        "pairing_mask",
+        "sentiment_contrastive_spans",
+        "sentiment_contrastive_labels",
+        "sentiment_contrastive_mask",
+        "sentiment_contrastive_weights",
+    }
+
     def __init__(
         self,
         *args,
@@ -621,6 +636,13 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self._component_counts: dict[str, int] = {}
         self._component_reductions: dict[str, str] = {}
 
+    @classmethod
+    def _strip_generation_only_inputs(cls, inputs: dict) -> dict:
+        cleaned = dict(inputs)
+        for key in cls._generation_only_input_keys:
+            cleaned.pop(key, None)
+        return cleaned
+
     def _track_component(self, name: str, value: torch.Tensor | float, reduction: str = "mean") -> None:
         numeric = float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
         self._component_sums[name] = self._component_sums.get(name, 0.0) + numeric
@@ -638,6 +660,16 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             self._component_counts.clear()
             self._component_reductions.clear()
         super().log(logs, *args, **kwargs)
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None, **kwargs):
+        cleaned_inputs = self._strip_generation_only_inputs(inputs)
+        return super().prediction_step(
+            model,
+            cleaned_inputs,
+            prediction_loss_only,
+            ignore_keys=ignore_keys,
+            **kwargs,
+        )
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         sample_weight = inputs.pop("sample_weight", None)
