@@ -2,12 +2,63 @@
 
 本文档是项目实验总账，配合 git（版本管理）记录代码版本、实验输出、模型路径和阶段结论。维护原则：优先整体更新表格和结论，不在文档末尾无限追加。
 
+## 0. 快速差距看板
+
+打开本文档时优先看本节：它记录 BGCA（论文方法）与我们当前实验的直接差距、当前最好模型、最近失败方向和下一步主线。
+
+### 0.1 六组跨域总体对比
+
+BGCA（论文方法）结果来自论文 Table 4（表 4）的 `label-to-text`（标签到文本）行。我们的六组结果来自 `runs\bgca_aste_stage1_baseline`，主指标使用 `raw F1`（原始 F1），`fixed F1`（修正 F1）只作为辅助分析。
+
+| 跨域方向 | BGCA label-to-text F1（论文） | 我们 raw F1（原始 F1） | 差值（我们-BGCA） | 我们 fixed F1（修正 F1） | 状态 |
+|---|---:|---:|---:|---:|---|
+| rest14 -> laptop14 | 53.64 | 52.05 | -1.59 | 53.36 | 接近 |
+| rest15 -> laptop14 | 45.69 | 41.02 | -4.67 | 45.01 | 明显落后 |
+| rest16 -> laptop14 | 47.28 | 46.14 | -1.14 | 47.69 | 最接近 |
+| laptop14 -> rest14 | 65.27 | 53.11 | -12.16 | 53.98 | 主要短板 |
+| laptop14 -> rest15 | 58.95 | 52.02 | -6.93 | 53.94 | 明显落后 |
+| laptop14 -> rest16 | 64.00 | 54.85 | -9.15 | 55.58 | 明显落后 |
+| 平均 | **55.80** | **49.86** | **-5.94** | **51.59** | 平均仍落后 |
+
+结论：我们在 restaurant（餐馆）到 laptop（笔记本）方向接近 BGCA（论文方法），但 laptop14（笔记本）迁移到 restaurant（餐馆）三组明显落后，主要问题是 recall（召回率）不足。
+
+### 0.2 当前重点单组：rest16 -> laptop14
+
+`rest16 -> laptop14` 是当前主要调参方向，因为它与 BGCA（论文方法）差距最小，适合先做机制验证。
+
+| 版本 | raw P（原始精确率） | raw R（原始召回率） | raw F1（原始 F1） | fixed F1（修正 F1） | 相对 BGCA 47.28 | 结论 |
+|---|---:|---:|---:|---:|---:|---|
+| BGCA label-to-text（论文） | - | - | **47.28** | - | 0.00 | 论文对照 |
+| 六组基线主流程 | 54.99 | 39.74 | 46.14 | 47.69 | -1.14 | 接近 BGCA，但召回偏低 |
+| 最终阶段情感对比 | - | - | 46.82 | 48.94 | -0.46 | 小幅有效，但不是最终最好 |
+| hp1 + 完整双三元组，不加情感对比 | 55.45 | 42.33 | 48.01 | 50.37 | +0.73 | 完整双三元组补充有效 |
+| hp1 + 完整双三元组 + 情感对比 | **58.31** | **42.14** | **48.93** | **50.21** | **+1.65** | 当前最好，主线保留 |
+| dynamic_strict_dist5（动态严格距离5） | 53.51 | 43.62 | 48.07 | 49.69 | +0.79 | 接近最好，但不超过 |
+| complete_multi2 + dynamic_strict 3+ | 52.55 | 39.93 | 45.38 | 47.48 | -1.90 | 失败，不进入主线 |
+
+当前最好模型：
+
+`runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_sentiment_contrastive_l001_source_balanced_ep5\best`
+
+### 0.3 当前主线判断
+
+| 项目 | 当前判断 |
+|---|---|
+| 应保留的主线 | `hp1 + complete_multi2_w025`（完整双三元组补充）+ DANN（领域对抗）+ sentiment contrastive（情感对比学习） |
+| 不建议继续投入 | `complete_multi2 + dynamic_strict 3+`，因为 raw F1 降到 45.38 |
+| 核心短板 | 多三元组 recall（召回率）仍低，中性 `neu`（中性）基本未解决 |
+| 下一步优先级 | 固定当前最好上游，只做最终阶段单变量消融：`pseudo_weight`（伪标签权重）、`augment_weight`（增强权重）、`complete_multi2` 权重 |
+| 当前主目录代码版本 | 本次文档同步提交，准确提交号以 `git log -1`（查看最新提交）为准 |
+| 当前主目录分支 | `master` |
+| 最佳实验代码分支 | `feature/complete-multitriplet-ablation`，最新记录版本 `db6fe4b Update experiment dashboard with BGCA gap` |
+| GitHub 状态 | 主目录本地领先远程；上次 push（推送）因网络 reset（连接重置）失败 |
+
 ## 0. 当前总览
 
 | 项目 | 内容 |
 |---|---|
 | GitHub（代码托管平台） | https://github.com/chocolatelog-star/c3da.git |
-| 当前代码版本 | `2b35461 Use GPU-safe pairing relation masks` |
+| 当前代码版本 | 本次文档同步提交，准确提交号以 `git log -1`（查看最新提交）为准 |
 | 当前分支 | `master` |
 | 主实验目录 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14` |
 | 当前六组实验状态 | 已完成 |
@@ -17,11 +68,11 @@
 | 主对比指标 | `raw F1`（原始 F1） |
 | 辅助分析指标 | `fixed F1`（修正 F1） |
 
-## 0.1 当前阶段：第五项消融完成，聚焦多三元组召回
+## 0.1 当前阶段：完整双三元组补充取得新最佳
 
-当前最佳候选仍是只在最终 5 轮加入解码器观点原型对比学习的版本：raw F1=46.82、fixed F1=48.94。第五项编码器方面词-观点词配对损失将 raw 精确率提高 1.15 个百分点，并减少 13 个错误三元组，但 raw 召回率下降 1.11 个百分点，raw F1 降至 46.49。说明配对约束能抑制错误组合，却进一步强化了保守生成，当前主要问题已明确为多三元组召回不足。
+严格模块消融和完整双三元组补充均已完成。消融证明增强是主要独立正贡献，DANN 单独有害但与增强形成明显正协同，情感对比在旧 hp1 数据上只提高 0.19 个 raw F1。随后在原 421 条 hp1 伪标签上增加 73 条完整双三元组、排除 31 条裁剪样本：关闭情感对比时 raw F1=48.01；重新加入最终阶段源域平衡情感对比后 raw F1=48.93、fixed F1=50.21，成为当前新最佳。多三元组 raw F1 同时从旧最佳 42.65 提高到 46.13。
 
-| 近期改进方法 | raw F1 | 相对当前最佳 | 阶段结论 |
+| 近期改进方法 | raw F1 | 相对上一最佳 46.82 | 阶段结论 |
 |---|---:|---:|---|
 | 文本式领域前缀 | 46.63 | -0.19 | 比无前缀六组同方向基线 46.14 有改善，保留为主流程输入形式 |
 | 括号式领域前缀 | 45.26 | -1.56 | 不如自然语言式领域前缀 |
@@ -34,11 +85,24 @@
 | 中性主生成损失增权 | 43.18 | -3.64 | 中性问题来自数据、边界与配对，不是损失权重不足 |
 | 三任务混合生成器 | 44.07 | -2.75 | 1:1:1 混合削弱多三元组和负向结构，不进入主流程 |
 | 编码器方面词-观点词配对 | 46.49 | -0.34 | 精确率提高、召回率下降；机制有效但不作为最佳模型 |
+| 编码器三元组覆盖分类头 | 44.37 | -2.45 | 分类头坍缩为单三元组，未传递到自回归生成；模型已删除 |
+| hp1 + 完整双三元组，不加情感对比 | 48.01 | +1.19 | 多三元组召回 35.57%、F1 44.80，直接补充完整结构有效 |
+| hp1 + 完整双三元组 + 情感对比 | **48.93** | **+2.11** | 当前新最佳；多三元组召回 35.85%、F1 46.13 |
 
 | 实验项 | 配置或结论 |
 |---|---|
-| 当前最佳候选 | raw P=54.84、raw R=40.85、raw F1=46.82、fixed F1=48.94 |
-| 当前最佳模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced_ep5\best` |
+| 当前最佳候选 | raw P=58.31、raw R=42.14、raw F1=48.93、fixed F1=50.21 |
+| 当前最佳模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14\models\final_dann_l0.03_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_sentiment_contrastive_l001_source_balanced_ep5\best` |
+| 新主实验训练集 | `final_train_strict_aug150_w020_label_to_text_gen_complete_multi2_w025.jsonl`，1499 行 |
+| 新主实验伪标签 | `pseudo_variants\hp1_complete2_dist5_w025\target_pseudo_high_precision.jsonl`，494 行 |
+| 新主实验数据诊断 | 基础 hp1 421 行；完整双三元组新增 73 行；裁剪样本排除 31 行；隐藏金标 raw F1 50.35→51.08 |
+| 新主实验唯一变量 | 复用原 150 条严格增强，只增加 73 条完整双三元组伪标签，新增样本权重 0.25 |
+| 完整双三元组 D 骨架结果 | raw P=55.45、raw R=42.33、raw F1=48.01、fixed F1=50.37；多三元组 raw R=35.57、F1=44.80 |
+| 完整双三元组 + 情感对比结果 | raw P=58.31、raw R=42.14、raw F1=48.93、fixed F1=50.21；多三元组 raw R=35.85、F1=46.13 |
+| 相对旧最佳 | raw F1 +2.11；TP 221→228，FP 182→163，FN 320→313；首次得到 1 个中性正确三元组 |
+| 严格消融矩阵 | A：源域+伪标签；B：A+增强；C：A+DANN；D：A+增强+DANN；E：D+最终阶段情感对比（当前最佳） |
+| 严格消融输出 | `results_strict_module_ablation.csv` 和 `results_strict_module_ablation_CN.md`，四组完成后自动整体生成 |
+| 新代码版本 | `722e460`（中文设计和计划）、`62113b4`（完整双三元组与严格消融实现）、`4258bc6`（旧指标复用与汇总隔离修复） |
 | 第五项唯一变量 | 最终 5 轮增加编码器多正例双向方面词-观点词配对损失，系数 0.01、温度 0.1，只使用源域人工标注 |
 | 复用训练文件 | `final_train_strict_aug150_w020_label_to_text_gen.jsonl` 和 `final_dev_strict_aug150_w020_label_to_text_gen.jsonl` |
 | 配对覆盖率 | 352/352 个源域多三元组训练行成功定位，覆盖率 100%；共 877 个有效配对 |
@@ -104,6 +168,9 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_ast
 
 | 时间 | git commit（提交号） | 改动主题 | 改动文件 | 改动说明 | 对应实验/输出位置 | 结果状态 |
 |---|---|---|---|---|---|---|
+| 2026-07-20 | 本次提交，见 `git log -1` | 主目录实验总账同步 | `实验记录与模型索引_CN.md` | 将 worktree（工作树）中已整理的 BGCA 差距看板、当前最好模型、完整双三元组、dynamic strict（动态严格筛选）和失败方向同步到主目录 `J:\nlp\CD-C3DA`，保证用户直接打开主目录 MD（Markdown 文档）即可看到最新实验账。 | `J:\nlp\CD-C3DA\实验记录与模型索引_CN.md` | 已完成；主目录本地提交 |
+| 2026-07-20 | `db6fe4b` | BGCA 差距看板更新 | `实验记录与模型索引_CN.md` | 在文档开头新增“快速差距看板”，把 BGCA（论文方法）六组 F1、我们六组 raw/fixed F1、平均差距、当前 `rest16 -> laptop14` 最好版本和失败方向放在最前面；打开文档即可看到当前差距和主线判断。 | `实验记录与模型索引_CN.md` | 已完成；本地已提交，GitHub（代码托管平台）推送因网络 reset（连接重置）失败 |
+| 2026-07-19 | `7f3724d`、`9e76a19` | complete multi（完整多三元组）与 dynamic strict（动态严格筛选）伪标签混合 | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py`、相关测试 | 新增完整双三元组补充和动态严格伪标签分支；对 3+ 三元组样本尝试按实际结构保留更多三元组；修复新输出目录缺少基础增强文件导致的 `FileNotFoundError`（文件不存在错误），缺失时先自动生成基础增强再重建完整伪标签。 | `runs\bgca_aste_stage1_dynamic_strict_multitriplet_v1`、`runs\bgca_aste_stage1_complete_dynamic3plus_v1` | `dynamic_strict_dist5` raw F1=48.07、fixed F1=49.69，接近但低于最好；`complete_multi2 + dynamic_strict 3+` raw F1=45.38、fixed F1=47.48，失败，不进入主线 |
 | 2026-07-16 | `c1082ab`、`123ab39`、`d87e871`、`6075ee0`、`a358efa`、`2b35461` | 编码器上下文多正例配对损失 | `t5_absa_train.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、4 个测试文件 | 从原始输入定位方面词和观点词；共享跨度使用多正例双向对比；只用源域多三元组；新增配对日志和结构子集评估；严格复用当前最佳训练集，只重跑最终模型 | `runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14` 下带 `_pairing_encoder_l001_source_only` 的独立指标 | 已完成：raw F1=46.49、fixed F1=48.86；多三元组精确率提高但召回下降；失败模型已删除，释放约 5.83 GB |
 | 2026-07-15 | `e7560c7`、`e320fab`、`925d596`、`9f3c4db` | 三任务混合生成器训练 | `t5_aste_augment.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增每个源句每通道最多一行的混合训练；清单记录通道数量和比例；新目录只读复用旧最佳提取器与 hp1 伪标签；新生成器、增强、最终模型和汇总保持隔离；保留 8GB 显存参数和自动续训 | `runs\bgca_aste_stage1_mixed_generator_v1\rest16_to_laptop14` | 已完成：raw F1=44.07、fixed F1=46.06；多三元组增强 63→23；失败模型已删除，释放约 11.65 GB |
 | 2026-07-15 | `0c49ba6 Add isolated neutral generation weighting` | 中性主生成损失独立增权 | `t5_absa_train.py`、`t5_aste_pipeline.py`、`run_bgca_aste_stage1_pairs.py`、3 个测试文件 | 新增只作用于中性样本主生成损失的增益和专用上限；不改变结构损失和非中性多三元组权重；评估新增三类情感指标及中性否定误判；复用 hp1 最终训练集 | 指标与错误分析保留；模型和专属预测已删除 | 已完成：raw F1=43.18、fixed F1=45.76，中性 F1=0，低于最佳 3.64 |
