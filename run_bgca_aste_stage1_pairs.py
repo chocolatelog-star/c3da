@@ -7,6 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from t5_aste_pipeline import (
+    dynamic_multitriplet_config_tag,
+    dynamic_pseudo_filter_tag,
+    positive_finite_float,
+)
+
 
 ASTE_PAIRS = [
     ("rest14", "laptop14"),
@@ -45,6 +51,86 @@ def stage_done(
 ) -> bool:
     marked_done = bool(status.get(stage)) or any(bool(status.get(name)) for name in legacy_stages)
     return marked_done and not rerun and all(path.exists() for path in outputs)
+
+
+def validate_pseudo_provenance(
+    run_dir: Path,
+    model_path: Path,
+    pseudo_source_tag: str,
+) -> tuple[bool, str]:
+    required_paths = (
+        run_dir / "target_pseudo.jsonl",
+        run_dir / "target_pseudo_high_precision.jsonl",
+        run_dir / "target_pseudo_high_precision_analysis.json",
+        run_dir / "target_pseudo_analysis.json",
+        run_dir / "target_pseudo_generation_state.json",
+    )
+    missing = [path.name for path in required_paths if not path.exists()]
+    if missing:
+        return False, f"missing required pseudo artifacts: {', '.join(missing)}"
+
+    try:
+        analysis = read_json(run_dir / "target_pseudo_analysis.json")
+        state = read_json(run_dir / "target_pseudo_generation_state.json")
+        if not isinstance(analysis, dict) or not isinstance(state, dict):
+            return False, "pseudo provenance metadata must contain JSON objects"
+        analysis_model_path = Path(analysis.get("model_path", "")).resolve()
+        state_model_path = Path(state.get("resolved_model_path", "")).resolve()
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False, "pseudo provenance metadata is unreadable"
+
+    if state.get("status") != "complete":
+        return False, f"generation state is {state.get('status')!r}, expected 'complete'"
+    if state_model_path != analysis_model_path:
+        return False, "state and analysis model paths do not match"
+    if state.get("pseudo_source_tag") != analysis.get("pseudo_source_tag"):
+        return False, "state and analysis pseudo source tags do not match"
+    if state_model_path != model_path.resolve():
+        return False, "recorded model path does not match the reused extractor best path"
+    if state.get("pseudo_source_tag") != pseudo_source_tag:
+        return False, "recorded pseudo source tag does not match the current extractor tag"
+    return True, ""
+
+
+def validate_dynamic_pseudo_selection(
+    output_dir: Path,
+    pseudo_source_tag: str,
+    min_pseudo_weight: float,
+    max_token_distance: int,
+    strict: bool = False,
+) -> tuple[bool, str]:
+    required_paths = (
+        output_dir / "target_pseudo_high_precision.jsonl",
+        output_dir / "target_pseudo_high_precision_analysis.json",
+        output_dir / "target_pseudo_generation_state.json",
+    )
+    missing = [path.name for path in required_paths if not path.exists()]
+    if missing:
+        return False, f"missing required dynamic pseudo artifacts: {', '.join(missing)}"
+
+    try:
+        state = read_json(output_dir / "target_pseudo_generation_state.json")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False, "dynamic pseudo selection state is unreadable"
+
+    if state.get("status") != "complete":
+        return False, f"dynamic pseudo selection state is {state.get('status')!r}, expected 'complete'"
+    if state.get("selection_mode") != "dynamic_high_precision":
+        return False, "dynamic pseudo selection mode does not match"
+    if bool(state.get("strict", False)) != bool(strict):
+        return False, "dynamic pseudo strict mode does not match"
+    if state.get("base_pseudo_source_tag") != pseudo_source_tag:
+        return False, "dynamic pseudo selection source tag does not match"
+    try:
+        recorded_min_weight = float(state.get("min_pseudo_weight", -1.0))
+        recorded_token_distance = int(state.get("max_token_distance", -1))
+    except (TypeError, ValueError):
+        return False, "dynamic pseudo selection parameters are invalid"
+    if recorded_min_weight != float(min_pseudo_weight):
+        return False, "dynamic pseudo min weight does not match"
+    if recorded_token_distance != int(max_token_distance):
+        return False, "dynamic pseudo token distance does not match"
+    return True, ""
 
 
 def mark_done(status_path: Path, status: dict, stage: str) -> None:
@@ -88,6 +174,52 @@ def neutral_weight_tag(neutral_loss_gain: float, neutral_max_effective_weight: f
     return f"neutral_gain{gain_tag}_max{max_tag}"
 
 
+def complete_multi_weight_tag(extra_weight: float) -> str:
+    if extra_weight <= 0 or extra_weight > 1:
+        raise ValueError("complete_multi_extra_weight must be in (0, 1]")
+    return f"complete_multi2_w{int(round(extra_weight * 100)):03d}"
+
+
+def complete_dynamic_weight_tag(extra_weight: float, min_triplets: int, max_token_distance: int) -> str:
+    if extra_weight <= 0 or extra_weight > 1:
+        raise ValueError("complete_dynamic_extra_weight must be in (0, 1]")
+    if min_triplets < 2:
+        raise ValueError("complete_dynamic_min_triplets must be at least 2")
+    if max_token_distance < 0:
+        raise ValueError("high_precision_max_token_distance must be non-negative")
+    return f"dynamic_strict{min_triplets}plus_dist{max_token_distance}_w{int(round(extra_weight * 100)):03d}"
+
+
+def append_sentiment_summary_tag(
+    summary_tag: str,
+    loss_weight: float,
+    source_only: bool,
+    class_balanced: bool,
+) -> str:
+    if loss_weight <= 0:
+        return summary_tag
+    loss_tag = str(loss_weight).replace(".", "")
+    suffix = f"sentiment_contrastive_l{loss_tag}"
+    if source_only:
+        suffix += "_source"
+    if class_balanced:
+        suffix += "_balanced"
+    return f"{summary_tag}_{suffix}".strip("_")
+
+
+def compact_float_tag(value: float) -> str:
+    return str(value).replace(".", "")
+
+
+def final_weight_tag(final_pseudo_weight: float, final_augment_weight: float) -> str:
+    parts = []
+    if final_pseudo_weight != 0.5:
+        parts.append(f"pw{compact_float_tag(final_pseudo_weight)}")
+    if final_augment_weight != 0.2:
+        parts.append(f"aw{compact_float_tag(final_augment_weight)}")
+    return "_".join(parts)
+
+
 def legacy_hp1_stage_names(generator_output_tag: str) -> dict[str, tuple[str, ...]]:
     return {
         "augment": (f"augment_{generator_output_tag}",),
@@ -125,6 +257,12 @@ def metric_value(data: dict, *keys: str):
 def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     run_dir = pair_run_dir(Path(args.output_root), source, target)
     upstream_run_dir = Path(args.reuse_upstream_run_dir) if args.reuse_upstream_run_dir else None
+    dynamic_multitriplet = getattr(args, "dynamic_multitriplet", False) or getattr(
+        args,
+        "dynamic_multitriplet_strict",
+        False,
+    )
+    dynamic_multitriplet_strict = getattr(args, "dynamic_multitriplet_strict", False)
     if not args.dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
     status_path = run_dir / "stage_status.json"
@@ -132,6 +270,65 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     gen_tag = generator_tag(args.generator_prompt_style)
     generator_train_file = run_dir / f"c3da_generator_train_{gen_tag}.jsonl"
     generator_dev_file = run_dir / f"c3da_generator_dev_{gen_tag}.jsonl"
+    prepare_stage = f"prepare_{gen_tag}"
+    extract_train_file = run_dir / "extract_train.jsonl"
+    shared_prepare_outputs = [
+        run_dir / "extract_dev.jsonl",
+        run_dir / "source_train.jsonl",
+        run_dir / "source_dev.jsonl",
+        run_dir / "target_unlabeled.jsonl",
+        run_dir / "target_train_gold_analysis.jsonl",
+        run_dir / "target_test.jsonl",
+        generator_train_file,
+        generator_dev_file,
+    ]
+    prepare_outputs = [extract_train_file, *shared_prepare_outputs]
+    dynamic_config_tag = ""
+    if dynamic_multitriplet:
+        source_weights = (
+            getattr(args, "source_count1_weight", 1.0),
+            getattr(args, "source_count2_weight", 1.15),
+            getattr(args, "source_count3_weight", 1.25),
+            getattr(args, "source_count4plus_weight", 1.30),
+        )
+        dynamic_config_tag = dynamic_multitriplet_config_tag(*source_weights)
+        prepare_stage = f"prepare_{dynamic_config_tag}_{gen_tag}"
+        extract_train_file = run_dir / f"extract_train_{dynamic_config_tag}.jsonl"
+        prepare_outputs = [
+            extract_train_file,
+            run_dir / f"extract_train_multitriplet_weight_analysis_{dynamic_config_tag}.json",
+            *shared_prepare_outputs,
+        ]
+
+    extractor_tag = (
+        "extractor_ep25_aste_f1"
+        if dynamic_multitriplet
+        else "extractor_ep25_plain_last"
+    )
+    if dynamic_multitriplet:
+        extractor_tag += f"_{dynamic_config_tag}"
+    if args.extractor_lambda_sentiment_contrastive > 0:
+        extractor_lambda_tag = str(args.extractor_lambda_sentiment_contrastive).replace(".", "")
+        extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
+        if args.sentiment_prototype_initialize_from_context:
+            extractor_tag += "_encoder_context_init"
+    extractor_dir = (upstream_run_dir or run_dir) / "models" / extractor_tag
+    extractor_stage = f"train_{extractor_tag}"
+    if upstream_run_dir is not None:
+        upstream_valid, upstream_reason = validate_pseudo_provenance(
+            upstream_run_dir,
+            extractor_dir / "best",
+            extractor_tag,
+        )
+        if not (extractor_dir / "best" / "config.json").exists():
+            upstream_valid = False
+            upstream_reason = "upstream extractor best/config.json is missing"
+        if not upstream_valid:
+            message = f"cannot validate upstream pseudo provenance: {upstream_reason}"
+            if args.dry_run:
+                print(message, flush=True)
+            else:
+                raise RuntimeError(message)
 
     py = sys.executable
     common_train = [
@@ -153,8 +350,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
 
     if not stage_done(
         status,
-        f"prepare_{gen_tag}",
-        [run_dir / "extract_train.jsonl", generator_train_file, generator_dev_file],
+        prepare_stage,
+        prepare_outputs,
         args.rerun,
     ):
         run_command(
@@ -179,26 +376,33 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--generator_output_tag",
                 gen_tag,
                 "--no_task_prefix",
+                *(
+                    [
+                        "--dynamic_multitriplet",
+                        "--source_count1_weight",
+                        str(source_weights[0]),
+                        "--source_count2_weight",
+                        str(source_weights[1]),
+                        "--source_count3_weight",
+                        str(source_weights[2]),
+                        "--source_count4plus_weight",
+                        str(source_weights[3]),
+                    ]
+                    if dynamic_multitriplet
+                    else []
+                ),
             ],
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, f"prepare_{gen_tag}")
+            mark_done(status_path, status, prepare_stage)
 
-    extractor_tag = "extractor_ep25_plain_last"
-    if args.extractor_lambda_sentiment_contrastive > 0:
-        extractor_lambda_tag = str(args.extractor_lambda_sentiment_contrastive).replace(".", "")
-        extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
-        if args.sentiment_prototype_initialize_from_context:
-            extractor_tag += "_encoder_context_init"
-    extractor_dir = (upstream_run_dir or run_dir) / "models" / extractor_tag
-    extractor_stage = f"train_{extractor_tag}"
     if upstream_run_dir is None and not stage_done(
         status,
         extractor_stage,
         [extractor_dir / "best" / "config.json"],
         args.rerun,
-        legacy_stages=("train_extractor",),
+        legacy_stages=() if dynamic_multitriplet else ("train_extractor",),
     ):
         run_command(
             [
@@ -207,7 +411,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--model_path",
                 args.extractor_model_path,
                 "--train_file",
-                str(run_dir / "extract_train.jsonl"),
+                str(extract_train_file),
                 "--dev_file",
                 str(run_dir / "extract_dev.jsonl"),
                 "--output_dir",
@@ -231,7 +435,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--neutral_loss_gain",
                 "0",
                 "--checkpoint_selection",
-                "last",
+                "aste_f1" if dynamic_multitriplet else "last",
                 "--resume_from_checkpoint",
                 "auto",
                 "--lambda_sentiment_contrastive",
@@ -246,17 +450,24 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, extractor_stage)
 
     pseudo_stage = f"pseudo_{extractor_tag}"
-    if upstream_run_dir is None and not stage_done(
+    pseudo_outputs = [
+        run_dir / "target_pseudo.jsonl",
+        run_dir / "target_pseudo_high_precision.jsonl",
+        run_dir / "target_pseudo_high_precision_analysis.json",
+    ]
+    provenance_matches, _provenance_reason = validate_pseudo_provenance(
+        run_dir,
+        extractor_dir / "best",
+        extractor_tag,
+    )
+    pseudo_is_reusable = stage_done(
         status,
         pseudo_stage,
-        [
-            run_dir / "target_pseudo.jsonl",
-            run_dir / "target_pseudo_high_precision.jsonl",
-            run_dir / "target_pseudo_high_precision_analysis.json",
-        ],
+        pseudo_outputs,
         args.rerun,
-        legacy_stages=("pseudo",),
-    ):
+        legacy_stages=() if dynamic_multitriplet else ("pseudo",),
+    ) and provenance_matches
+    if upstream_run_dir is None and not pseudo_is_reusable:
         run_command(
             [
                 py,
@@ -278,6 +489,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--no_task_prefix",
                 "--pseudo_model_variant",
                 "last",
+                "--pseudo_source_tag",
+                extractor_tag,
                 "--high_precision_max_triplets",
                 "1",
                 "--high_precision_max_token_distance",
@@ -288,18 +501,62 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, pseudo_stage)
 
+    pseudo_input_run_dir = upstream_run_dir or run_dir
+    pseudo_train_file = pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"
+    pseudo_analysis_file = pseudo_input_run_dir / "target_pseudo_high_precision_analysis.json"
     pseudo_tag = pseudo_filter_tag(
         args.high_precision_max_triplets,
         args.high_precision_max_token_distance,
     )
     use_legacy_pseudo_filter = (
-        args.high_precision_max_triplets == 1
+        not dynamic_multitriplet
+        and args.high_precision_max_triplets == 1
         and args.high_precision_max_token_distance == 5
     )
-    pseudo_input_run_dir = upstream_run_dir or run_dir
-    pseudo_train_file = pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"
-    pseudo_analysis_file = pseudo_input_run_dir / "target_pseudo_high_precision_analysis.json"
-    if not use_legacy_pseudo_filter:
+    if dynamic_multitriplet:
+        pseudo_tag = dynamic_pseudo_filter_tag(
+            args.high_precision_max_token_distance,
+            strict=dynamic_multitriplet_strict,
+        )
+        pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / pseudo_tag
+        pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+        pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+        pseudo_selection_state_file = pseudo_variant_dir / "target_pseudo_generation_state.json"
+        pseudo_filter_stage = f"select_dynamic_pseudo_{extractor_tag}_{pseudo_tag}"
+        selection_valid, _selection_reason = validate_dynamic_pseudo_selection(
+            pseudo_variant_dir,
+            extractor_tag,
+            0.65,
+            args.high_precision_max_token_distance,
+            strict=dynamic_multitriplet_strict,
+        )
+        dynamic_selection_reusable = stage_done(
+            status,
+            pseudo_filter_stage,
+            [pseudo_train_file, pseudo_analysis_file, pseudo_selection_state_file],
+            args.rerun,
+        ) and selection_valid
+        if upstream_run_dir is None and not dynamic_selection_reusable:
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "select_dynamic_pseudo",
+                    "--run_dir",
+                    str(run_dir),
+                    "--output_dir",
+                    str(pseudo_variant_dir),
+                    "--min_pseudo_weight",
+                    "0.65",
+                    "--high_precision_max_token_distance",
+                    str(args.high_precision_max_token_distance),
+                    *(["--dynamic_strict"] if dynamic_multitriplet_strict else []),
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, pseudo_filter_stage)
+    elif not use_legacy_pseudo_filter:
         pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / pseudo_tag
         pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
         pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
@@ -331,6 +588,132 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             if not args.dry_run:
                 mark_done(status_path, status, pseudo_filter_stage)
 
+    complete_multi_tag = ""
+    if args.complete_multi_extra_weight > 0:
+        if not use_legacy_pseudo_filter:
+            raise ValueError("complete multi-triplet supplementation requires the hp1_dist5 base filter")
+        base_complete_multi_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
+        complete_multi_tag = base_complete_multi_tag
+        complete_pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / f"hp1_{base_complete_multi_tag.replace('complete_multi2', 'complete2_dist5')}"
+        pseudo_variant_dir = complete_pseudo_variant_dir
+        pseudo_train_file = complete_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+        pseudo_analysis_file = complete_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+        complete_stage = f"select_pseudo_{extractor_tag}_{complete_multi_tag}"
+        if upstream_run_dir is None and not stage_done(
+            status,
+            complete_stage,
+            [pseudo_train_file, pseudo_analysis_file],
+            args.rerun,
+        ):
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "select_complete_multi_pseudo",
+                    "--run_dir",
+                    str(run_dir),
+                    "--output_dir",
+                    str(pseudo_variant_dir),
+                    "--base_pseudo_file",
+                    str(run_dir / "target_pseudo_high_precision.jsonl"),
+                    "--min_pseudo_weight",
+                    "0.65",
+                    "--high_precision_max_token_distance",
+                    "5",
+                    "--complete_multi_extra_weight",
+                    str(args.complete_multi_extra_weight),
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, complete_stage)
+
+        if args.complete_dynamic_extra_weight > 0:
+            dynamic_strict_tag = dynamic_pseudo_filter_tag(
+                args.high_precision_max_token_distance,
+                strict=True,
+            )
+            dynamic_pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / dynamic_strict_tag
+            dynamic_pseudo_train_file = dynamic_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+            dynamic_pseudo_analysis_file = dynamic_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+            dynamic_pseudo_selection_state_file = dynamic_pseudo_variant_dir / "target_pseudo_generation_state.json"
+            dynamic_stage = f"select_dynamic_pseudo_{extractor_tag}_{dynamic_strict_tag}"
+            dynamic_selection_valid, _dynamic_selection_reason = validate_dynamic_pseudo_selection(
+                dynamic_pseudo_variant_dir,
+                extractor_tag,
+                0.65,
+                args.high_precision_max_token_distance,
+                strict=True,
+            )
+            if upstream_run_dir is None and not (
+                stage_done(
+                    status,
+                    dynamic_stage,
+                    [dynamic_pseudo_train_file, dynamic_pseudo_analysis_file, dynamic_pseudo_selection_state_file],
+                    args.rerun,
+                )
+                and dynamic_selection_valid
+            ):
+                run_command(
+                    [
+                        py,
+                        "t5_aste_pipeline.py",
+                        "select_dynamic_pseudo",
+                        "--run_dir",
+                        str(run_dir),
+                        "--output_dir",
+                        str(dynamic_pseudo_variant_dir),
+                        "--min_pseudo_weight",
+                        "0.65",
+                        "--high_precision_max_token_distance",
+                        str(args.high_precision_max_token_distance),
+                        "--dynamic_strict",
+                    ],
+                    args.dry_run,
+                )
+                if not args.dry_run:
+                    mark_done(status_path, status, dynamic_stage)
+
+            dynamic_extra_tag = complete_dynamic_weight_tag(
+                args.complete_dynamic_extra_weight,
+                args.complete_dynamic_min_triplets,
+                args.high_precision_max_token_distance,
+            )
+            complete_multi_tag = f"{base_complete_multi_tag}_{dynamic_extra_tag}"
+            combined_pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / f"hp1_complete2_dist5_w{int(round(args.complete_multi_extra_weight * 100)):03d}_{dynamic_extra_tag}"
+            pseudo_variant_dir = combined_pseudo_variant_dir
+            pseudo_train_file = combined_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+            pseudo_analysis_file = combined_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+            combined_stage = f"select_pseudo_{extractor_tag}_{complete_multi_tag}"
+            if upstream_run_dir is None and not stage_done(
+                status,
+                combined_stage,
+                [pseudo_train_file, pseudo_analysis_file],
+                args.rerun,
+            ):
+                run_command(
+                    [
+                        py,
+                        "t5_aste_pipeline.py",
+                        "select_complete_dynamic_pseudo",
+                        "--run_dir",
+                        str(run_dir),
+                        "--output_dir",
+                        str(combined_pseudo_variant_dir),
+                        "--base_pseudo_file",
+                        str(complete_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"),
+                        "--dynamic_pseudo_file",
+                        str(dynamic_pseudo_train_file),
+                        "--dynamic_extra_weight",
+                        str(args.complete_dynamic_extra_weight),
+                        "--dynamic_min_triplets",
+                        str(args.complete_dynamic_min_triplets),
+                    ],
+                    args.dry_run,
+                )
+                if not args.dry_run:
+                    mark_done(status_path, status, combined_stage)
+
     if upstream_run_dir is not None and not args.dry_run:
         required_upstream_paths = [
             extractor_dir / "best" / "config.json",
@@ -338,10 +721,22 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             pseudo_train_file,
             pseudo_analysis_file,
         ]
+        if dynamic_multitriplet:
+            required_upstream_paths.append(pseudo_selection_state_file)
         missing_paths = [path for path in required_upstream_paths if not path.exists()]
         if missing_paths:
             missing_text = ", ".join(str(path) for path in missing_paths)
             raise FileNotFoundError(f"missing required upstream artifacts: {missing_text}")
+        if dynamic_multitriplet:
+            selection_valid, selection_reason = validate_dynamic_pseudo_selection(
+                pseudo_train_file.parent,
+                extractor_tag,
+                0.65,
+                args.high_precision_max_token_distance,
+                strict=dynamic_multitriplet_strict,
+            )
+            if not selection_valid:
+                raise RuntimeError(f"cannot validate upstream dynamic pseudo selection: {selection_reason}")
 
     generator_dir = run_dir / "models" / f"generator_{gen_tag}_ep{args.generator_epochs}"
     if not stage_done(status, f"train_generator_{gen_tag}", [generator_dir / "best" / "config.json"], args.rerun):
@@ -377,12 +772,17 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, f"train_generator_{gen_tag}")
 
     pseudo_suffix = "" if use_legacy_pseudo_filter else f"_{pseudo_tag}"
+    if complete_multi_tag:
+        pseudo_suffix = f"_{complete_multi_tag}"
     final_tag = augment_experiment_tag(
         f"strict_aug150_w020_{gen_tag}{pseudo_suffix}",
         args.opinion_replacement_mode,
         args.sentiment_vector_backend,
         args.sentiment_vector_use_polarity_axis,
     )
+    final_weight_suffix = final_weight_tag(args.final_pseudo_weight, args.final_augment_weight)
+    if final_weight_suffix:
+        final_tag = f"{final_tag}_{final_weight_suffix}"
     final_train_file = run_dir / f"final_train_{final_tag}.jsonl"
     final_dev_file = run_dir / f"final_dev_{final_tag}.jsonl"
     reuse_for_auxiliary_loss = (
@@ -391,9 +791,131 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         and final_dev_file.exists()
         and not args.rerun
     )
-    legacy_stage_names = legacy_hp1_stage_names(gen_tag) if use_legacy_pseudo_filter else {}
+    legacy_stage_names = (
+        legacy_hp1_stage_names(gen_tag)
+        if use_legacy_pseudo_filter and not complete_multi_tag
+        else {}
+    )
     augment_legacy_stages = legacy_stage_names.get("augment", ())
-    if not reuse_for_auxiliary_loss and not stage_done(
+    if complete_multi_tag:
+        base_augment_tag = augment_experiment_tag(
+            f"strict_aug150_w020_{gen_tag}",
+            args.opinion_replacement_mode,
+            args.sentiment_vector_backend,
+            args.sentiment_vector_use_polarity_axis,
+        )
+        selected_augment_file = run_dir / f"c3da_two_channel_augmented_selected_{base_augment_tag}.jsonl"
+        base_augment_stage = f"augment_{base_augment_tag}"
+        if not reuse_for_auxiliary_loss and (args.rerun or not selected_augment_file.exists()):
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "augment",
+                    "--run_dir",
+                    str(run_dir),
+                    *(
+                        ["--augmentation_input_run_dir", str(upstream_run_dir)]
+                        if upstream_run_dir is not None
+                        else []
+                    ),
+                    "--model_path",
+                    str(generator_dir / "best"),
+                    "--nli_model_path",
+                    args.nli_model_path,
+                    "--augment_prompt_style",
+                    args.augment_prompt_style,
+                    "--augment_channel_mode",
+                    "all",
+                    "--domain_prefix_style",
+                    args.domain_prefix_style,
+                    "--opinion_replacement_mode",
+                    args.opinion_replacement_mode,
+                    "--sentiment_vector_model_path",
+                    args.sentiment_vector_model_path,
+                    "--sentiment_vector_backend",
+                    args.sentiment_vector_backend,
+                    "--glove_path",
+                    args.glove_path,
+                    "--sentiment_vector_min_margin",
+                    str(args.sentiment_vector_min_margin),
+                    "--sentiment_vector_min_old_similarity",
+                    str(args.sentiment_vector_min_old_similarity),
+                    "--sentiment_vector_no_cooccurrence_min_similarity",
+                    str(args.sentiment_vector_no_cooccurrence_min_similarity),
+                    *(["--sentiment_vector_use_polarity_axis"] if args.sentiment_vector_use_polarity_axis else []),
+                    "--augment_output_tag",
+                    base_augment_tag,
+                    "--final_train_output_tag",
+                    base_augment_tag,
+                    "--augment_select_max_rows",
+                    "150",
+                    "--augment_select_max_per_base",
+                    "1",
+                    "--augment_select_weight",
+                    str(args.final_augment_weight),
+                    "--augment_select_max_opinion_ratio",
+                    str(args.augment_select_max_opinion_ratio),
+                    "--augment_select_require_raw_exact",
+                    "--augment_select_require_model_filter_passed",
+                    "--pseudo_train_source",
+                    "high_precision",
+                    "--pseudo_train_file",
+                    str(run_dir / "target_pseudo_high_precision.jsonl"),
+                    "--high_precision_max_triplets",
+                    "1",
+                    "--high_precision_max_token_distance",
+                    "5",
+                    "--model_filter_path",
+                    str(extractor_dir / "best"),
+                    "--model_filter_mode",
+                    "fixed",
+                    "--model_filter_batch_size",
+                    "2",
+                    "--model_filter_num_beams",
+                    "1",
+                    "--model_filter_no_constrained_decoding",
+                    "--model_filter_channel_aware",
+                    "--model_filter_opinion_similarity_min",
+                    str(args.model_filter_opinion_similarity_min),
+                    *(["--model_filter_require_opinion_polarity"] if args.model_filter_require_opinion_polarity else []),
+                    "--cuda",
+                    args.cuda,
+                    "--no_task_prefix",
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, base_augment_stage)
+        build_final_stage = f"build_final_{final_tag}"
+        if not stage_done(
+            status,
+            build_final_stage,
+            [final_train_file, final_dev_file],
+            args.rerun,
+        ):
+            run_command(
+                [
+                    py,
+                    "t5_aste_pipeline.py",
+                    "build_final_train_from_files",
+                    "--run_dir",
+                    str(run_dir),
+                    "--pseudo_train_file",
+                    str(pseudo_train_file),
+                    "--selected_augment_file",
+                    str(selected_augment_file),
+                    "--selected_augment_weight",
+                    str(args.final_augment_weight),
+                    "--final_train_output_tag",
+                    final_tag,
+                    "--no_task_prefix",
+                ],
+                args.dry_run,
+            )
+            if not args.dry_run:
+                mark_done(status_path, status, build_final_stage)
+    elif not reuse_for_auxiliary_loss and not stage_done(
         status,
         f"augment_{final_tag}",
         [final_train_file],
@@ -446,7 +968,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--augment_select_max_per_base",
                 "1",
                 "--augment_select_weight",
-                "0.2",
+                str(args.final_augment_weight),
                 "--augment_select_max_opinion_ratio",
                 str(args.augment_select_max_opinion_ratio),
                 "--augment_select_require_raw_exact",
@@ -532,9 +1054,9 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--source_weight",
                 "1.0",
                 "--pseudo_weight",
-                "0.5",
+                str(args.final_pseudo_weight),
                 "--augment_weight",
-                "0.2",
+                str(args.final_augment_weight),
                 "--checkpoint_selection",
                 "best",
                 "--resume_from_checkpoint",
@@ -582,6 +1104,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     legacy_fixed_metrics_path = run_dir / f"aste_metrics_fixed_{gen_tag}.json"
     if (
         use_legacy_pseudo_filter
+        and not complete_multi_tag
         and not use_neutral_weight_variant
         and args.lambda_sentiment_contrastive == 0
         and args.lambda_pairing_loss == 0
@@ -681,7 +1204,10 @@ def summarize_pair(
         "pseudo_hp_precision": hp_raw.get("precision", ""),
         "pseudo_hp_recall": hp_raw.get("recall", ""),
         "pseudo_hp_f1": hp_raw.get("micro_f1", ""),
-        "augment_selected_rows": augment.get("selected_augmented_rows", ""),
+        "augment_selected_rows": augment.get(
+            "selected_augmented_rows",
+            final_comp.get("selected_augmented_rows", ""),
+        ),
         "final_train_rows": final_comp.get("final_train_rows", ""),
         "raw_precision": raw.get("precision", ""),
         "raw_recall": raw.get("recall", ""),
@@ -880,6 +1406,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neutral_generation_max_effective_weight", type=float, default=0.0)
     parser.add_argument("--high_precision_max_triplets", type=int, default=1)
     parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
+    parser.add_argument("--complete_multi_extra_weight", type=float, default=0.0)
+    parser.add_argument("--complete_dynamic_extra_weight", type=float, default=0.0)
+    parser.add_argument("--complete_dynamic_min_triplets", type=int, default=3)
+    parser.add_argument("--final_pseudo_weight", type=float, default=0.5)
+    parser.add_argument("--final_augment_weight", type=float, default=0.2)
+    parser.add_argument("--dynamic_multitriplet", action="store_true")
+    parser.add_argument("--dynamic_multitriplet_strict", action="store_true")
+    parser.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
+    parser.add_argument("--source_count2_weight", type=positive_finite_float, default=1.15)
+    parser.add_argument("--source_count3_weight", type=positive_finite_float, default=1.25)
+    parser.add_argument("--source_count4plus_weight", type=positive_finite_float, default=1.30)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")
@@ -901,13 +1438,24 @@ def selected_pairs(pairs_text: str) -> list[tuple[str, str]]:
 
 def main() -> None:
     args = parse_args()
+    if args.complete_dynamic_extra_weight > 0 and args.complete_multi_extra_weight <= 0:
+        raise ValueError("--complete_dynamic_extra_weight requires --complete_multi_extra_weight")
     rows = []
     pairs = selected_pairs(args.pairs)
     if args.reuse_upstream_run_dir and len(pairs) != 1:
         raise ValueError("--reuse_upstream_run_dir requires exactly one source:target pair")
-    pseudo_tag = pseudo_filter_tag(
-        args.high_precision_max_triplets,
-        args.high_precision_max_token_distance,
+    if args.dynamic_multitriplet_strict:
+        args.dynamic_multitriplet = True
+    pseudo_tag = (
+        dynamic_pseudo_filter_tag(
+            args.high_precision_max_token_distance,
+            strict=args.dynamic_multitriplet_strict,
+        )
+        if args.dynamic_multitriplet
+        else pseudo_filter_tag(
+            args.high_precision_max_triplets,
+            args.high_precision_max_token_distance,
+        )
     )
     summary_tag = "" if pseudo_tag == "hp1_dist5" else pseudo_tag
     if args.neutral_generation_loss_gain > 0 or args.neutral_generation_max_effective_weight > 0:
@@ -924,6 +1472,20 @@ def main() -> None:
         if args.pairing_source_only:
             pairing_tag += "_source_only"
         summary_tag = f"{summary_tag}_{pairing_tag}".strip("_")
+    if args.complete_multi_extra_weight > 0:
+        complete_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
+        if args.complete_dynamic_extra_weight > 0:
+            complete_tag = f"{complete_tag}_{complete_dynamic_weight_tag(args.complete_dynamic_extra_weight, args.complete_dynamic_min_triplets, args.high_precision_max_token_distance)}"
+        summary_tag = f"{summary_tag}_{complete_tag}".strip("_")
+        summary_tag = append_sentiment_summary_tag(
+            summary_tag,
+            args.lambda_sentiment_contrastive,
+            args.sentiment_contrastive_source_only,
+            args.sentiment_contrastive_class_balanced,
+        )
+    final_weight_suffix = final_weight_tag(args.final_pseudo_weight, args.final_augment_weight)
+    if final_weight_suffix:
+        summary_tag = f"{summary_tag}_{final_weight_suffix}".strip("_")
     for source, target in pairs:
         rows.append(run_pair(args, source, target))
         if not args.dry_run:

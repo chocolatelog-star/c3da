@@ -178,3 +178,54 @@ def micro_f1(predictions: list[str], golds: list[str]) -> dict[str, float]:
         "fp": fp,
         "fn": fn,
     }
+
+
+def triplet_count_bucket(count: int) -> str:
+    if count <= 1:
+        return "count1"
+    if count == 2:
+        return "count2"
+    if count == 3:
+        return "count3"
+    return "count4plus"
+
+
+def micro_f1_by_triplet_count(
+    predictions: list[str], golds: list[str]
+) -> dict[str, dict[str, int | float]]:
+    grouped: dict[str, tuple[list[str], list[str]]] = {
+        bucket: ([], [])
+        for bucket in ("count1", "count2", "count3", "count4plus")
+    }
+    for prediction, gold in zip(predictions, golds):
+        bucket = triplet_count_bucket(len(parse_triplet_text_list(gold)))
+        grouped[bucket][0].append(prediction)
+        grouped[bucket][1].append(gold)
+
+    return {
+        bucket: {"rows": len(bucket_golds), **micro_f1(bucket_predictions, bucket_golds)}
+        for bucket, (bucket_predictions, bucket_golds) in grouped.items()
+    }
+
+
+def triplet_count_diagnostics(predictions: list[str], golds: list[str]) -> dict[str, int | float]:
+    exact_count_rows = under_generated_rows = over_generated_rows = 0
+    rows = 0
+    for prediction, gold in zip(predictions, golds):
+        rows += 1
+        prediction_count = len(parse_triplet_text_list(prediction))
+        gold_count = len(parse_triplet_text_list(gold))
+        if prediction_count == gold_count:
+            exact_count_rows += 1
+        elif prediction_count < gold_count:
+            under_generated_rows += 1
+        else:
+            over_generated_rows += 1
+
+    return {
+        "rows": rows,
+        "exact_count_rows": exact_count_rows,
+        "under_generated_rows": under_generated_rows,
+        "over_generated_rows": over_generated_rows,
+        "exact_count_accuracy": exact_count_rows / rows if rows else 0.0,
+    }

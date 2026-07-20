@@ -6,6 +6,9 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
+from transformers import AutoTokenizer
+
+import t5_absa_train
 import t5_aste_pipeline
 
 
@@ -110,6 +113,41 @@ class EvaluateOutputIsolationTest(unittest.TestCase):
             self.assertEqual(metrics["multi_triplet_rows"]["rows"], 1)
             self.assertEqual(metrics["single_triplet_rows"]["raw"]["micro_f1"], 1.0)
             self.assertEqual(metrics["multi_triplet_rows"]["fixed"]["micro_f1"], 1.0)
+
+    def test_weighted_trainer_strips_generation_only_inputs_before_prediction(self) -> None:
+        inputs = {
+            "input_ids": [1, 2, 3],
+            "attention_mask": [1, 1, 1],
+            "labels": [4, 5, 6],
+            "sample_weight": 0.7,
+            "domain_weight": 0.8,
+            "domain_label": 1,
+            "structure_weight": 0.9,
+            "pairing_mask": [1],
+            "sentiment_contrastive_weights": [0.7],
+        }
+
+        cleaned = t5_absa_train.WeightedSeq2SeqTrainer._strip_generation_only_inputs(inputs)
+
+        self.assertEqual(cleaned["input_ids"], [1, 2, 3])
+        self.assertEqual(cleaned["attention_mask"], [1, 1, 1])
+        self.assertEqual(cleaned["labels"], [4, 5, 6])
+        self.assertNotIn("sample_weight", cleaned)
+        self.assertNotIn("domain_weight", cleaned)
+        self.assertNotIn("domain_label", cleaned)
+        self.assertNotIn("structure_weight", cleaned)
+        self.assertNotIn("pairing_mask", cleaned)
+        self.assertNotIn("sentiment_contrastive_weights", cleaned)
+        self.assertIn("sample_weight", inputs)
+
+    def test_decode_keep_aste_task_tokens_replaces_negative_ids(self) -> None:
+        tokenizer = AutoTokenizer.from_pretrained(
+            r"J:\nlp\models\t5-base-py",
+            local_files_only=True,
+        )
+        text = t5_absa_train.decode_keep_aste_task_tokens(tokenizer, [-100, tokenizer.eos_token_id])
+
+        self.assertEqual(text, "")
 
 
 if __name__ == "__main__":

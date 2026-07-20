@@ -8,6 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,7 +23,12 @@ from transformers import (
 )
 
 from t5_absa_data import read_jsonl
-from t5_aste_data import parse_triplet_text_list
+from t5_aste_data import (
+    micro_f1,
+    micro_f1_by_triplet_count,
+    parse_triplet_text_list,
+    triplet_count_diagnostics,
+)
 
 
 TASK_SPECIAL_TOKENS = ["<pos>", "<neg>", "<neu>", "<opinion>", "<aspect>"]
@@ -43,6 +49,109 @@ TAG_INIT_WORDS = {
     "<aspect>": "aspect",
 }
 SENTIMENT_LABEL_IDS = {"pos": 0, "neg": 1, "neu": 2}
+
+
+def decode_keep_aste_task_tokens(tokenizer, token_ids) -> str:
+    token_ids = [tokenizer.pad_token_id if int(token) < 0 else int(token) for token in token_ids]
+    text = tokenizer.decode(token_ids, skip_special_tokens=False)
+    for token in (
+        tokenizer.pad_token,
+        tokenizer.eos_token,
+        tokenizer.unk_token,
+        "<s>",
+    ):
+        if token:
+            text = text.replace(token, " ")
+    return " ".join(text.split())
+
+
+def _metric_input_to_numpy(value, name: str) -> np.ndarray:
+    if isinstance(value, tuple):
+        if not value:
+            raise ValueError(f"{name} tuple must not be empty")
+        value = value[0]
+    if torch.is_tensor(value):
+        value = value.detach().cpu().numpy()
+    try:
+        return np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be convertible to a numpy array") from exc
+
+
+def build_aste_compute_metrics(tokenizer):
+    if tokenizer.pad_token_id is None:
+        raise ValueError("tokenizer.pad_token_id must be defined for ASTE metrics")
+
+    def compute_metrics(eval_prediction):
+        predictions = _metric_input_to_numpy(eval_prediction.predictions, "predictions")
+        labels = _metric_input_to_numpy(eval_prediction.label_ids, "labels")
+        if predictions.ndim == 3:
+            if predictions.shape[-1] == 0:
+                raise ValueError("predictions logits dimension must not be empty")
+            predictions = predictions.argmax(axis=-1)
+        if predictions.ndim != 2:
+            raise ValueError(
+                f"predictions dimension must be 2 for token ids or 3 for logits; got {predictions.ndim}"
+            )
+        if labels.ndim != 2:
+            raise ValueError(f"labels dimension must be 2; got {labels.ndim}")
+        if predictions.shape[0] != labels.shape[0]:
+            raise ValueError(
+                "predictions and labels batch lengths must match; "
+                f"got {predictions.shape[0]} and {labels.shape[0]}"
+            )
+        labels = labels.copy()
+        labels[labels == -100] = tokenizer.pad_token_id
+
+        prediction_texts = [decode_keep_aste_task_tokens(tokenizer, row) for row in predictions]
+        gold_texts = [decode_keep_aste_task_tokens(tokenizer, row) for row in labels]
+        overall = micro_f1(prediction_texts, gold_texts)
+        grouped = micro_f1_by_triplet_count(prediction_texts, gold_texts)
+        diagnostics = triplet_count_diagnostics(prediction_texts, gold_texts)
+
+        multi_predictions = []
+        multi_golds = []
+        for prediction, gold in zip(prediction_texts, gold_texts):
+            if len(parse_triplet_text_list(gold)) >= 2:
+                multi_predictions.append(prediction)
+                multi_golds.append(gold)
+        multi = micro_f1(multi_predictions, multi_golds)
+
+        metrics = {
+            "micro_f1": overall["micro_f1"],
+            "precision": overall["precision"],
+            "recall": overall["recall"],
+            "multi_micro_f1": multi["micro_f1"],
+            "exact_count_accuracy": diagnostics["exact_count_accuracy"],
+            "under_generated_rows": diagnostics["under_generated_rows"],
+            "over_generated_rows": diagnostics["over_generated_rows"],
+        }
+        for bucket in ("count1", "count2", "count3", "count4plus"):
+            metrics[f"{bucket}_micro_f1"] = grouped[bucket]["micro_f1"]
+        metrics["selection_score"] = metrics["micro_f1"] + 0.001 * metrics["multi_micro_f1"]
+        return metrics
+
+    return compute_metrics
+
+
+def build_checkpoint_selection_config(checkpoint_selection: str) -> dict:
+    if checkpoint_selection not in {"last", "best", "aste_f1"}:
+        raise ValueError(f"unsupported checkpoint selection: {checkpoint_selection}")
+    if checkpoint_selection == "aste_f1":
+        return {
+            "predict_with_generate": True,
+            "generation_num_beams": 1,
+            "generation_max_length": 128,
+            "load_best_model_at_end": True,
+            "metric_for_best_model": "eval_selection_score",
+            "greater_is_better": True,
+        }
+    return {
+        "predict_with_generate": True,
+        "load_best_model_at_end": checkpoint_selection == "best",
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+    }
 
 
 class JsonlSeq2SeqDataset(Dataset):
@@ -485,6 +594,21 @@ def mean_pool_encoder_hidden(hidden: torch.Tensor, attention_mask: torch.Tensor 
 
 
 class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
+    _generation_only_input_keys = {
+        "sample_weight",
+        "domain_weight",
+        "domain_label",
+        "structure_weight",
+        "consistency_group",
+        "pairing_aspect_spans",
+        "pairing_opinion_spans",
+        "pairing_mask",
+        "sentiment_contrastive_spans",
+        "sentiment_contrastive_labels",
+        "sentiment_contrastive_mask",
+        "sentiment_contrastive_weights",
+    }
+
     def __init__(
         self,
         *args,
@@ -513,6 +637,13 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self._component_counts: dict[str, int] = {}
         self._component_reductions: dict[str, str] = {}
 
+    @classmethod
+    def _strip_generation_only_inputs(cls, inputs: dict) -> dict:
+        cleaned = dict(inputs)
+        for key in cls._generation_only_input_keys:
+            cleaned.pop(key, None)
+        return cleaned
+
     def _track_component(self, name: str, value: torch.Tensor | float, reduction: str = "mean") -> None:
         numeric = float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
         self._component_sums[name] = self._component_sums.get(name, 0.0) + numeric
@@ -530,6 +661,16 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             self._component_counts.clear()
             self._component_reductions.clear()
         super().log(logs, *args, **kwargs)
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None, **kwargs):
+        cleaned_inputs = self._strip_generation_only_inputs(inputs)
+        return super().prediction_step(
+            model,
+            cleaned_inputs,
+            prediction_loss_only,
+            ignore_keys=ignore_keys,
+            **kwargs,
+        )
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         sample_weight = inputs.pop("sample_weight", None)
@@ -1062,9 +1203,12 @@ def main() -> None:
     parser.add_argument("--neutral_generation_max_effective_weight", type=float, default=0.0)
     parser.add_argument(
         "--checkpoint_selection",
-        choices=["last", "best"],
+        choices=["last", "best", "aste_f1"],
         default="last",
-        help="last saves the model after the final training step; best saves the checkpoint with the lowest dev eval_loss.",
+        help=(
+            "last saves the final training step; best selects the lowest dev eval_loss; "
+            "aste_f1 selects the highest dev ASTE micro-F1 with multi-triplet F1 as a near-tie breaker."
+        ),
     )
     args = parser.parse_args()
 
@@ -1201,6 +1345,7 @@ def main() -> None:
         pairing_source_only=args.pairing_source_only,
     )
 
+    checkpoint_selection_config = build_checkpoint_selection_config(args.checkpoint_selection)
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
         overwrite_output_dir=True,
@@ -1212,14 +1357,11 @@ def main() -> None:
         logging_steps=args.logging_steps,
         evaluation_strategy="epoch",
         save_strategy="epoch",
-        load_best_model_at_end=args.checkpoint_selection == "best",
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
         save_total_limit=args.save_total_limit,
-        predict_with_generate=True,
         fp16=bool(args.fp16 and torch.cuda.is_available()),
         report_to=[],
         seed=args.seed,
+        **checkpoint_selection_config,
     )
     collator = DataCollatorForSeq2SeqWithPairing(DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model))
     trainer = WeightedSeq2SeqTrainer(
@@ -1238,6 +1380,11 @@ def main() -> None:
         lambda_sentiment_contrastive=args.lambda_sentiment_contrastive,
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
         sentiment_contrastive_class_weights=sentiment_class_weights,
+        compute_metrics=(
+            build_aste_compute_metrics(tokenizer)
+            if args.checkpoint_selection == "aste_f1"
+            else None
+        ),
     )
     if resume_from_checkpoint:
         print(f"resuming from latest checkpoint in {output_dir}")

@@ -6,6 +6,7 @@ import math
 import os
 import re
 from collections import Counter
+from decimal import Decimal
 from pathlib import Path
 
 from t5_aste_augment import (
@@ -26,6 +27,7 @@ from t5_aste_data import (
     read_jsonl,
     split_train_dev,
     to_extract_rows,
+    triplet_count_bucket,
     triplets_to_text,
     write_jsonl,
 )
@@ -649,6 +651,124 @@ def augmentation_channel_analysis(rows: list[dict]) -> dict:
     return analysis
 
 
+def positive_finite_float(value: str | float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("weight must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("weight must be finite and greater than 0")
+    return parsed
+
+
+def validate_source_triplet_count_weights(
+    count1_weight: float,
+    count2_weight: float,
+    count3_weight: float,
+    count4plus_weight: float,
+) -> tuple[float, float, float, float]:
+    values = (
+        ("count1_weight", count1_weight),
+        ("count2_weight", count2_weight),
+        ("count3_weight", count3_weight),
+        ("count4plus_weight", count4plus_weight),
+    )
+    validated = []
+    for name, value in values:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a number") from exc
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise ValueError(f"{name} must be finite and greater than 0")
+        validated.append(parsed)
+    return tuple(validated)
+
+
+def _dynamic_weight_tag_value(weight: float) -> str:
+    decimal_weight = Decimal(str(weight)).normalize()
+    scaled = decimal_weight * Decimal(100)
+    if scaled == scaled.to_integral_value():
+        return str(int(scaled))
+    return f"d{format(decimal_weight, 'f').replace('.', 'p')}"
+
+
+def dynamic_multitriplet_config_tag(
+    count1_weight: float,
+    count2_weight: float,
+    count3_weight: float,
+    count4plus_weight: float,
+) -> str:
+    weights = validate_source_triplet_count_weights(
+        count1_weight,
+        count2_weight,
+        count3_weight,
+        count4plus_weight,
+    )
+    return (
+        "dynamic_multitriplet"
+        f"_c1w{_dynamic_weight_tag_value(weights[0])}"
+        f"_c2w{_dynamic_weight_tag_value(weights[1])}"
+        f"_c3w{_dynamic_weight_tag_value(weights[2])}"
+        f"_c4pw{_dynamic_weight_tag_value(weights[3])}"
+    )
+
+
+def assign_source_triplet_count_weights(
+    rows: list[dict],
+    count1_weight: float = 1.0,
+    count2_weight: float = 1.15,
+    count3_weight: float = 1.25,
+    count4plus_weight: float = 1.30,
+) -> tuple[list[dict], dict]:
+    count1_weight, count2_weight, count3_weight, count4plus_weight = (
+        validate_source_triplet_count_weights(
+            count1_weight,
+            count2_weight,
+            count3_weight,
+            count4plus_weight,
+        )
+    )
+    bucket_weights = {
+        "count1": count1_weight,
+        "count2": count2_weight,
+        "count3": count3_weight,
+        "count4plus": count4plus_weight,
+    }
+    grouped_weights = {bucket: [] for bucket in bucket_weights}
+    weighted_rows = []
+    source_weighted_rows = []
+    for row in rows:
+        weighted_row = dict(row)
+        is_source_gold = row.get("augmentation") == "source_gold" or "augmentation" not in row
+        if is_source_gold:
+            triplet_count = len(parse_triplet_text_list(row.get("label", "")))
+            bucket = triplet_count_bucket(triplet_count)
+            selected_weight = float(bucket_weights[bucket])
+            weighted_row.update(
+                {
+                    "sample_weight": selected_weight,
+                    "source_triplet_count": triplet_count,
+                    "source_triplet_count_bucket": bucket,
+                    "source_triplet_count_weight": selected_weight,
+                }
+            )
+            grouped_weights[bucket].append(selected_weight)
+            source_weighted_rows.append(weighted_row)
+        weighted_rows.append(weighted_row)
+
+    stats = {}
+    for bucket, weights in grouped_weights.items():
+        stats[bucket] = {
+            "rows": len(weights),
+            "weight_mean": sum(weights) / len(weights) if weights else None,
+            "weight_min": min(weights) if weights else None,
+            "weight_max": max(weights) if weights else None,
+        }
+    stats["sample_weight_summary"] = sample_weight_summary(source_weighted_rows)
+    return weighted_rows, stats
+
+
 OPINION_AUGMENT_CHANNELS = {
     "opinion_sentiment_channel",
     "masked_opinion_sentiment_channel",
@@ -745,7 +865,14 @@ def aspect_opinion_token_distance(text: str, aspect: str, opinion: str) -> int |
     return 0
 
 
-def pseudo_reject_reason(row: dict, min_weight: float = 0.65, max_triplets: int = 3) -> str:
+def dynamic_pseudo_filter_tag(max_token_distance: int, strict: bool = False) -> str:
+    if max_token_distance < 0:
+        raise ValueError("high_precision_max_token_distance must be non-negative")
+    prefix = "dynamic_strict" if strict else "dynamic"
+    return f"{prefix}_dist{max_token_distance}"
+
+
+def _pseudo_row_base_reject_reason(row: dict, min_weight: float = 0.65) -> str:
     label = canonicalize_triplet_text(row.get("label", ""))
     triplets = parse_triplet_text_list(label)
     flags = row.get("quality_flags") or {}
@@ -757,11 +884,20 @@ def pseudo_reject_reason(row: dict, min_weight: float = 0.65, max_triplets: int 
         return "fixed_changed"
     if not flags.get("all_terms_in_text", False):
         return "terms_not_in_text"
-    if len(triplets) > max_triplets:
-        return "too_many_triplets"
     for aspect, opinion, _sentiment in triplets:
         if aspect.strip().lower() in NOISY_PSEUDO_TERMS or opinion.strip().lower() in NOISY_PSEUDO_TERMS:
             return "noisy_term"
+    return ""
+
+
+def pseudo_reject_reason(row: dict, min_weight: float = 0.65, max_triplets: int = 3) -> str:
+    label = canonicalize_triplet_text(row.get("label", ""))
+    triplets = parse_triplet_text_list(label)
+    base_reason = _pseudo_row_base_reject_reason(row, min_weight=min_weight)
+    if base_reason:
+        return base_reason
+    if len(triplets) > max_triplets:
+        return "too_many_triplets"
     return ""
 
 
@@ -859,6 +995,244 @@ def select_high_precision_pseudo_rows(
     for reason, count in sorted(removed_triplet_counts.items()):
         stats[f"removed_triplets_by_{reason}"] = count
     return selected, stats
+
+
+def select_dynamic_high_precision_pseudo_rows(
+    rows: list[dict],
+    min_weight: float = 0.65,
+    max_token_distance: int = 5,
+    strict: bool = False,
+) -> tuple[list[dict], dict]:
+    selected = []
+    rejected_counts: Counter[str] = Counter()
+    removed_triplet_counts: Counter[str] = Counter()
+    fully_kept_rows = 0
+    partially_kept_rows = 0
+    empty_after_filter_rows = 0
+    triplet_count_before: Counter[int] = Counter()
+    triplet_count_after: Counter[int] = Counter()
+
+    for row in rows:
+        label = canonicalize_triplet_text(row.get("label", ""))
+        triplets = parse_triplet_text_list(label)
+        base_reason = _pseudo_row_base_reject_reason(row, min_weight=min_weight)
+        if base_reason:
+            rejected_counts[base_reason] += 1
+            continue
+
+        kept_triplets = []
+        removed_triplets = []
+        for triplet in triplets:
+            reason = high_precision_triplet_reject_reason(
+                row,
+                triplet,
+                max_token_distance=max_token_distance,
+            )
+            if reason:
+                removed_triplet_counts[reason] += 1
+                removed_triplets.append(
+                    {
+                        "triplet": canonicalize_triplet_text(triplets_to_text([triplet])),
+                        "reason": reason,
+                    }
+                )
+                continue
+            kept_triplets.append(triplet)
+
+        if not kept_triplets:
+            empty_after_filter_rows += 1
+            rejected_counts["empty_after_triplet_filter"] += 1
+            continue
+
+        original_count = len(triplets)
+        kept_count = len(kept_triplets)
+        if strict and kept_count != original_count:
+            rejected_counts["partial_after_triplet_filter"] += 1
+            continue
+
+        triplet_count_before[original_count] += 1
+        triplet_count_after[kept_count] += 1
+        if kept_count == original_count:
+            fully_kept_rows += 1
+        else:
+            partially_kept_rows += 1
+
+        original_weight = float(row.get("sample_weight", 0.0) or 0.0)
+        base_weight = min(0.65, original_weight)
+        retention_ratio = kept_count / original_count
+        change_factor = 1.0 if kept_count == original_count else 0.85
+        sample_weight = max(0.25, round(base_weight * retention_ratio * change_factor, 6))
+        original_label = canonicalize_triplet_text(label)
+        selected.append(
+            {
+                **row,
+                "label": canonicalize_triplet_text(triplets_to_text(kept_triplets)),
+                "sample_weight": sample_weight,
+                "high_precision_pseudo": True,
+                "dynamic_high_precision_pseudo": True,
+                "dynamic_strict_high_precision_pseudo": strict,
+                "high_precision_original_label": original_label,
+                "dynamic_original_label": original_label,
+                "high_precision_triplet_count_before": original_count,
+                "high_precision_triplet_count_after": kept_count,
+                "dynamic_triplet_count_before": original_count,
+                "dynamic_triplet_count_after": kept_count,
+                "dynamic_removed_triplets": removed_triplets,
+                "dynamic_retention_ratio": round(retention_ratio, 6),
+            }
+        )
+
+    stats = {
+        "input_rows": len(rows),
+        "selected_rows": len(selected),
+        "rejected_rows": len(rows) - len(selected),
+        "fully_kept_rows": fully_kept_rows,
+        "partially_kept_rows": partially_kept_rows,
+        "empty_after_filter_rows": empty_after_filter_rows,
+        "min_weight": min_weight,
+        "max_token_distance": max_token_distance,
+        "strict": strict,
+        "triplet_count_before": dict(sorted(triplet_count_before.items())),
+        "triplet_count_after": dict(sorted(triplet_count_after.items())),
+        "sample_weight_summary": sample_weight_summary(selected),
+        "sentiment_distribution": sentiment_distribution(selected),
+    }
+    for reason, count in sorted(rejected_counts.items()):
+        stats[f"rejected_{reason}"] = count
+    for reason, count in sorted(removed_triplet_counts.items()):
+        stats[f"removed_triplets_by_{reason}"] = count
+    return selected, stats
+
+
+def _pseudo_row_identity(row: dict) -> tuple[str, str]:
+    row_id = str(row.get("id", "")).strip()
+    if row_id:
+        return "id", row_id
+    return "text", " ".join(str(row.get("text", "")).lower().split())
+
+
+def build_complete_multitriplet_pseudo_rows(
+    base_rows: list[dict],
+    candidate_rows: list[dict],
+    extra_weight: float = 0.25,
+) -> tuple[list[dict], dict]:
+    if not math.isfinite(extra_weight) or extra_weight <= 0:
+        raise ValueError("extra_weight must be a positive finite number")
+
+    merged_rows = [dict(row) for row in base_rows]
+    seen = {_pseudo_row_identity(row) for row in base_rows}
+    complete_candidates = 0
+    cropped_rejected = 0
+    changed_rejected = 0
+    duplicate_rejected = 0
+
+    for row in candidate_rows:
+        before = int(row.get("high_precision_triplet_count_before", 0) or 0)
+        after = int(row.get("high_precision_triplet_count_after", 0) or 0)
+        if before != 2 or after != 2:
+            if before == 2:
+                cropped_rejected += 1
+            continue
+        complete_candidates += 1
+        label = canonicalize_triplet_text(row.get("label", ""))
+        original_label = canonicalize_triplet_text(row.get("high_precision_original_label", label))
+        if label != original_label:
+            changed_rejected += 1
+            continue
+        identity = _pseudo_row_identity(row)
+        if identity in seen:
+            duplicate_rejected += 1
+            continue
+        seen.add(identity)
+        merged_rows.append(
+            {
+                **row,
+                "label": label,
+                "sample_weight": extra_weight,
+                "pseudo_mix_source": "complete_multi2_extra",
+            }
+        )
+
+    analysis = {
+        "base_rows": len(base_rows),
+        "candidate_rows": len(candidate_rows),
+        "complete_multi2_candidates": complete_candidates,
+        "cropped_multi2_rejected": cropped_rejected,
+        "changed_multi2_rejected": changed_rejected,
+        "duplicate_rows_rejected": duplicate_rejected,
+        "extra_rows": len(merged_rows) - len(base_rows),
+        "final_rows": len(merged_rows),
+        "selected_rows": len(merged_rows),
+        "extra_weight": extra_weight,
+        "sample_weight_summary": sample_weight_summary(merged_rows),
+        "sentiment_distribution": sentiment_distribution(merged_rows),
+    }
+    return merged_rows, analysis
+
+
+def build_complete_multitriplet_dynamic_pseudo_rows(
+    base_rows: list[dict],
+    dynamic_rows: list[dict],
+    extra_weight: float = 0.2,
+    min_triplets: int = 3,
+) -> tuple[list[dict], dict]:
+    if not math.isfinite(extra_weight) or extra_weight <= 0:
+        raise ValueError("extra_weight must be a positive finite number")
+    if min_triplets < 2:
+        raise ValueError("min_triplets must be at least 2")
+
+    merged_rows = [dict(row) for row in base_rows]
+    seen = {_pseudo_row_identity(row) for row in base_rows}
+    candidates = 0
+    too_few_rejected = 0
+    not_strict_rejected = 0
+    cropped_rejected = 0
+    duplicate_rejected = 0
+
+    for row in dynamic_rows:
+        before = int(row.get("dynamic_triplet_count_before", 0) or 0)
+        after = int(row.get("dynamic_triplet_count_after", 0) or 0)
+        if before < min_triplets:
+            too_few_rejected += 1
+            continue
+        candidates += 1
+        if not row.get("dynamic_strict_high_precision_pseudo", False):
+            not_strict_rejected += 1
+            continue
+        if after != before:
+            cropped_rejected += 1
+            continue
+        identity = _pseudo_row_identity(row)
+        if identity in seen:
+            duplicate_rejected += 1
+            continue
+        seen.add(identity)
+        merged_rows.append(
+            {
+                **row,
+                "label": canonicalize_triplet_text(row.get("label", "")),
+                "sample_weight": extra_weight,
+                "pseudo_mix_source": f"dynamic_strict_{min_triplets}plus_extra",
+            }
+        )
+
+    analysis = {
+        "base_rows": len(base_rows),
+        "dynamic_candidate_rows": len(dynamic_rows),
+        f"dynamic_{min_triplets}plus_candidates": candidates,
+        "dynamic_too_few_triplets_rejected": too_few_rejected,
+        "dynamic_not_strict_rejected": not_strict_rejected,
+        "dynamic_cropped_rejected": cropped_rejected,
+        "duplicate_rows_rejected": duplicate_rejected,
+        "dynamic_extra_rows": len(merged_rows) - len(base_rows),
+        "final_rows": len(merged_rows),
+        "selected_rows": len(merged_rows),
+        "dynamic_extra_weight": extra_weight,
+        "dynamic_min_triplets": min_triplets,
+        "sample_weight_summary": sample_weight_summary(merged_rows),
+        "sentiment_distribution": sentiment_distribution(merged_rows),
+    }
+    return merged_rows, analysis
 
 
 def pseudo_confidence_score(row: dict) -> float:
@@ -1912,7 +2286,34 @@ def prepare(args: argparse.Namespace) -> None:
     write_jsonl(run_dir / "target_train_gold_analysis.jsonl", target_train_rows)
     write_jsonl(run_dir / "target_test.jsonl", target_test_rows)
     use_task_prefix = not args.no_task_prefix
-    write_jsonl(run_dir / "extract_train.jsonl", to_extract_rows(source_rows, use_task_prefix=use_task_prefix))
+    extract_train_rows = to_extract_rows(source_rows, use_task_prefix=use_task_prefix)
+    dynamic_multitriplet = getattr(args, "dynamic_multitriplet", False)
+    extract_train_path = run_dir / "extract_train.jsonl"
+    if dynamic_multitriplet:
+        source_weights = (
+            getattr(args, "source_count1_weight", 1.0),
+            getattr(args, "source_count2_weight", 1.15),
+            getattr(args, "source_count3_weight", 1.25),
+            getattr(args, "source_count4plus_weight", 1.30),
+        )
+        config_tag = dynamic_multitriplet_config_tag(*source_weights)
+        extract_train_rows, multitriplet_weight_stats = assign_source_triplet_count_weights(
+            extract_train_rows,
+            count1_weight=source_weights[0],
+            count2_weight=source_weights[1],
+            count3_weight=source_weights[2],
+            count4plus_weight=source_weights[3],
+        )
+        extract_train_path = tagged_output_path(run_dir, "extract_train.jsonl", config_tag)
+        dump_json(
+            tagged_output_path(
+                run_dir,
+                "extract_train_multitriplet_weight_analysis.json",
+                config_tag,
+            ),
+            multitriplet_weight_stats,
+        )
+    write_jsonl(extract_train_path, extract_train_rows)
     write_jsonl(run_dir / "extract_dev.jsonl", to_extract_rows(source_dev_rows, use_task_prefix=use_task_prefix))
     generator_train_rows = build_generator_training_rows(
         source_rows,
@@ -1987,6 +2388,19 @@ def pseudo(args: argparse.Namespace) -> None:
         explicit_model_path=args.model_path,
         variant=args.pseudo_model_variant,
     )
+    pseudo_provenance = {
+        "model_path": str(model_path.resolve()),
+        "pseudo_source_tag": getattr(args, "pseudo_source_tag", ""),
+    }
+    generation_state_path = run_dir / "target_pseudo_generation_state.json"
+    dump_json(
+        generation_state_path,
+        {
+            "status": "in_progress",
+            "resolved_model_path": pseudo_provenance["model_path"],
+            "pseudo_source_tag": pseudo_provenance["pseudo_source_tag"],
+        },
+    )
     preds = generate_texts(
         model_path=model_path,
         inputs=build_extract_inputs(target_rows, use_task_prefix=not args.no_task_prefix),
@@ -2033,6 +2447,7 @@ def pseudo(args: argparse.Namespace) -> None:
     if gold_path.exists():
         gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
         analysis, analysis_rows = build_pseudo_analysis(target_rows, pseudo_rows, gold_rows)
+        analysis.update(pseudo_provenance)
         analysis["sample_weight_summary"] = sample_weight_summary(pseudo_rows)
         selected_stats["hidden_gold_eval"] = evaluate_selected_pseudo_against_hidden_gold(
             selected_rows,
@@ -2055,6 +2470,18 @@ def pseudo(args: argparse.Namespace) -> None:
         dump_json(run_dir / "target_pseudo_train_selected_analysis.json", train_selected_stats)
         write_jsonl(run_dir / "target_pseudo_predictions_analysis.jsonl", analysis_rows)
         print(analysis)
+    else:
+        dump_json(run_dir / "target_pseudo_analysis.json", pseudo_provenance)
+    dump_json(
+        generation_state_path,
+        {
+            "status": "complete",
+            "resolved_model_path": pseudo_provenance["model_path"],
+            "pseudo_source_tag": pseudo_provenance["pseudo_source_tag"],
+            "pseudo_rows": len(pseudo_rows),
+            "high_precision_rows": len(high_precision_rows),
+        },
+    )
     print(f"pseudo rows={len(pseudo_rows)}")
 
 
@@ -2114,6 +2541,256 @@ def select_pseudo(args: argparse.Namespace) -> None:
             "high_precision_hidden_gold_eval": high_precision_stats.get("hidden_gold_eval", {}),
         }
     )
+
+
+def select_dynamic_pseudo(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir)
+    strict = getattr(args, "dynamic_strict", False)
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir
+        else run_dir / "pseudo_variants" / dynamic_pseudo_filter_tag(
+            args.high_precision_max_token_distance,
+            strict=strict,
+        )
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_pseudo_path = run_dir / "target_pseudo.jsonl"
+    state_path = output_dir / "target_pseudo_generation_state.json"
+    base_analysis_path = run_dir / "target_pseudo_analysis.json"
+    base_state_path = run_dir / "target_pseudo_generation_state.json"
+    base_analysis = json.loads(base_analysis_path.read_text(encoding="utf-8")) if base_analysis_path.exists() else {}
+    base_state = json.loads(base_state_path.read_text(encoding="utf-8")) if base_state_path.exists() else {}
+    state = {
+        "status": "in_progress",
+        "selection_mode": "dynamic_high_precision",
+        "strict": strict,
+        "source_pseudo_path": str(source_pseudo_path),
+        "min_pseudo_weight": args.min_pseudo_weight,
+        "max_token_distance": args.high_precision_max_token_distance,
+        "base_model_path": base_analysis.get("model_path", ""),
+        "base_pseudo_source_tag": base_analysis.get("pseudo_source_tag", ""),
+        "base_generation_status": base_state.get("status", ""),
+    }
+    dump_json(state_path, state)
+    if base_state and base_state.get("status") != "complete":
+        raise RuntimeError(
+            f"base pseudo generation state is {base_state.get('status')!r}, expected 'complete'"
+        )
+
+    pseudo_rows = read_jsonl(source_pseudo_path)
+    dynamic_rows, dynamic_stats = select_dynamic_high_precision_pseudo_rows(
+        pseudo_rows,
+        min_weight=args.min_pseudo_weight,
+        max_token_distance=args.high_precision_max_token_distance,
+        strict=strict,
+    )
+    gold_path = run_dir / "target_train_gold_analysis.jsonl"
+    if gold_path.exists():
+        gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
+        dynamic_stats["hidden_gold_eval"] = evaluate_selected_pseudo_against_hidden_gold(
+            dynamic_rows,
+            gold_rows,
+            name="dynamic_high_precision",
+        )
+    dynamic_stats.update(
+        {
+            "selection_mode": "dynamic_high_precision",
+            "strict": strict,
+            "source_pseudo_file": str(source_pseudo_path),
+            "base_model_path": base_analysis.get("model_path", ""),
+            "base_pseudo_source_tag": base_analysis.get("pseudo_source_tag", ""),
+        }
+    )
+    write_jsonl(output_dir / "target_pseudo_high_precision.jsonl", dynamic_rows)
+    dump_json(output_dir / "target_pseudo_high_precision_analysis.json", dynamic_stats)
+    dump_json(
+        state_path,
+        {
+            **state,
+            "status": "complete",
+            "selected_rows": len(dynamic_rows),
+            "rejected_rows": dynamic_stats["rejected_rows"],
+        },
+    )
+    print(
+        {
+            "output_dir": str(output_dir),
+            "dynamic_high_precision_rows": len(dynamic_rows),
+            "hidden_gold_eval": dynamic_stats.get("hidden_gold_eval", {}),
+        }
+    )
+
+
+def select_complete_multi_pseudo(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir)
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir
+        else run_dir / "pseudo_variants" / "hp1_complete2_dist5_w025"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_path = (
+        Path(args.base_pseudo_file)
+        if args.base_pseudo_file
+        else run_dir / "target_pseudo_high_precision.jsonl"
+    )
+    base_rows = read_jsonl(base_path)
+    raw_rows = read_jsonl(run_dir / "target_pseudo.jsonl")
+    hp2_rows, hp2_stats = select_high_precision_pseudo_rows(
+        raw_rows,
+        min_weight=args.min_pseudo_weight,
+        max_triplets=2,
+        max_token_distance=args.high_precision_max_token_distance,
+    )
+    merged_rows, analysis = build_complete_multitriplet_pseudo_rows(
+        base_rows,
+        hp2_rows,
+        extra_weight=args.complete_multi_extra_weight,
+    )
+    analysis.update(
+        {
+            "base_pseudo_file": str(base_path),
+            "source_pseudo_file": str(run_dir / "target_pseudo.jsonl"),
+            "max_token_distance": args.high_precision_max_token_distance,
+            "hp2_filter_stats": hp2_stats,
+        }
+    )
+    gold_path = run_dir / "target_train_gold_analysis.jsonl"
+    if gold_path.exists():
+        gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
+        analysis["hidden_gold_eval"] = evaluate_selected_pseudo_against_hidden_gold(
+            merged_rows,
+            gold_rows,
+            name="hp1_complete_multi2",
+        )
+    write_jsonl(output_dir / "target_pseudo_high_precision.jsonl", merged_rows)
+    dump_json(output_dir / "target_pseudo_high_precision_analysis.json", analysis)
+    print(
+        {
+            "output_dir": str(output_dir),
+            "base_rows": analysis["base_rows"],
+            "extra_rows": analysis["extra_rows"],
+            "final_rows": analysis["final_rows"],
+            "hidden_gold_eval": analysis.get("hidden_gold_eval", {}),
+        }
+    )
+
+
+def select_complete_dynamic_pseudo(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_path = Path(args.base_pseudo_file)
+    dynamic_path = Path(args.dynamic_pseudo_file)
+    base_rows = read_jsonl(base_path)
+    dynamic_rows = read_jsonl(dynamic_path)
+    merged_rows, analysis = build_complete_multitriplet_dynamic_pseudo_rows(
+        base_rows,
+        dynamic_rows,
+        extra_weight=args.dynamic_extra_weight,
+        min_triplets=args.dynamic_min_triplets,
+    )
+    analysis.update(
+        {
+            "base_pseudo_file": str(base_path),
+            "dynamic_pseudo_file": str(dynamic_path),
+        }
+    )
+    gold_path = run_dir / "target_train_gold_analysis.jsonl"
+    if gold_path.exists():
+        gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
+        analysis["hidden_gold_eval"] = evaluate_selected_pseudo_against_hidden_gold(
+            merged_rows,
+            gold_rows,
+            name="hp1_complete_multi2_dynamic_strict_3plus",
+        )
+    write_jsonl(output_dir / "target_pseudo_high_precision.jsonl", merged_rows)
+    dump_json(output_dir / "target_pseudo_high_precision_analysis.json", analysis)
+    print(
+        {
+            "output_dir": str(output_dir),
+            "base_rows": analysis["base_rows"],
+            "dynamic_extra_rows": analysis["dynamic_extra_rows"],
+            "final_rows": analysis["final_rows"],
+            "hidden_gold_eval": analysis.get("hidden_gold_eval", {}),
+        }
+    )
+
+
+def build_final_train_from_files(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir)
+    source_rows = read_jsonl(run_dir / "source_train.jsonl")
+    source_dev_rows = read_jsonl(run_dir / "source_dev.jsonl")
+    pseudo_path = Path(args.pseudo_train_file)
+    pseudo_rows = read_jsonl(pseudo_path)
+    augment_path = Path(args.selected_augment_file) if args.selected_augment_file else None
+    augmented_rows = read_jsonl(augment_path) if augment_path is not None else []
+    selected_augment_weight = getattr(args, "selected_augment_weight", 0.0)
+    if selected_augment_weight > 0:
+        augmented_rows = [
+            {
+                **row,
+                "sample_weight": round(selected_augment_weight, 6),
+                "original_sample_weight": row.get("sample_weight"),
+            }
+            for row in augmented_rows
+        ]
+    include_source = not args.no_final_train_source
+    final_rows = build_final_training_rows(
+        source_rows,
+        pseudo_rows,
+        augmented_rows,
+        include_source=include_source,
+    )
+    final_rows, weight_stats = assign_final_training_weights(
+        final_rows,
+        multi_triplet_gain=args.final_multi_triplet_gain,
+        neutral_gain=args.final_neutral_gain,
+        max_weight=args.final_max_weight,
+    )
+    output_tag = args.final_train_output_tag
+    pseudo_eval = {"enabled": False}
+    gold_path = run_dir / "target_train_gold_analysis.jsonl"
+    if gold_path.exists():
+        gold_rows = {row["id"]: row for row in read_jsonl(gold_path)}
+        pseudo_eval = {
+            "enabled": True,
+            **evaluate_selected_pseudo_against_hidden_gold(
+                pseudo_rows,
+                gold_rows,
+                name=output_tag or "file_pseudo",
+            ),
+        }
+        dump_json(
+            tagged_output_path(run_dir, "target_pseudo_used_for_training_analysis.json", output_tag),
+            pseudo_eval,
+        )
+    manifest = {
+        "builder": "build_final_train_from_files",
+        "pseudo_train_file": str(pseudo_path),
+        "selected_augment_file": str(augment_path) if augment_path is not None else "",
+        "selected_augment_weight_override": selected_augment_weight,
+        "source_rows_available": len(source_rows),
+        "source_rows_used": len(source_rows) if include_source else 0,
+        "final_train_include_source": include_source,
+        "pseudo_rows_used": len(pseudo_rows),
+        "selected_augmented_rows": len(augmented_rows),
+        "final_train_rows": len(final_rows),
+        "pseudo_train_hidden_gold_eval": pseudo_eval,
+        "final_weight_stats": weight_stats,
+    }
+    dump_json(tagged_output_path(run_dir, "final_train_weight_analysis.json", output_tag), weight_stats)
+    dump_json(tagged_output_path(run_dir, "final_train_composition_analysis.json", output_tag), manifest)
+    write_jsonl(
+        tagged_output_path(run_dir, "final_train.jsonl", output_tag),
+        to_extract_rows(final_rows, use_task_prefix=not args.no_task_prefix),
+    )
+    write_jsonl(
+        tagged_output_path(run_dir, "final_dev.jsonl", output_tag),
+        to_extract_rows(source_dev_rows, use_task_prefix=not args.no_task_prefix),
+    )
+    print(manifest)
 
 
 def memory(args: argparse.Namespace) -> None:
@@ -2713,6 +3390,11 @@ def main() -> None:
     p.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     p.add_argument("--generator_output_tag", default="")
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--dynamic_multitriplet", action="store_true")
+    p.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
+    p.add_argument("--source_count2_weight", type=positive_finite_float, default=1.15)
+    p.add_argument("--source_count3_weight", type=positive_finite_float, default=1.25)
+    p.add_argument("--source_count4plus_weight", type=positive_finite_float, default=1.30)
     p.set_defaults(func=prepare)
 
     p = sub.add_parser("pseudo")
@@ -2727,6 +3409,7 @@ def main() -> None:
     p.add_argument("--no_constrained_decoding", action="store_true")
     p.add_argument("--pseudo_base_weight", type=float, default=0.5)
     p.add_argument("--pseudo_model_variant", choices=["best", "last"], default="best")
+    p.add_argument("--pseudo_source_tag", default="")
     p.add_argument("--high_precision_max_triplets", type=int, default=1)
     p.add_argument("--high_precision_max_token_distance", type=int, default=5)
     p.add_argument("--fixed_changed_min_score", type=float, default=0.65)
@@ -2852,6 +3535,45 @@ def main() -> None:
     p.add_argument("--fixed_changed_min_score", type=float, default=0.65)
     p.add_argument("--fixed_changed_weight", type=float, default=0.35)
     p.set_defaults(func=select_pseudo)
+
+    p = sub.add_parser("select_dynamic_pseudo")
+    p.add_argument("--run_dir", required=True)
+    p.add_argument("--output_dir", default="")
+    p.add_argument("--min_pseudo_weight", type=float, default=0.65)
+    p.add_argument("--high_precision_max_token_distance", type=int, default=5)
+    p.add_argument("--dynamic_strict", action="store_true")
+    p.set_defaults(func=select_dynamic_pseudo)
+
+    p = sub.add_parser("select_complete_multi_pseudo")
+    p.add_argument("--run_dir", required=True)
+    p.add_argument("--output_dir", default="")
+    p.add_argument("--base_pseudo_file", default="")
+    p.add_argument("--min_pseudo_weight", type=float, default=0.65)
+    p.add_argument("--high_precision_max_token_distance", type=int, default=5)
+    p.add_argument("--complete_multi_extra_weight", type=float, default=0.25)
+    p.set_defaults(func=select_complete_multi_pseudo)
+
+    p = sub.add_parser("select_complete_dynamic_pseudo")
+    p.add_argument("--run_dir", required=True)
+    p.add_argument("--output_dir", required=True)
+    p.add_argument("--base_pseudo_file", required=True)
+    p.add_argument("--dynamic_pseudo_file", required=True)
+    p.add_argument("--dynamic_extra_weight", type=float, default=0.2)
+    p.add_argument("--dynamic_min_triplets", type=int, default=3)
+    p.set_defaults(func=select_complete_dynamic_pseudo)
+
+    p = sub.add_parser("build_final_train_from_files")
+    p.add_argument("--run_dir", required=True)
+    p.add_argument("--pseudo_train_file", required=True)
+    p.add_argument("--selected_augment_file", default="")
+    p.add_argument("--selected_augment_weight", type=float, default=0.0)
+    p.add_argument("--final_train_output_tag", required=True)
+    p.add_argument("--no_final_train_source", action="store_true")
+    p.add_argument("--final_multi_triplet_gain", type=float, default=0.0)
+    p.add_argument("--final_neutral_gain", type=float, default=0.0)
+    p.add_argument("--final_max_weight", type=float, default=1.0)
+    p.add_argument("--no_task_prefix", action="store_true")
+    p.set_defaults(func=build_final_train_from_files)
 
     args = parser.parse_args()
     args.func(args)
