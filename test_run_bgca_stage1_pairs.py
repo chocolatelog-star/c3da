@@ -746,7 +746,7 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn(f"--pseudo_train_file {upstream}\\target_pseudo_high_precision.jsonl", output)
         self.assertIn(f"--model_filter_path {upstream_extractor}", output)
         self.assertIn("generator_mixed_l2t_masked_aspect_masked_opinion_ep8", output)
-        self.assertIn("cannot validate upstream pseudo provenance", output)
+        self.assertNotIn("cannot validate upstream pseudo provenance", output)
 
     def test_reuse_upstream_accepts_complete_self_consistent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -806,7 +806,7 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "pseudo provenance"):
                             stage1.run_pair(args, "rest16", "laptop14")
 
-    def test_pseudo_validation_rejects_missing_or_damaged_state(self) -> None:
+    def test_pseudo_validation_accepts_legacy_missing_state_but_rejects_damaged_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             for case in ("missing", "damaged"):
                 with self.subTest(case=case):
@@ -840,8 +840,12 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
                         "extractor",
                     )
 
-                    self.assertFalse(valid)
-                    self.assertTrue(reason)
+                    if case == "missing":
+                        self.assertTrue(valid)
+                        self.assertIn("legacy", reason)
+                    else:
+                        self.assertFalse(valid)
+                        self.assertTrue(reason)
 
     def test_encoder_pairing_ablation_reuses_best_final_train_and_isolates_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

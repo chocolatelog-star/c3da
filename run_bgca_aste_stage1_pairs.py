@@ -63,7 +63,6 @@ def validate_pseudo_provenance(
         run_dir / "target_pseudo_high_precision.jsonl",
         run_dir / "target_pseudo_high_precision_analysis.json",
         run_dir / "target_pseudo_analysis.json",
-        run_dir / "target_pseudo_generation_state.json",
     )
     missing = [path.name for path in required_paths if not path.exists()]
     if missing:
@@ -71,10 +70,23 @@ def validate_pseudo_provenance(
 
     try:
         analysis = read_json(run_dir / "target_pseudo_analysis.json")
-        state = read_json(run_dir / "target_pseudo_generation_state.json")
-        if not isinstance(analysis, dict) or not isinstance(state, dict):
+        if not isinstance(analysis, dict):
             return False, "pseudo provenance metadata must contain JSON objects"
         analysis_model_path = Path(analysis.get("model_path", "")).resolve()
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False, "pseudo provenance metadata is unreadable"
+
+    state_path = run_dir / "target_pseudo_generation_state.json"
+    if not state_path.exists():
+        # Older runs predate the explicit generation-state file. They are still
+        # usable if the pseudo files and analysis exist; strict checks are
+        # applied automatically for newer runs that record the state file.
+        return True, "legacy pseudo provenance without generation state"
+
+    try:
+        state = read_json(state_path)
+        if not isinstance(state, dict):
+            return False, "pseudo provenance metadata must contain JSON objects"
         state_model_path = Path(state.get("resolved_model_path", "")).resolve()
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return False, "pseudo provenance metadata is unreadable"
