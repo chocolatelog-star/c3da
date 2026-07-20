@@ -459,6 +459,82 @@ class DynamicMultiTripletTest(unittest.TestCase):
             "dynamic_strict_dist5",
         )
 
+    def test_complete_multi_dynamic_adds_only_complete_three_plus_rows(self):
+        base_rows = [
+            {
+                "id": "hp1",
+                "text": "Bright screen.",
+                "label": _label(("screen", "bright", "pos")),
+                "sample_weight": 0.65,
+            }
+        ]
+        dynamic_rows = [
+            {
+                "id": "complete3",
+                "text": "Bright screen, cramped keyboard, and long battery.",
+                "label": _label(
+                    ("screen", "bright", "pos"),
+                    ("keyboard", "cramped", "neg"),
+                    ("battery", "long", "pos"),
+                ),
+                "sample_weight": 0.65,
+                "dynamic_high_precision_pseudo": True,
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 3,
+                "dynamic_triplet_count_after": 3,
+            },
+            {
+                "id": "complete2",
+                "text": "Bright screen and cramped keyboard.",
+                "label": _label(("screen", "bright", "pos"), ("keyboard", "cramped", "neg")),
+                "sample_weight": 0.65,
+                "dynamic_high_precision_pseudo": True,
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 2,
+                "dynamic_triplet_count_after": 2,
+            },
+            {
+                "id": "cropped3",
+                "text": "Bright screen and cramped keyboard.",
+                "label": _label(("screen", "bright", "pos"), ("keyboard", "cramped", "neg")),
+                "sample_weight": 0.65,
+                "dynamic_high_precision_pseudo": True,
+                "dynamic_strict_high_precision_pseudo": False,
+                "dynamic_triplet_count_before": 3,
+                "dynamic_triplet_count_after": 2,
+            },
+            {
+                "id": "hp1",
+                "text": "Bright screen.",
+                "label": _label(
+                    ("screen", "bright", "pos"),
+                    ("keyboard", "cramped", "neg"),
+                    ("battery", "long", "pos"),
+                ),
+                "sample_weight": 0.65,
+                "dynamic_high_precision_pseudo": True,
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 3,
+                "dynamic_triplet_count_after": 3,
+            },
+        ]
+
+        merged, analysis = pipeline.build_complete_multitriplet_dynamic_pseudo_rows(
+            base_rows,
+            dynamic_rows,
+            extra_weight=0.2,
+            min_triplets=3,
+        )
+
+        self.assertEqual([row["id"] for row in merged], ["hp1", "complete3"])
+        self.assertEqual(merged[1]["sample_weight"], 0.2)
+        self.assertEqual(merged[1]["pseudo_mix_source"], "dynamic_strict_3plus_extra")
+        self.assertEqual(analysis["dynamic_3plus_candidates"], 3)
+        self.assertEqual(analysis["dynamic_extra_rows"], 1)
+        self.assertEqual(analysis["dynamic_too_few_triplets_rejected"], 1)
+        self.assertEqual(analysis["dynamic_not_strict_rejected"], 1)
+        self.assertEqual(analysis["duplicate_rows_rejected"], 1)
+
     def test_select_dynamic_pseudo_command_writes_complete_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "run"
@@ -510,6 +586,54 @@ class DynamicMultiTripletTest(unittest.TestCase):
         self.assertFalse(state["strict"])
         self.assertEqual(state["base_pseudo_source_tag"], "extractor_tag")
         self.assertIn("hidden_gold_eval", analysis)
+
+    def test_select_complete_dynamic_pseudo_command_writes_combined_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            output_dir = run_dir / "pseudo_variants" / "hp1_complete2_dist5_w025_dynamic_strict3plus_dist5_w020"
+            base_file = run_dir / "pseudo_variants" / "hp1_complete2_dist5_w025" / "target_pseudo_high_precision.jsonl"
+            dynamic_file = run_dir / "pseudo_variants" / "dynamic_strict_dist5" / "target_pseudo_high_precision.jsonl"
+            base_row = {
+                "id": "hp1",
+                "text": "Bright screen.",
+                "label": _label(("screen", "bright", "pos")),
+                "sample_weight": 0.65,
+            }
+            dynamic_row = {
+                "id": "complete3",
+                "text": "Bright screen, cramped keyboard, and long battery.",
+                "label": _label(
+                    ("screen", "bright", "pos"),
+                    ("keyboard", "cramped", "neg"),
+                    ("battery", "long", "pos"),
+                ),
+                "sample_weight": 0.65,
+                "dynamic_high_precision_pseudo": True,
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 3,
+                "dynamic_triplet_count_after": 3,
+            }
+            pipeline.write_jsonl(base_file, [base_row])
+            pipeline.write_jsonl(dynamic_file, [dynamic_row])
+
+            pipeline.select_complete_dynamic_pseudo(
+                Namespace(
+                    run_dir=str(run_dir),
+                    output_dir=str(output_dir),
+                    base_pseudo_file=str(base_file),
+                    dynamic_pseudo_file=str(dynamic_file),
+                    dynamic_extra_weight=0.2,
+                    dynamic_min_triplets=3,
+                )
+            )
+
+            rows = [json.loads(line) for line in (output_dir / "target_pseudo_high_precision.jsonl").read_text(encoding="utf-8").splitlines()]
+            analysis = json.loads((output_dir / "target_pseudo_high_precision_analysis.json").read_text(encoding="utf-8"))
+
+        self.assertEqual([row["id"] for row in rows], ["hp1", "complete3"])
+        self.assertEqual(rows[1]["pseudo_mix_source"], "dynamic_strict_3plus_extra")
+        self.assertEqual(analysis["dynamic_extra_rows"], 1)
+        self.assertEqual(analysis["dynamic_pseudo_file"], str(dynamic_file))
 
     def test_select_dynamic_pseudo_rejects_incomplete_base_generation_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:

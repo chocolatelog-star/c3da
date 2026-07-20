@@ -180,6 +180,16 @@ def complete_multi_weight_tag(extra_weight: float) -> str:
     return f"complete_multi2_w{int(round(extra_weight * 100)):03d}"
 
 
+def complete_dynamic_weight_tag(extra_weight: float, min_triplets: int, max_token_distance: int) -> str:
+    if extra_weight <= 0 or extra_weight > 1:
+        raise ValueError("complete_dynamic_extra_weight must be in (0, 1]")
+    if min_triplets < 2:
+        raise ValueError("complete_dynamic_min_triplets must be at least 2")
+    if max_token_distance < 0:
+        raise ValueError("high_precision_max_token_distance must be non-negative")
+    return f"dynamic_strict{min_triplets}plus_dist{max_token_distance}_w{int(round(extra_weight * 100)):03d}"
+
+
 def append_sentiment_summary_tag(
     summary_tag: str,
     loss_weight: float,
@@ -569,10 +579,12 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     if args.complete_multi_extra_weight > 0:
         if not use_legacy_pseudo_filter:
             raise ValueError("complete multi-triplet supplementation requires the hp1_dist5 base filter")
-        complete_multi_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
-        pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / f"hp1_{complete_multi_tag.replace('complete_multi2', 'complete2_dist5')}"
-        pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
-        pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+        base_complete_multi_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
+        complete_multi_tag = base_complete_multi_tag
+        complete_pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / f"hp1_{base_complete_multi_tag.replace('complete_multi2', 'complete2_dist5')}"
+        pseudo_variant_dir = complete_pseudo_variant_dir
+        pseudo_train_file = complete_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+        pseudo_analysis_file = complete_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
         complete_stage = f"select_pseudo_{extractor_tag}_{complete_multi_tag}"
         if upstream_run_dir is None and not stage_done(
             status,
@@ -602,6 +614,92 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             )
             if not args.dry_run:
                 mark_done(status_path, status, complete_stage)
+
+        if args.complete_dynamic_extra_weight > 0:
+            dynamic_strict_tag = dynamic_pseudo_filter_tag(
+                args.high_precision_max_token_distance,
+                strict=True,
+            )
+            dynamic_pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / dynamic_strict_tag
+            dynamic_pseudo_train_file = dynamic_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+            dynamic_pseudo_analysis_file = dynamic_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+            dynamic_pseudo_selection_state_file = dynamic_pseudo_variant_dir / "target_pseudo_generation_state.json"
+            dynamic_stage = f"select_dynamic_pseudo_{extractor_tag}_{dynamic_strict_tag}"
+            dynamic_selection_valid, _dynamic_selection_reason = validate_dynamic_pseudo_selection(
+                dynamic_pseudo_variant_dir,
+                extractor_tag,
+                0.65,
+                args.high_precision_max_token_distance,
+                strict=True,
+            )
+            if upstream_run_dir is None and not (
+                stage_done(
+                    status,
+                    dynamic_stage,
+                    [dynamic_pseudo_train_file, dynamic_pseudo_analysis_file, dynamic_pseudo_selection_state_file],
+                    args.rerun,
+                )
+                and dynamic_selection_valid
+            ):
+                run_command(
+                    [
+                        py,
+                        "t5_aste_pipeline.py",
+                        "select_dynamic_pseudo",
+                        "--run_dir",
+                        str(run_dir),
+                        "--output_dir",
+                        str(dynamic_pseudo_variant_dir),
+                        "--min_pseudo_weight",
+                        "0.65",
+                        "--high_precision_max_token_distance",
+                        str(args.high_precision_max_token_distance),
+                        "--dynamic_strict",
+                    ],
+                    args.dry_run,
+                )
+                if not args.dry_run:
+                    mark_done(status_path, status, dynamic_stage)
+
+            dynamic_extra_tag = complete_dynamic_weight_tag(
+                args.complete_dynamic_extra_weight,
+                args.complete_dynamic_min_triplets,
+                args.high_precision_max_token_distance,
+            )
+            complete_multi_tag = f"{base_complete_multi_tag}_{dynamic_extra_tag}"
+            combined_pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / f"hp1_complete2_dist5_w{int(round(args.complete_multi_extra_weight * 100)):03d}_{dynamic_extra_tag}"
+            pseudo_variant_dir = combined_pseudo_variant_dir
+            pseudo_train_file = combined_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
+            pseudo_analysis_file = combined_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
+            combined_stage = f"select_pseudo_{extractor_tag}_{complete_multi_tag}"
+            if upstream_run_dir is None and not stage_done(
+                status,
+                combined_stage,
+                [pseudo_train_file, pseudo_analysis_file],
+                args.rerun,
+            ):
+                run_command(
+                    [
+                        py,
+                        "t5_aste_pipeline.py",
+                        "select_complete_dynamic_pseudo",
+                        "--run_dir",
+                        str(run_dir),
+                        "--output_dir",
+                        str(combined_pseudo_variant_dir),
+                        "--base_pseudo_file",
+                        str(complete_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"),
+                        "--dynamic_pseudo_file",
+                        str(dynamic_pseudo_train_file),
+                        "--dynamic_extra_weight",
+                        str(args.complete_dynamic_extra_weight),
+                        "--dynamic_min_triplets",
+                        str(args.complete_dynamic_min_triplets),
+                    ],
+                    args.dry_run,
+                )
+                if not args.dry_run:
+                    mark_done(status_path, status, combined_stage)
 
     if upstream_run_dir is not None and not args.dry_run:
         required_upstream_paths = [
@@ -1209,6 +1307,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--high_precision_max_triplets", type=int, default=1)
     parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
     parser.add_argument("--complete_multi_extra_weight", type=float, default=0.0)
+    parser.add_argument("--complete_dynamic_extra_weight", type=float, default=0.0)
+    parser.add_argument("--complete_dynamic_min_triplets", type=int, default=3)
     parser.add_argument("--dynamic_multitriplet", action="store_true")
     parser.add_argument("--dynamic_multitriplet_strict", action="store_true")
     parser.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
@@ -1236,6 +1336,8 @@ def selected_pairs(pairs_text: str) -> list[tuple[str, str]]:
 
 def main() -> None:
     args = parse_args()
+    if args.complete_dynamic_extra_weight > 0 and args.complete_multi_extra_weight <= 0:
+        raise ValueError("--complete_dynamic_extra_weight requires --complete_multi_extra_weight")
     rows = []
     pairs = selected_pairs(args.pairs)
     if args.reuse_upstream_run_dir and len(pairs) != 1:
@@ -1270,6 +1372,8 @@ def main() -> None:
         summary_tag = f"{summary_tag}_{pairing_tag}".strip("_")
     if args.complete_multi_extra_weight > 0:
         complete_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
+        if args.complete_dynamic_extra_weight > 0:
+            complete_tag = f"{complete_tag}_{complete_dynamic_weight_tag(args.complete_dynamic_extra_weight, args.complete_dynamic_min_triplets, args.high_precision_max_token_distance)}"
         summary_tag = f"{summary_tag}_{complete_tag}".strip("_")
         summary_tag = append_sentiment_summary_tag(
             summary_tag,

@@ -999,6 +999,72 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("complete_multi2_w025", output)
         self.assertIn("--resume_from_checkpoint auto", output)
 
+    def test_complete_multi_can_add_strict_dynamic_three_plus_extra(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--generator_prompt_style",
+                "label_to_text",
+                "--augment_prompt_style",
+                "masked_mutual",
+                "--domain_prefix_style",
+                "text",
+                "--complete_multi_extra_weight",
+                "0.25",
+                "--complete_dynamic_extra_weight",
+                "0.2",
+                "--dry_run",
+            ]
+
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        output = result.stdout
+        self.assertIn("select_dynamic_pseudo", output)
+        self.assertIn("--dynamic_strict", output)
+        self.assertIn("select_complete_multi_pseudo", output)
+        self.assertIn("select_complete_dynamic_pseudo", output)
+        self.assertIn("dynamic_strict_dist5", output)
+        self.assertIn("complete_multi2_w025_dynamic_strict3plus_dist5_w020", output)
+        self.assertIn(
+            "final_train_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_dynamic_strict3plus_dist5_w020.jsonl",
+            output,
+        )
+
+    def test_complete_dynamic_requires_complete_multi_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--complete_dynamic_extra_weight",
+                "0.2",
+                "--dry_run",
+            ]
+
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires --complete_multi_extra_weight", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
