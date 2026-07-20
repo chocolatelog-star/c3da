@@ -865,10 +865,11 @@ def aspect_opinion_token_distance(text: str, aspect: str, opinion: str) -> int |
     return 0
 
 
-def dynamic_pseudo_filter_tag(max_token_distance: int) -> str:
+def dynamic_pseudo_filter_tag(max_token_distance: int, strict: bool = False) -> str:
     if max_token_distance < 0:
         raise ValueError("high_precision_max_token_distance must be non-negative")
-    return f"dynamic_dist{max_token_distance}"
+    prefix = "dynamic_strict" if strict else "dynamic"
+    return f"{prefix}_dist{max_token_distance}"
 
 
 def _pseudo_row_base_reject_reason(row: dict, min_weight: float = 0.65) -> str:
@@ -1000,6 +1001,7 @@ def select_dynamic_high_precision_pseudo_rows(
     rows: list[dict],
     min_weight: float = 0.65,
     max_token_distance: int = 5,
+    strict: bool = False,
 ) -> tuple[list[dict], dict]:
     selected = []
     rejected_counts: Counter[str] = Counter()
@@ -1044,6 +1046,10 @@ def select_dynamic_high_precision_pseudo_rows(
 
         original_count = len(triplets)
         kept_count = len(kept_triplets)
+        if strict and kept_count != original_count:
+            rejected_counts["partial_after_triplet_filter"] += 1
+            continue
+
         triplet_count_before[original_count] += 1
         triplet_count_after[kept_count] += 1
         if kept_count == original_count:
@@ -1064,6 +1070,7 @@ def select_dynamic_high_precision_pseudo_rows(
                 "sample_weight": sample_weight,
                 "high_precision_pseudo": True,
                 "dynamic_high_precision_pseudo": True,
+                "dynamic_strict_high_precision_pseudo": strict,
                 "high_precision_original_label": original_label,
                 "dynamic_original_label": original_label,
                 "high_precision_triplet_count_before": original_count,
@@ -1084,6 +1091,7 @@ def select_dynamic_high_precision_pseudo_rows(
         "empty_after_filter_rows": empty_after_filter_rows,
         "min_weight": min_weight,
         "max_token_distance": max_token_distance,
+        "strict": strict,
         "triplet_count_before": dict(sorted(triplet_count_before.items())),
         "triplet_count_after": dict(sorted(triplet_count_after.items())),
         "sample_weight_summary": sample_weight_summary(selected),
@@ -2472,10 +2480,14 @@ def select_pseudo(args: argparse.Namespace) -> None:
 
 def select_dynamic_pseudo(args: argparse.Namespace) -> None:
     run_dir = Path(args.run_dir)
+    strict = getattr(args, "dynamic_strict", False)
     output_dir = (
         Path(args.output_dir)
         if args.output_dir
-        else run_dir / "pseudo_variants" / dynamic_pseudo_filter_tag(args.high_precision_max_token_distance)
+        else run_dir / "pseudo_variants" / dynamic_pseudo_filter_tag(
+            args.high_precision_max_token_distance,
+            strict=strict,
+        )
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     source_pseudo_path = run_dir / "target_pseudo.jsonl"
@@ -2487,6 +2499,7 @@ def select_dynamic_pseudo(args: argparse.Namespace) -> None:
     state = {
         "status": "in_progress",
         "selection_mode": "dynamic_high_precision",
+        "strict": strict,
         "source_pseudo_path": str(source_pseudo_path),
         "min_pseudo_weight": args.min_pseudo_weight,
         "max_token_distance": args.high_precision_max_token_distance,
@@ -2505,6 +2518,7 @@ def select_dynamic_pseudo(args: argparse.Namespace) -> None:
         pseudo_rows,
         min_weight=args.min_pseudo_weight,
         max_token_distance=args.high_precision_max_token_distance,
+        strict=strict,
     )
     gold_path = run_dir / "target_train_gold_analysis.jsonl"
     if gold_path.exists():
@@ -2517,6 +2531,7 @@ def select_dynamic_pseudo(args: argparse.Namespace) -> None:
     dynamic_stats.update(
         {
             "selection_mode": "dynamic_high_precision",
+            "strict": strict,
             "source_pseudo_file": str(source_pseudo_path),
             "base_model_path": base_analysis.get("model_path", ""),
             "base_pseudo_source_tag": base_analysis.get("pseudo_source_tag", ""),
@@ -3409,6 +3424,7 @@ def main() -> None:
     p.add_argument("--output_dir", default="")
     p.add_argument("--min_pseudo_weight", type=float, default=0.65)
     p.add_argument("--high_precision_max_token_distance", type=int, default=5)
+    p.add_argument("--dynamic_strict", action="store_true")
     p.set_defaults(func=select_dynamic_pseudo)
 
     p = sub.add_parser("select_complete_multi_pseudo")

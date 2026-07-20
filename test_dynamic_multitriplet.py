@@ -423,6 +423,42 @@ class DynamicMultiTripletTest(unittest.TestCase):
         self.assertEqual(stats["removed_triplets_by_distance_too_far"], 1)
         self.assertEqual(rows, original_rows)
 
+    def test_dynamic_high_precision_strict_rejects_partially_filtered_rows(self):
+        partial_label = _label(
+            ("keyboard", "cramped", "neg"),
+            ("screen", "bright", "pos"),
+            ("battery", "bright", "pos"),
+        )
+        rows = [
+            {
+                "id": "partial",
+                "text": "The battery runs all day, but the keyboard is cramped and the screen is bright.",
+                "label": partial_label,
+                "sample_weight": 0.65,
+                "quality_flags": {"all_terms_in_text": True},
+            }
+        ]
+
+        selected, stats = pipeline.select_dynamic_high_precision_pseudo_rows(
+            rows,
+            min_weight=0.65,
+            max_token_distance=5,
+            strict=True,
+        )
+
+        self.assertEqual(selected, [])
+        self.assertTrue(stats["strict"])
+        self.assertEqual(stats["selected_rows"], 0)
+        self.assertEqual(stats["rejected_partial_after_triplet_filter"], 1)
+        self.assertEqual(stats["removed_triplets_by_distance_too_far"], 1)
+
+    def test_dynamic_pseudo_filter_tag_records_strict_mode(self):
+        self.assertEqual(pipeline.dynamic_pseudo_filter_tag(5), "dynamic_dist5")
+        self.assertEqual(
+            pipeline.dynamic_pseudo_filter_tag(5, strict=True),
+            "dynamic_strict_dist5",
+        )
+
     def test_select_dynamic_pseudo_command_writes_complete_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "run"
@@ -459,6 +495,7 @@ class DynamicMultiTripletTest(unittest.TestCase):
                     output_dir=str(output_dir),
                     min_pseudo_weight=0.65,
                     high_precision_max_token_distance=5,
+                    dynamic_strict=False,
                 )
             )
 
@@ -470,6 +507,7 @@ class DynamicMultiTripletTest(unittest.TestCase):
         self.assertTrue(rows[0]["dynamic_high_precision_pseudo"])
         self.assertEqual(state["status"], "complete")
         self.assertEqual(state["selection_mode"], "dynamic_high_precision")
+        self.assertFalse(state["strict"])
         self.assertEqual(state["base_pseudo_source_tag"], "extractor_tag")
         self.assertIn("hidden_gold_eval", analysis)
 

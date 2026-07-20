@@ -97,6 +97,7 @@ def validate_dynamic_pseudo_selection(
     pseudo_source_tag: str,
     min_pseudo_weight: float,
     max_token_distance: int,
+    strict: bool = False,
 ) -> tuple[bool, str]:
     required_paths = (
         output_dir / "target_pseudo_high_precision.jsonl",
@@ -116,6 +117,8 @@ def validate_dynamic_pseudo_selection(
         return False, f"dynamic pseudo selection state is {state.get('status')!r}, expected 'complete'"
     if state.get("selection_mode") != "dynamic_high_precision":
         return False, "dynamic pseudo selection mode does not match"
+    if bool(state.get("strict", False)) != bool(strict):
+        return False, "dynamic pseudo strict mode does not match"
     if state.get("base_pseudo_source_tag") != pseudo_source_tag:
         return False, "dynamic pseudo selection source tag does not match"
     try:
@@ -231,7 +234,12 @@ def metric_value(data: dict, *keys: str):
 def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     run_dir = pair_run_dir(Path(args.output_root), source, target)
     upstream_run_dir = Path(args.reuse_upstream_run_dir) if args.reuse_upstream_run_dir else None
-    dynamic_multitriplet = getattr(args, "dynamic_multitriplet", False)
+    dynamic_multitriplet = getattr(args, "dynamic_multitriplet", False) or getattr(
+        args,
+        "dynamic_multitriplet_strict",
+        False,
+    )
+    dynamic_multitriplet_strict = getattr(args, "dynamic_multitriplet_strict", False)
     if not args.dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
     status_path = run_dir / "stage_status.json"
@@ -483,7 +491,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         and args.high_precision_max_token_distance == 5
     )
     if dynamic_multitriplet:
-        pseudo_tag = dynamic_pseudo_filter_tag(args.high_precision_max_token_distance)
+        pseudo_tag = dynamic_pseudo_filter_tag(
+            args.high_precision_max_token_distance,
+            strict=dynamic_multitriplet_strict,
+        )
         pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / pseudo_tag
         pseudo_train_file = pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
         pseudo_analysis_file = pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
@@ -494,6 +505,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             extractor_tag,
             0.65,
             args.high_precision_max_token_distance,
+            strict=dynamic_multitriplet_strict,
         )
         dynamic_selection_reusable = stage_done(
             status,
@@ -515,6 +527,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                     "0.65",
                     "--high_precision_max_token_distance",
                     str(args.high_precision_max_token_distance),
+                    *(["--dynamic_strict"] if dynamic_multitriplet_strict else []),
                 ],
                 args.dry_run,
             )
@@ -609,6 +622,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 extractor_tag,
                 0.65,
                 args.high_precision_max_token_distance,
+                strict=dynamic_multitriplet_strict,
             )
             if not selection_valid:
                 raise RuntimeError(f"cannot validate upstream dynamic pseudo selection: {selection_reason}")
@@ -1196,6 +1210,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--high_precision_max_token_distance", type=int, default=5)
     parser.add_argument("--complete_multi_extra_weight", type=float, default=0.0)
     parser.add_argument("--dynamic_multitriplet", action="store_true")
+    parser.add_argument("--dynamic_multitriplet_strict", action="store_true")
     parser.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
     parser.add_argument("--source_count2_weight", type=positive_finite_float, default=1.15)
     parser.add_argument("--source_count3_weight", type=positive_finite_float, default=1.25)
@@ -1225,9 +1240,18 @@ def main() -> None:
     pairs = selected_pairs(args.pairs)
     if args.reuse_upstream_run_dir and len(pairs) != 1:
         raise ValueError("--reuse_upstream_run_dir requires exactly one source:target pair")
-    pseudo_tag = pseudo_filter_tag(
-        args.high_precision_max_triplets,
-        args.high_precision_max_token_distance,
+    if args.dynamic_multitriplet_strict:
+        args.dynamic_multitriplet = True
+    pseudo_tag = (
+        dynamic_pseudo_filter_tag(
+            args.high_precision_max_token_distance,
+            strict=args.dynamic_multitriplet_strict,
+        )
+        if args.dynamic_multitriplet
+        else pseudo_filter_tag(
+            args.high_precision_max_triplets,
+            args.high_precision_max_token_distance,
+        )
     )
     summary_tag = "" if pseudo_tag == "hp1_dist5" else pseudo_tag
     if args.neutral_generation_loss_gain > 0 or args.neutral_generation_max_effective_weight > 0:
