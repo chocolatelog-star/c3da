@@ -70,7 +70,22 @@ runs\bgca_aste_stage1_domain_prompt_text_v1\results_bgca_aste_stage1_complete_mu
 | complete_multi2 + dynamic strict 3+ | 45.38 | 47.48 | 3+ 伪标签噪声和欠配对明显 | 建议删除 |
 | dynamic strict top050/top080 | 45.83 / 44.66 | 47.78 / 46.90 | keep top ratio（截断高置信比例）无效 | 建议删除 |
 
-## 5. 当前待跑实验
+## 5. 待改进清单
+
+本节只记录当前仍值得继续做的改进目标，不记录已经证伪的长流水实验。
+
+| 优先级 | 当前不足 | 改进目标 | 具体改进点 | 预期判断标准 |
+|---|---|---|---|---|
+| P0 | 生成器训练策略和 BGCA（论文方法）不完全一致：我们当前最佳生成器是 8 轮 best（最优检查点），BGCA 是 25 轮 last（最后检查点） | 判断性能差异是否来自生成器训练轮数和检查点选择 | 跑 BGCA-style generator（BGCA风格生成器）对照：只改 `--generator_epochs 25 --generator_checkpoint_selection last`，其他保持当前最佳 | raw F1（原始F1）超过 48.93 才替换主线；否则保留 8 轮 best |
+| P0 | 过滤器可靠性缺少显式源域 dev（开发集）F1 记录 | 判断“生成句子再回抽标签一致才保留”的过滤器是否足够可靠 | 已在代码中新增 source dev evaluation（源域开发集评估）；后续每次实验汇总都要写入源域 dev fixed F1 | 若源域 dev F1 明显低，不能把抽取器当强过滤器使用 |
+| P1 | 多三元组 recall（召回率）仍低，尤其 3+ 三元组样本补充后没有稳定收益 | 提高多三元组完整抽取能力，而不是简单放宽伪标签数量 | 保留 complete_multi2_w025；后续尝试更细的多三元组训练权重、生成候选多样性、回抽一致过滤，不再使用 top ratio（高置信比例截断） | 多三元组 raw F1 和 recall 同时提升，且总体 raw F1 不下降 |
+| P1 | neutral（中性）三元组几乎无法召回，强行加权会伤害正负类 | 建立中性边界，而不是只加大中性损失权重 | 优先做错误类型分析：否定但非中性、缺失属性但中性、弱情感表达；再考虑构造小规模高质量中性增强 | neutral F1 有实际提升，同时 pos/neg（正向/负向）F1 不明显下降 |
+| P2 | 当前增强样本仍可能引入标签一致但表达质量低的句子 | 提高增强样本质量和多样性 | 在标签回抽一致基础上增加去重、非原句复制、长度和领域词覆盖筛选 | 增强保留率不过低，最终 raw F1 提升或至少召回提升 |
+| P2 | 六组跨域平均仍落后 BGCA，laptop14 -> restaurant 三组差距最大 | 从单方向有效改进迁移到六组平均 | 当前先在 rest16 -> laptop14 验证机制；有效后再跑六组，并单独分析 laptop14 -> restaurant 的 recall 问题 | 六组平均 raw F1 差距收敛，不能只提升单组 |
+
+当前不要继续投入的方向：`hp2_dist5` 简单放宽数量、中性生成损失强加权、三任务 mixed generator（混合生成器）、triplet coverage classification head（三元组覆盖分类头）、dynamic strict top ratio（动态严格高置信比例截断）。
+
+## 6. 当前待跑实验
 
 目标：验证 BGCA-style generator（BGCA风格生成器）是否比我们 8 轮 best（最优检查点）更适合当前最佳流程。
 
@@ -96,7 +111,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_ast
 
 命令含义：复用当前最佳上游抽取器和伪标签，只重新训练 25 轮 last（最后检查点）生成器，然后重新生成增强、训练最终模型并评估。
 
-## 6. 文档维护规则
+## 7. 文档维护规则
 
 | 触发事件 | 必须更新 |
 |---|---|
@@ -108,7 +123,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && python run_bgca_ast
 
 删除规则：所有删除文件操作必须先获得用户明确许可。效果不好的实验默认只标记为 `建议删除`，不自动删除。
 
-## 7. Git 与环境状态
+## 8. Git 与环境状态
 
 | 项目 | 当前状态 |
 |---|---|
