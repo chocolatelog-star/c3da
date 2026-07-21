@@ -53,22 +53,54 @@ runs\bgca_aste_stage1_domain_prompt_text_v1\results_bgca_aste_stage1_complete_mu
 | 情感对比 | 保留，`lambda_sentiment_contrastive=0.01`，source only（仅源域），class balanced（类别平衡） |
 | 伪标签权重 | 当前最佳使用 `final_pseudo_weight=0.65` |
 
-## 4. 已做改进与结论压缩表
+## 4. 历史实验索引
 
-| 改进方向 | 最好结果 raw F1 | fixed F1 | 结论 | 文件处理 |
-|---|---:|---:|---|---|
-| 原始主线：hp1 + 增强 + DANN | 46.82 | 48.94 | 可作为旧基线，但已被完整双三元组补充超过 | 保留指标 |
-| hp2_dist5 放宽伪标签到最多 2 个三元组 | 44.44 | 46.87 | 放宽数量带来噪声，失败 | 坏模型建议删除，指标保留 |
-| neutral generation loss（中性生成损失）增权 | 43.18 | 45.76 | 没解决中性，反而破坏正负类 | 坏模型已删除或建议删除 |
-| mixed generator（三任务混合生成器） | 44.07 | 46.06 | 1:1:1 混合削弱 label-to-text 主任务 | 坏模型已删除 |
-| encoder pairing loss（编码器配对损失） | 46.49 | 48.86 | 精确率提高但召回下降，不作为最佳 | 坏模型已删除或建议删除 |
-| triplet coverage loss（三元组覆盖损失） | 44.37 | 46.72 | 分类头没有传导到自回归生成 | 坏模型已删除 |
-| complete_multi2_w025，不加情感对比 | 48.01 | 50.37 | 完整双三元组补充有效，是关键正向改动 | 保留指标 |
-| complete_multi2_w025 + 情感对比 | **48.93** | **50.21** | 当前最佳，主线保留 | 保留模型 |
-| complete_multi2_w035 | 45.74 | 47.02 | 补充权重过高，引入噪声 | 建议删除 |
-| dynamic_strict_dist5 | 48.07 | 49.69 | 有潜力但没有超过最佳 | 保留指标，暂不主线 |
-| complete_multi2 + dynamic strict 3+ | 45.38 | 47.48 | 3+ 伪标签噪声和欠配对明显 | 建议删除 |
-| dynamic strict top050/top080 | 45.83 / 44.66 | 47.78 / 46.90 | keep top ratio（截断高置信比例）无效 | 建议删除 |
+本节用于以后回溯代码和实验说明。每条记录必须能回答三件事：当时用的是哪个 git commit（提交号）、实验产物标签是什么、结论是什么。失败模型可以删除，但指标、标签和 commit（提交号）必须保留。
+
+### 4.1 可追溯实验结果表
+
+| 时间线 | 实验方向 | 关键 commit（提交号） | 结果标签或目录 | raw F1（原始F1） | fixed F1（修正F1） | 主要变化 | 结论 | 文件状态 |
+|---|---|---|---|---:|---:|---|---|---|
+| 旧主线 | hp1 + 增强 + DANN（领域对抗） | `e4472d9` / `f809beb` | `strict_aug150_w020_label_to_text_gen_sentiment_contrastive_l001_source_balanced` | 46.82 | 48.94 | 最终阶段加入源域类别平衡情感对比 | 可作为旧基线，但已被完整双三元组补充超过 | 保留指标 |
+| 伪标签放宽 | hp2_dist5，最多 2 个三元组 | `869466a` | `strict_aug150_w020_label_to_text_gen_hp2_dist5` | 44.44 | 46.87 | 从 hp1 放宽到 hp2 | 噪声增多，召回没有换来有效 F1 | 坏模型建议删除，指标保留 |
+| 中性增强 | neutral generation loss（中性生成损失）增权 | `0c49ba6` / `ce7452e` / `e5f5d47` | `neutral_gain100_max200` | 43.18 | 45.76 | 提高中性样本主生成损失权重 | 中性没解决，正负类被破坏 | 坏模型已删除或建议删除 |
+| 生成器结构 | mixed generator（三任务混合生成器） | `e7560c7` / `e320fab` / `925d596` / `93b7b4a` | `bgca_aste_stage1_mixed_generator_v1` | 44.07 | 46.06 | 生成器同时学 label-to-text、masked_aspect、masked_opinion | 混合任务削弱主生成目标，不进主线 | 坏模型已删除 |
+| 配对辅助 | encoder pairing loss（编码器配对损失） | `c1082ab` / `123ab39` / `6075ee0` / `a256965` | `pairing_encoder_l001_source_only` | 46.49 | 48.86 | 对源域多三元组加方面词-观点词配对损失 | 精确率提高但召回下降，不作为最佳 | 坏模型已删除或建议删除 |
+| 覆盖辅助 | triplet coverage loss（三元组覆盖损失） | `cbeb965` / `e60ca8f` / `44997d4` | `coverage_encoder_l001_source_balanced` | 44.37 | 46.72 | 编码器预测句子应包含的三元组数量 | 分类头没有有效传导到生成 | 坏模型已删除 |
+| 完整双三元组 | complete_multi2_w025，不加情感对比 | `62113b4` / `4258bc6` / `0332aee` | `complete_multi2_w025` | 48.01 | 50.37 | 在 hp1 上补充完整双三元组，额外权重 0.25 | 关键正向改动，多三元组抽取明显改善 | 保留指标 |
+| 当前最佳 | complete_multi2_w025 + 情感对比 | `62113b4` / `0332aee` / `68bc0d0` | `complete_multi2_w025_sentiment_contrastive_l001_source_balanced_pw065` | **48.93** | **50.21** | 完整双三元组 + DANN + 源域类别平衡情感对比，伪标签权重 0.65 | 当前最佳，主线保留 | 保留模型 |
+| 权重过高 | complete_multi2_w035 | `c0b2730` | `complete_multi2_w035_sentiment_contrastive_l001_source_balanced` | 45.74 | 47.02 | 双三元组补充权重从 0.25 提到 0.35 | 权重过高，引入噪声 | 建议删除 |
+| 动态多三元组 | dynamic_strict_dist5 | `577c55e` / `e8e23e3` / `7f3724d` | `dynamic_strict_dist5` | 48.07 | 49.69 | 动态保留多三元组伪标签，不强制最多 1 个 | 有潜力但未超过最佳 | 保留指标，暂不主线 |
+| 3+ 补充 | complete_multi2 + dynamic strict 3+ | `7f3724d` / `9e76a19` | `complete_dynamic3plus_v1` | 45.38 | 47.48 | 在完整双三元组上再补 3+ 动态严格伪标签 | 3+ 噪声和欠配对明显 | 建议删除 |
+| 高置信截断 | dynamic strict top050/top080 | `68bc0d0` | `top050` / `top080` | 45.83 / 44.66 | 47.78 / 46.90 | 对 3+ 动态伪标签按置信度比例截断 | keep top ratio（高置信比例截断）无效 | 建议删除 |
+| 当前待跑 | BGCA-style generator（BGCA风格生成器）25 轮 last | `68bc0d0` / `11ca672` / `50a87f7` | `bgca_aste_stage1_bgca_generator25_last_v1` | 待跑 | 待跑 | 只把生成器改为 25 轮 last，其余保持当前最佳 | 用来判断 BGCA 生成器训练策略是否更好 | 待生成 |
+
+### 4.2 历史代码和说明入口
+
+| 主题 | 主要 commit（提交号） | 说明文档或结果文件 |
+|---|---|---|
+| 当前总览、差距和待改进清单 | `50a87f7` | `实验记录与模型索引_CN.md` |
+| 项目文档维护规则 | `11ca672` | `docs\skills\c3da-experiment-workflow\SKILL.md` |
+| BGCA-style generator（BGCA风格生成器）参数支持、源域 dev 评估 | `68bc0d0` | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py` |
+| 完整双三元组补充与严格消融实现 | `62113b4` | `test_complete_multitriplet_pseudo.py`、`run_bgca_aste_stage1_pairs.py` |
+| 完整双三元组实验结论 | `0332aee` | `results_bgca_aste_stage1_complete_multi2_w025*_CN.md` |
+| dynamic strict（动态严格筛选） | `577c55e`、`e8e23e3`、`7f3724d` | `docs\superpowers\plans\2026-07-18-dynamic-multitriplet-training_CN.md` |
+| mixed generator（三任务混合生成器） | `e7560c7`、`925d596`、`93b7b4a` | `docs\superpowers\plans\2026-07-15-mixed-generator-training_CN.md` |
+| encoder pairing loss（编码器配对损失） | `c1082ab`、`123ab39`、`6075ee0`、`a256965` | `docs\superpowers\plans\2026-07-16-encoder-pairing-loss_CN.md` |
+| triplet coverage loss（三元组覆盖损失） | `cbeb965`、`e60ca8f`、`44997d4` | `docs\superpowers\plans\2026-07-16-triplet-coverage-loss_CN.md` |
+| neutral generation weighting（中性生成增权） | `0c49ba6`、`ce7452e`、`e5f5d47` | `results_bgca_aste_stage1_neutral_gain100_max200_CN.md` |
+
+回溯方式：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA && git show <commit>"
+```
+
+如果要临时查看旧代码，不要直接覆盖当前工作区，优先使用：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA && git worktree add .worktrees\inspect-<commit> <commit>"
+```
 
 ## 5. 待改进清单
 

@@ -14,6 +14,7 @@ description: Use when working in J:\nlp\CD-C3DA on BGCA/C3DA cross-domain ASTE e
 - Update the Markdown document by rewriting the relevant summary sections as a coherent current-state document. Do not append an endless chronological log to the bottom.
 - Keep the first screen of the Markdown document focused on current best version, model path, BGCA paper baseline, our raw/fixed metrics, gap against BGCA, active experiment, and next decision.
 - Maintain a dedicated improvement backlog section in the Markdown document. It must list current weaknesses, improvement goals, concrete changes to try, priority, and the metric condition for accepting or rejecting each direction.
+- Maintain a traceable experiment history section. Each historical experiment row must include commit id, result tag or run directory, raw/fixed metrics, key change, conclusion, and file cleanup status. Add a short lookup section that maps important topics to commits and document/result paths.
 - Put failed or superseded experiment results in a compact historical table with status equivalent to deleted, recommended-to-delete, or metrics-retained.
 - Do not delete files or experiment runs without explicit user permission. When a run is bad, ask for confirmation or record it as recommended-to-delete.
 - When an experiment finishes, update the best-vs-BGCA table first, then compress the history table. Keep metrics and paths, but remove repetitive narrative.
