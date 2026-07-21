@@ -832,6 +832,13 @@ NOISY_PSEUDO_TERMS = {
 }
 
 
+NEGATION_PATTERN = re.compile(r"(?:\bno\b|\bnot\b|\bnever\b|n't\b|\bwithout\b)", re.IGNORECASE)
+
+
+def has_neutral_negation_conflict(triplets: list[tuple[str, str, str]]) -> bool:
+    return any(sentiment == "neu" and NEGATION_PATTERN.search(opinion) for _aspect, opinion, sentiment in triplets)
+
+
 def _text_tokens(text: str) -> list[str]:
     import re
 
@@ -1125,6 +1132,7 @@ def build_complete_multitriplet_pseudo_rows(
     cropped_rejected = 0
     changed_rejected = 0
     duplicate_rejected = 0
+    neutral_negation_rejected = 0
 
     for row in candidate_rows:
         before = int(row.get("high_precision_triplet_count_before", 0) or 0)
@@ -1138,6 +1146,10 @@ def build_complete_multitriplet_pseudo_rows(
         original_label = canonicalize_triplet_text(row.get("high_precision_original_label", label))
         if label != original_label:
             changed_rejected += 1
+            continue
+        triplets = parse_triplet_text_list(label)
+        if has_neutral_negation_conflict(triplets):
+            neutral_negation_rejected += 1
             continue
         identity = _pseudo_row_identity(row)
         if identity in seen:
@@ -1159,6 +1171,7 @@ def build_complete_multitriplet_pseudo_rows(
         "complete_multi2_candidates": complete_candidates,
         "cropped_multi2_rejected": cropped_rejected,
         "changed_multi2_rejected": changed_rejected,
+        "neutral_negation_complete_rejected": neutral_negation_rejected,
         "duplicate_rows_rejected": duplicate_rejected,
         "extra_rows": len(merged_rows) - len(base_rows),
         "final_rows": len(merged_rows),
@@ -1175,19 +1188,24 @@ def build_complete_multitriplet_dynamic_pseudo_rows(
     dynamic_rows: list[dict],
     extra_weight: float = 0.2,
     min_triplets: int = 3,
+    keep_top_ratio: float = 1.0,
 ) -> tuple[list[dict], dict]:
     if not math.isfinite(extra_weight) or extra_weight <= 0:
         raise ValueError("extra_weight must be a positive finite number")
     if min_triplets < 2:
         raise ValueError("min_triplets must be at least 2")
+    if not math.isfinite(keep_top_ratio) or keep_top_ratio <= 0 or keep_top_ratio > 1:
+        raise ValueError("keep_top_ratio must be in (0, 1]")
 
     merged_rows = [dict(row) for row in base_rows]
     seen = {_pseudo_row_identity(row) for row in base_rows}
+    extra_candidates = []
     candidates = 0
     too_few_rejected = 0
     not_strict_rejected = 0
     cropped_rejected = 0
     duplicate_rejected = 0
+    neutral_negation_rejected = 0
 
     for row in dynamic_rows:
         before = int(row.get("dynamic_triplet_count_before", 0) or 0)
@@ -1202,19 +1220,39 @@ def build_complete_multitriplet_dynamic_pseudo_rows(
         if after != before:
             cropped_rejected += 1
             continue
+        label = canonicalize_triplet_text(row.get("label", ""))
+        triplets = parse_triplet_text_list(label)
+        if has_neutral_negation_conflict(triplets):
+            neutral_negation_rejected += 1
+            continue
         identity = _pseudo_row_identity(row)
         if identity in seen:
             duplicate_rejected += 1
             continue
         seen.add(identity)
-        merged_rows.append(
+        extra_candidates.append(
             {
                 **row,
-                "label": canonicalize_triplet_text(row.get("label", "")),
+                "label": label,
                 "sample_weight": extra_weight,
                 "pseudo_mix_source": f"dynamic_strict_{min_triplets}plus_extra",
             }
         )
+
+    selected_extra_rows = extra_candidates
+    dynamic_top_ratio_rejected = 0
+    if keep_top_ratio < 1.0 and extra_candidates:
+        keep_count = max(1, math.ceil(len(extra_candidates) * keep_top_ratio))
+        selected_extra_rows = sorted(
+            extra_candidates,
+            key=lambda row: (
+                -pseudo_confidence_score(row),
+                len(parse_triplet_text_list(canonicalize_triplet_text(row.get("label", "")))),
+                _pseudo_row_identity(row),
+            ),
+        )[:keep_count]
+        dynamic_top_ratio_rejected = len(extra_candidates) - len(selected_extra_rows)
+    merged_rows.extend(selected_extra_rows)
 
     analysis = {
         "base_rows": len(base_rows),
@@ -1223,7 +1261,11 @@ def build_complete_multitriplet_dynamic_pseudo_rows(
         "dynamic_too_few_triplets_rejected": too_few_rejected,
         "dynamic_not_strict_rejected": not_strict_rejected,
         "dynamic_cropped_rejected": cropped_rejected,
+        "dynamic_neutral_negation_rejected": neutral_negation_rejected,
         "duplicate_rows_rejected": duplicate_rejected,
+        "dynamic_extra_candidates_after_filters": len(extra_candidates),
+        "dynamic_keep_top_ratio": keep_top_ratio,
+        "dynamic_top_ratio_rejected": dynamic_top_ratio_rejected,
         "dynamic_extra_rows": len(merged_rows) - len(base_rows),
         "final_rows": len(merged_rows),
         "selected_rows": len(merged_rows),
@@ -2690,6 +2732,7 @@ def select_complete_dynamic_pseudo(args: argparse.Namespace) -> None:
         dynamic_rows,
         extra_weight=args.dynamic_extra_weight,
         min_triplets=args.dynamic_min_triplets,
+        keep_top_ratio=getattr(args, "dynamic_keep_top_ratio", 1.0),
     )
     analysis.update(
         {
@@ -3258,7 +3301,8 @@ def evaluate(args: argparse.Namespace) -> None:
     model_path = Path(args.model_path) if args.model_path else run_dir / "models" / "final" / "best"
     if not model_path.exists():
         model_path = run_dir / "models" / "extractor" / "best"
-    rows = read_jsonl(run_dir / "target_test.jsonl")
+    eval_file = Path(args.eval_file) if args.eval_file else run_dir / "target_test.jsonl"
+    rows = read_jsonl(eval_file)
     preds = generate_texts(
         model_path=model_path,
         inputs=build_extract_inputs(rows, use_task_prefix=not args.no_task_prefix),
@@ -3352,6 +3396,7 @@ def evaluate(args: argparse.Namespace) -> None:
     )
     print(
         {
+            "eval_file": str(eval_file),
             "raw_scores": raw_metrics,
             "fixed_scores": fixed_metrics,
             "sentiment_scores": sentiment_metrics,
@@ -3524,6 +3569,7 @@ def main() -> None:
     p.add_argument("--no_constrained_decoding", action="store_true")
     p.add_argument("--no_task_prefix", action="store_true")
     p.add_argument("--output_tag", default="")
+    p.add_argument("--eval_file", default="")
     p.set_defaults(func=evaluate)
 
     p = sub.add_parser("select_pseudo")
@@ -3560,6 +3606,7 @@ def main() -> None:
     p.add_argument("--dynamic_pseudo_file", required=True)
     p.add_argument("--dynamic_extra_weight", type=float, default=0.2)
     p.add_argument("--dynamic_min_triplets", type=int, default=3)
+    p.add_argument("--dynamic_keep_top_ratio", type=float, default=1.0)
     p.set_defaults(func=select_complete_dynamic_pseudo)
 
     p = sub.add_parser("build_final_train_from_files")

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from t5_aste_pipeline import (
+    build_complete_multitriplet_dynamic_pseudo_rows,
     build_complete_multitriplet_pseudo_rows,
     build_final_train_from_files,
     select_complete_multi_pseudo,
@@ -70,6 +71,114 @@ class CompleteMultitripletPseudoTest(unittest.TestCase):
         self.assertEqual(analysis["duplicate_rows_rejected"], 1)
         self.assertEqual(analysis["extra_rows"], 1)
         self.assertEqual(analysis["final_rows"], 2)
+
+    def test_rejects_complete_double_rows_with_neutral_negation_conflict(self) -> None:
+        hp1_rows = []
+        hp2_rows = [
+            {
+                "id": "neutral-negation-conflict",
+                "text": "It feels cheap, the keyboard is not very sensitive.",
+                "label": "<neu> keyboard <opinion> not very sensitive ; <neg> keyboard <opinion> cheap",
+                "sample_weight": 0.65,
+                "high_precision_original_label": "<neu> keyboard <opinion> not very sensitive ; <neg> keyboard <opinion> cheap",
+                "high_precision_triplet_count_before": 2,
+                "high_precision_triplet_count_after": 2,
+            },
+            {
+                "id": "clean-double",
+                "text": "The screen is bright but the battery is weak.",
+                "label": "<pos> screen <opinion> bright ; <neg> battery <opinion> weak",
+                "sample_weight": 0.65,
+                "high_precision_original_label": "<pos> screen <opinion> bright ; <neg> battery <opinion> weak",
+                "high_precision_triplet_count_before": 2,
+                "high_precision_triplet_count_after": 2,
+            },
+        ]
+
+        rows, analysis = build_complete_multitriplet_pseudo_rows(
+            hp1_rows,
+            hp2_rows,
+            extra_weight=0.25,
+        )
+
+        self.assertEqual([row["id"] for row in rows], ["clean-double"])
+        self.assertEqual(analysis["neutral_negation_complete_rejected"], 1)
+        self.assertEqual(analysis["extra_rows"], 1)
+
+    def test_dynamic_three_plus_uses_low_weight_and_rejects_neutral_negation_conflict(self) -> None:
+        base_rows = []
+        dynamic_rows = [
+            {
+                "id": "clean-three-plus",
+                "text": "The screen is bright, the battery is weak, and the keyboard is responsive.",
+                "label": "<pos> screen <opinion> bright ; <neg> battery <opinion> weak ; <pos> keyboard <opinion> responsive",
+                "sample_weight": 0.65,
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 3,
+                "dynamic_triplet_count_after": 3,
+            },
+            {
+                "id": "neutral-negation-three-plus",
+                "text": "The screen is bright, the battery is weak, and the keyboard is not very sensitive.",
+                "label": "<pos> screen <opinion> bright ; <neg> battery <opinion> weak ; <neu> keyboard <opinion> not very sensitive",
+                "sample_weight": 0.65,
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 3,
+                "dynamic_triplet_count_after": 3,
+            },
+        ]
+
+        rows, analysis = build_complete_multitriplet_dynamic_pseudo_rows(
+            base_rows,
+            dynamic_rows,
+            extra_weight=0.10,
+            min_triplets=3,
+        )
+
+        self.assertEqual([row["id"] for row in rows], ["clean-three-plus"])
+        self.assertEqual(rows[0]["sample_weight"], 0.10)
+        self.assertEqual(rows[0]["pseudo_mix_source"], "dynamic_strict_3plus_extra")
+        self.assertEqual(analysis["dynamic_neutral_negation_rejected"], 1)
+        self.assertEqual(analysis["dynamic_extra_rows"], 1)
+
+    def test_dynamic_three_plus_can_keep_top_confidence_fraction(self) -> None:
+        base_rows = []
+        dynamic_rows = [
+            {
+                "id": "high-confidence",
+                "text": "The screen is bright, the battery is weak, and the keyboard is responsive.",
+                "label": "<pos> screen <opinion> bright ; <neg> battery <opinion> weak ; <pos> keyboard <opinion> responsive",
+                "sample_weight": 0.65,
+                "quality_flags": {"all_terms_in_text": True},
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 3,
+                "dynamic_triplet_count_after": 3,
+            },
+            {
+                "id": "lower-confidence",
+                "text": "The display is clear, the drive is slow, the keyboard is usable, and the fan is loud.",
+                "label": "<pos> display <opinion> clear ; <neg> drive <opinion> slow ; <pos> keyboard <opinion> usable ; <neg> fan <opinion> loud",
+                "sample_weight": 0.65,
+                "quality_flags": {"all_terms_in_text": True},
+                "dynamic_strict_high_precision_pseudo": True,
+                "dynamic_triplet_count_before": 4,
+                "dynamic_triplet_count_after": 4,
+            },
+        ]
+
+        rows, analysis = build_complete_multitriplet_dynamic_pseudo_rows(
+            base_rows,
+            dynamic_rows,
+            extra_weight=0.10,
+            min_triplets=3,
+            keep_top_ratio=0.5,
+        )
+
+        self.assertEqual([row["id"] for row in rows], ["high-confidence"])
+        self.assertEqual(analysis["dynamic_extra_candidates_after_filters"], 2)
+        self.assertEqual(analysis["dynamic_top_ratio_rejected"], 1)
+        self.assertEqual(analysis["dynamic_keep_top_ratio"], 0.5)
+        self.assertEqual(analysis["dynamic_extra_rows"], 1)
 
     def test_rejects_invalid_extra_weight(self) -> None:
         with self.assertRaisesRegex(ValueError, "extra_weight"):

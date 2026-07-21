@@ -729,6 +729,27 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--fp16", output)
         self.assertIn("--gradient_checkpointing", output)
 
+    def test_bgca_style_generator_can_use_twenty_five_epoch_last_checkpoint(self) -> None:
+        output = self.run_dry(
+            "--generator_epochs",
+            "25",
+            "--generator_checkpoint_selection",
+            "last",
+        )
+
+        self.assertIn("generator_label_to_text_gen_last_ep25", output)
+        self.assertIn("--num_train_epochs 25", output)
+        self.assertIn("--checkpoint_selection last", output)
+        self.assertIn("strict_aug150_w020_label_to_text_gen_ep25_last", output)
+
+    def test_extractor_source_dev_is_evaluated_before_pseudo_labeling(self) -> None:
+        output = self.run_dry()
+
+        self.assertIn("t5_aste_pipeline.py evaluate", output)
+        self.assertIn("--eval_file", output)
+        self.assertIn("source_dev.jsonl", output)
+        self.assertIn("--output_tag source_dev_extractor_ep25_plain_last", output)
+
     def test_mixed_generator_can_reuse_upstream_extractor_and_pseudo_labels(self) -> None:
         upstream = r"runs\bgca_aste_stage1_domain_prompt_text_v1\rest16_to_laptop14"
 
@@ -919,7 +940,8 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
 
         output = result.stdout
         command_lines = [line for line in output.splitlines() if line.startswith(sys.executable)]
-        self.assertEqual(len(command_lines), 2)
+        self.assertEqual(len(command_lines), 3)
+        self.assertIn("source_dev_extractor_ep25_plain_last", command_lines[0])
         self.assertNotIn("t5_aste_pipeline.py prepare", output)
         self.assertNotIn("t5_aste_pipeline.py pseudo", output)
         self.assertNotIn("t5_aste_pipeline.py augment", output)
@@ -994,7 +1016,8 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
 
         output = result.stdout
         command_lines = [line for line in output.splitlines() if line.startswith(sys.executable)]
-        self.assertEqual(len(command_lines), 4)
+        self.assertEqual(len(command_lines), 5)
+        self.assertIn("source_dev_extractor_ep25_plain_last", command_lines[0])
         self.assertIn("select_complete_multi_pseudo", output)
         self.assertIn("hp1_complete2_dist5_w025", output)
         self.assertIn("build_final_train_from_files", output)
@@ -1073,6 +1096,73 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("--pseudo_weight 0.65", output)
         self.assertIn("--augment_weight 0.3", output)
 
+    def test_reuse_upstream_can_build_missing_complete_multi_weight_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "rest16_to_laptop14"
+            extractor_dir = run_dir / "models" / "extractor_ep25_plain_last" / "best"
+            generator_dir = run_dir / "models" / "generator_label_to_text_gen_ep8" / "best"
+            for path in (
+                run_dir / "extract_train.jsonl",
+                run_dir / "extract_dev.jsonl",
+                run_dir / "source_train.jsonl",
+                run_dir / "source_dev.jsonl",
+                run_dir / "target_unlabeled.jsonl",
+                run_dir / "target_train_gold_analysis.jsonl",
+                run_dir / "target_test.jsonl",
+                run_dir / "c3da_generator_train_label_to_text_gen.jsonl",
+                run_dir / "c3da_generator_dev_label_to_text_gen.jsonl",
+                run_dir / "target_pseudo.jsonl",
+                run_dir / "target_pseudo_high_precision.jsonl",
+                run_dir / "target_pseudo_high_precision_analysis.json",
+                run_dir / "c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl",
+                extractor_dir / "config.json",
+                generator_dir / "config.json",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+            self._write_pseudo_metadata(
+                run_dir,
+                extractor_dir,
+                "extractor_ep25_plain_last",
+            )
+            (run_dir / "stage_status.json").write_text(
+                '{"prepare_label_to_text_gen": true, "train_extractor_ep25_plain_last": true, '
+                '"pseudo_extractor_ep25_plain_last": true, "train_generator_label_to_text_gen": true}',
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--reuse_upstream_run_dir",
+                str(run_dir),
+                "--generator_prompt_style",
+                "label_to_text",
+                "--augment_prompt_style",
+                "masked_mutual",
+                "--domain_prefix_style",
+                "text",
+                "--complete_multi_extra_weight",
+                "0.35",
+                "--dry_run",
+            ]
+
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        output = result.stdout
+        self.assertIn("select_complete_multi_pseudo", output)
+        self.assertIn("hp1_complete2_dist5_w035", output)
+        self.assertIn("build_final_train_from_files", output)
+
     def test_complete_multi_can_add_strict_dynamic_three_plus_extra(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             command = [
@@ -1113,6 +1203,46 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("complete_multi2_w025_dynamic_strict3plus_dist5_w020", output)
         self.assertIn(
             "final_train_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_dynamic_strict3plus_dist5_w020.jsonl",
+            output,
+        )
+
+    def test_complete_dynamic_can_keep_top_confidence_ratio(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--generator_prompt_style",
+                "label_to_text",
+                "--augment_prompt_style",
+                "masked_mutual",
+                "--domain_prefix_style",
+                "text",
+                "--complete_multi_extra_weight",
+                "0.25",
+                "--complete_dynamic_extra_weight",
+                "0.1",
+                "--complete_dynamic_keep_top_ratio",
+                "0.5",
+                "--dry_run",
+            ]
+
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        output = result.stdout
+        self.assertIn("--dynamic_keep_top_ratio 0.5", output)
+        self.assertIn("complete_multi2_w025_dynamic_strict3plus_dist5_w010_top050", output)
+        self.assertIn(
+            "final_train_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_dynamic_strict3plus_dist5_w010_top050.jsonl",
             output,
         )
 

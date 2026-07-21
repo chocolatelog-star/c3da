@@ -192,14 +192,24 @@ def complete_multi_weight_tag(extra_weight: float) -> str:
     return f"complete_multi2_w{int(round(extra_weight * 100)):03d}"
 
 
-def complete_dynamic_weight_tag(extra_weight: float, min_triplets: int, max_token_distance: int) -> str:
+def complete_dynamic_weight_tag(
+    extra_weight: float,
+    min_triplets: int,
+    max_token_distance: int,
+    keep_top_ratio: float = 1.0,
+) -> str:
     if extra_weight <= 0 or extra_weight > 1:
         raise ValueError("complete_dynamic_extra_weight must be in (0, 1]")
     if min_triplets < 2:
         raise ValueError("complete_dynamic_min_triplets must be at least 2")
     if max_token_distance < 0:
         raise ValueError("high_precision_max_token_distance must be non-negative")
-    return f"dynamic_strict{min_triplets}plus_dist{max_token_distance}_w{int(round(extra_weight * 100)):03d}"
+    if keep_top_ratio <= 0 or keep_top_ratio > 1:
+        raise ValueError("complete_dynamic_keep_top_ratio must be in (0, 1]")
+    tag = f"dynamic_strict{min_triplets}plus_dist{max_token_distance}_w{int(round(extra_weight * 100)):03d}"
+    if keep_top_ratio < 1.0:
+        tag += f"_top{int(round(keep_top_ratio * 100)):03d}"
+    return tag
 
 
 def append_sentiment_summary_tag(
@@ -461,6 +471,42 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run:
             mark_done(status_path, status, extractor_stage)
 
+    source_dev_eval_tag = f"source_dev_{extractor_tag}"
+    source_dev_eval_stage = f"evaluate_{source_dev_eval_tag}"
+    source_dev_eval_outputs = [
+        run_dir / f"aste_metrics_fixed_{source_dev_eval_tag}.json",
+        run_dir / f"aste_predictions_{source_dev_eval_tag}.jsonl",
+    ]
+    if not stage_done(status, source_dev_eval_stage, source_dev_eval_outputs, args.rerun):
+        run_command(
+            [
+                py,
+                "t5_aste_pipeline.py",
+                "evaluate",
+                "--run_dir",
+                str(run_dir),
+                "--model_path",
+                str(extractor_dir / "best"),
+                "--eval_file",
+                str(run_dir / "source_dev.jsonl"),
+                "--batch_size",
+                str(args.eval_batch_size),
+                "--num_beams",
+                "4",
+                "--max_new_tokens",
+                "96",
+                "--cuda",
+                args.cuda,
+                "--no_task_prefix",
+                "--no_constrained_decoding",
+                "--output_tag",
+                source_dev_eval_tag,
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, source_dev_eval_stage)
+
     pseudo_stage = f"pseudo_{extractor_tag}"
     pseudo_outputs = [
         run_dir / "target_pseudo.jsonl",
@@ -601,6 +647,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 mark_done(status_path, status, pseudo_filter_stage)
 
     complete_multi_tag = ""
+    rerun_pseudo_variants = args.rerun or args.rerun_pseudo_variants
     if args.complete_multi_extra_weight > 0:
         if not use_legacy_pseudo_filter:
             raise ValueError("complete multi-triplet supplementation requires the hp1_dist5 base filter")
@@ -611,23 +658,23 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         pseudo_train_file = complete_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
         pseudo_analysis_file = complete_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
         complete_stage = f"select_pseudo_{extractor_tag}_{complete_multi_tag}"
-        if upstream_run_dir is None and not stage_done(
-            status,
-            complete_stage,
-            [pseudo_train_file, pseudo_analysis_file],
-            args.rerun,
-        ):
+        complete_outputs = [pseudo_train_file, pseudo_analysis_file]
+        complete_outputs_reusable = (
+            stage_done(status, complete_stage, complete_outputs, rerun_pseudo_variants)
+            or (not rerun_pseudo_variants and all(path.exists() for path in complete_outputs))
+        )
+        if not complete_outputs_reusable:
             run_command(
                 [
                     py,
                     "t5_aste_pipeline.py",
                     "select_complete_multi_pseudo",
                     "--run_dir",
-                    str(run_dir),
+                    str(pseudo_input_run_dir),
                     "--output_dir",
                     str(pseudo_variant_dir),
                     "--base_pseudo_file",
-                    str(run_dir / "target_pseudo_high_precision.jsonl"),
+                    str(pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"),
                     "--min_pseudo_weight",
                     "0.65",
                     "--high_precision_max_token_distance",
@@ -657,22 +704,26 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.high_precision_max_token_distance,
                 strict=True,
             )
-            if upstream_run_dir is None and not (
-                stage_done(
-                    status,
-                    dynamic_stage,
-                    [dynamic_pseudo_train_file, dynamic_pseudo_analysis_file, dynamic_pseudo_selection_state_file],
-                    args.rerun,
+            dynamic_outputs = [
+                dynamic_pseudo_train_file,
+                dynamic_pseudo_analysis_file,
+                dynamic_pseudo_selection_state_file,
+            ]
+            dynamic_outputs_reusable = (
+                (
+                    stage_done(status, dynamic_stage, dynamic_outputs, rerun_pseudo_variants)
+                    or (not rerun_pseudo_variants and all(path.exists() for path in dynamic_outputs))
                 )
                 and dynamic_selection_valid
-            ):
+            )
+            if not dynamic_outputs_reusable:
                 run_command(
                     [
                         py,
                         "t5_aste_pipeline.py",
                         "select_dynamic_pseudo",
                         "--run_dir",
-                        str(run_dir),
+                        str(pseudo_input_run_dir),
                         "--output_dir",
                         str(dynamic_pseudo_variant_dir),
                         "--min_pseudo_weight",
@@ -690,6 +741,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.complete_dynamic_extra_weight,
                 args.complete_dynamic_min_triplets,
                 args.high_precision_max_token_distance,
+                args.complete_dynamic_keep_top_ratio,
             )
             complete_multi_tag = f"{base_complete_multi_tag}_{dynamic_extra_tag}"
             combined_pseudo_variant_dir = pseudo_input_run_dir / "pseudo_variants" / f"hp1_complete2_dist5_w{int(round(args.complete_multi_extra_weight * 100)):03d}_{dynamic_extra_tag}"
@@ -697,19 +749,19 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             pseudo_train_file = combined_pseudo_variant_dir / "target_pseudo_high_precision.jsonl"
             pseudo_analysis_file = combined_pseudo_variant_dir / "target_pseudo_high_precision_analysis.json"
             combined_stage = f"select_pseudo_{extractor_tag}_{complete_multi_tag}"
-            if upstream_run_dir is None and not stage_done(
-                status,
-                combined_stage,
-                [pseudo_train_file, pseudo_analysis_file],
-                args.rerun,
-            ):
+            combined_outputs = [pseudo_train_file, pseudo_analysis_file]
+            combined_outputs_reusable = (
+                stage_done(status, combined_stage, combined_outputs, rerun_pseudo_variants)
+                or (not rerun_pseudo_variants and all(path.exists() for path in combined_outputs))
+            )
+            if not combined_outputs_reusable:
                 run_command(
                     [
                         py,
                         "t5_aste_pipeline.py",
                         "select_complete_dynamic_pseudo",
                         "--run_dir",
-                        str(run_dir),
+                        str(pseudo_input_run_dir),
                         "--output_dir",
                         str(combined_pseudo_variant_dir),
                         "--base_pseudo_file",
@@ -720,6 +772,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                         str(args.complete_dynamic_extra_weight),
                         "--dynamic_min_triplets",
                         str(args.complete_dynamic_min_triplets),
+                        "--dynamic_keep_top_ratio",
+                        str(args.complete_dynamic_keep_top_ratio),
                     ],
                     args.dry_run,
                 )
@@ -750,8 +804,12 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             if not selection_valid:
                 raise RuntimeError(f"cannot validate upstream dynamic pseudo selection: {selection_reason}")
 
-    generator_dir = run_dir / "models" / f"generator_{gen_tag}_ep{args.generator_epochs}"
-    if not stage_done(status, f"train_generator_{gen_tag}", [generator_dir / "best" / "config.json"], args.rerun):
+    generator_selection_suffix = (
+        "" if args.generator_checkpoint_selection == "best" else f"_{args.generator_checkpoint_selection}"
+    )
+    generator_stage_tag = f"{gen_tag}{generator_selection_suffix}"
+    generator_dir = run_dir / "models" / f"generator_{generator_stage_tag}_ep{args.generator_epochs}"
+    if not stage_done(status, f"train_generator_{generator_stage_tag}", [generator_dir / "best" / "config.json"], args.rerun):
         run_command(
             [
                 py,
@@ -773,7 +831,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--augment_weight",
                 "1.0",
                 "--checkpoint_selection",
-                "best",
+                args.generator_checkpoint_selection,
                 "--resume_from_checkpoint",
                 "auto",
                 *common_train,
@@ -781,13 +839,19 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             args.dry_run,
         )
         if not args.dry_run:
-            mark_done(status_path, status, f"train_generator_{gen_tag}")
+            mark_done(status_path, status, f"train_generator_{generator_stage_tag}")
+
+    generator_result_tag = gen_tag
+    if args.generator_epochs != 8:
+        generator_result_tag = f"{generator_result_tag}_ep{args.generator_epochs}"
+    if args.generator_checkpoint_selection != "best":
+        generator_result_tag = f"{generator_result_tag}_{args.generator_checkpoint_selection}"
 
     pseudo_suffix = "" if use_legacy_pseudo_filter else f"_{pseudo_tag}"
     if complete_multi_tag:
         pseudo_suffix = f"_{complete_multi_tag}"
     final_tag = augment_experiment_tag(
-        f"strict_aug150_w020_{gen_tag}{pseudo_suffix}",
+        f"strict_aug150_w020_{generator_result_tag}{pseudo_suffix}",
         args.opinion_replacement_mode,
         args.sentiment_vector_backend,
         args.sentiment_vector_use_polarity_axis,
@@ -811,7 +875,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     augment_legacy_stages = legacy_stage_names.get("augment", ())
     if complete_multi_tag:
         base_augment_tag = augment_experiment_tag(
-            f"strict_aug150_w020_{gen_tag}",
+            f"strict_aug150_w020_{generator_result_tag}",
             args.opinion_replacement_mode,
             args.sentiment_vector_backend,
             args.sentiment_vector_use_polarity_axis,
@@ -1180,6 +1244,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         args.opinion_replacement_mode,
         pseudo_analysis_file,
         metrics_tag,
+        source_dev_eval_tag,
     )
 
 
@@ -1195,12 +1260,14 @@ def summarize_pair(
     configured_opinion_replacement_mode: str,
     pseudo_analysis_file: Path,
     metrics_tag: str,
+    source_dev_eval_tag: str,
 ) -> dict:
     pseudo_hp = read_json(pseudo_analysis_file)
     augment = read_json(run_dir / f"c3da_augment_analysis_{final_tag}.json")
     final_comp = read_json(run_dir / f"final_train_composition_analysis_{final_tag}.json")
     raw = read_json(run_dir / f"aste_metrics_raw_{metrics_tag}.json")
     fixed = read_json(run_dir / f"aste_metrics_fixed_{metrics_tag}.json")
+    source_dev_fixed = read_json(run_dir / f"aste_metrics_fixed_{source_dev_eval_tag}.json")
     hp_eval = pseudo_hp.get("hidden_gold_eval", {})
     hp_raw = hp_eval.get("raw_scores", {})
     return {
@@ -1212,6 +1279,7 @@ def summarize_pair(
         "opinion_replacement_mode": augment.get("opinion_replacement_mode", configured_opinion_replacement_mode),
         "run_dir": str(run_dir),
         "source_rows": metric_value(final_comp, "source_rows_used"),
+        "source_dev_fixed_f1": source_dev_fixed.get("micro_f1", ""),
         "pseudo_hp_rows": pseudo_hp.get("selected_rows", ""),
         "pseudo_hp_precision": hp_raw.get("precision", ""),
         "pseudo_hp_recall": hp_raw.get("recall", ""),
@@ -1242,6 +1310,7 @@ def write_summary_legacy(output_root: Path, rows: list[dict]) -> None:
         "opinion_replacement_mode",
         "run_dir",
         "source_rows",
+        "source_dev_fixed_f1",
         "pseudo_hp_rows",
         "pseudo_hp_precision",
         "pseudo_hp_recall",
@@ -1280,6 +1349,7 @@ def write_summary_legacy(output_root: Path, rows: list[dict]) -> None:
                     str(row.get("augment_prompt_style", "")),
                     str(row.get("domain_prefix_style", "")),
                     str(row.get("opinion_replacement_mode", "")),
+                    fmt(row.get("source_dev_fixed_f1")),
                     fmt(row.get("pseudo_hp_f1")),
                     str(row.get("augment_selected_rows", "")),
                     str(row.get("final_train_rows", "")),
@@ -1291,8 +1361,44 @@ def write_summary_legacy(output_root: Path, rows: list[dict]) -> None:
             )
             + " |"
         )
+    lines = build_summary_markdown_lines(rows, title="# BGCA ASTE 跨域 Stage1 结果")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print({"csv": str(csv_path), "md": str(md_path)}, flush=True)
+
+
+def build_summary_markdown_lines(rows: list[dict], title: str) -> list[str]:
+    lines = [
+        title,
+        "",
+        "主指标使用 raw F1（原始F1），fixed F1（修正F1）仅作为辅助分析。",
+        "",
+        "| 跨域方向 | 生成器训练方式 | 增强方式 | 领域前缀 | 观点词替换模式 | 源域dev fixed F1 | 高精度伪标签F1 | 增强条数 | 最终训练条数 | raw P | raw R | raw F1 | fixed F1 |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        pair = f"{row['source']} -> {row['target']}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    pair,
+                    str(row.get("generator_prompt_style", "")),
+                    str(row.get("augment_prompt_style", "")),
+                    str(row.get("domain_prefix_style", "")),
+                    str(row.get("opinion_replacement_mode", "")),
+                    fmt(row.get("source_dev_fixed_f1")),
+                    fmt(row.get("pseudo_hp_f1")),
+                    str(row.get("augment_selected_rows", "")),
+                    str(row.get("final_train_rows", "")),
+                    fmt(row.get("raw_precision")),
+                    fmt(row.get("raw_recall")),
+                    fmt(row.get("raw_f1")),
+                    fmt(row.get("fixed_f1")),
+                ]
+            )
+            + " |"
+        )
+    return lines
 
 
 def fmt(value) -> str:
@@ -1313,6 +1419,7 @@ def write_summary(output_root: Path, rows: list[dict], output_tag: str = "") -> 
         "opinion_replacement_mode",
         "run_dir",
         "source_rows",
+        "source_dev_fixed_f1",
         "pseudo_hp_rows",
         "pseudo_hp_precision",
         "pseudo_hp_recall",
@@ -1350,6 +1457,7 @@ def write_summary(output_root: Path, rows: list[dict], output_tag: str = "") -> 
                     str(row.get("augment_prompt_style", "")),
                     str(row.get("domain_prefix_style", "")),
                     str(row.get("opinion_replacement_mode", "")),
+                    fmt(row.get("source_dev_fixed_f1")),
                     fmt(row.get("pseudo_hp_f1")),
                     str(row.get("augment_selected_rows", "")),
                     str(row.get("final_train_rows", "")),
@@ -1361,6 +1469,7 @@ def write_summary(output_root: Path, rows: list[dict], output_tag: str = "") -> 
             )
             + " |"
         )
+    lines = build_summary_markdown_lines(rows, title="# BGCA ASTE 跨域 Stage1 结果")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print({"csv": str(csv_path), "md": str(md_path)}, flush=True)
 
@@ -1401,6 +1510,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
     parser.add_argument("--extractor_epochs", type=int, default=25)
     parser.add_argument("--generator_epochs", type=int, default=8)
+    parser.add_argument("--generator_checkpoint_selection", choices=["last", "best", "aste_f1"], default="best")
     parser.add_argument("--final_epochs", type=int, default=5)
     parser.add_argument("--extractor_lambda_sentiment_contrastive", type=float, default=0.0)
     parser.add_argument("--lambda_sentiment_contrastive", type=float, default=0.0)
@@ -1421,6 +1531,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--complete_multi_extra_weight", type=float, default=0.0)
     parser.add_argument("--complete_dynamic_extra_weight", type=float, default=0.0)
     parser.add_argument("--complete_dynamic_min_triplets", type=int, default=3)
+    parser.add_argument("--complete_dynamic_keep_top_ratio", type=float, default=1.0)
     parser.add_argument("--final_pseudo_weight", type=float, default=0.5)
     parser.add_argument("--final_augment_weight", type=float, default=0.2)
     parser.add_argument("--dynamic_multitriplet", action="store_true")
@@ -1435,6 +1546,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--rerun", action="store_true")
+    parser.add_argument("--rerun_pseudo_variants", action="store_true")
     return parser.parse_args()
 
 
@@ -1452,6 +1564,8 @@ def main() -> None:
     args = parse_args()
     if args.complete_dynamic_extra_weight > 0 and args.complete_multi_extra_weight <= 0:
         raise ValueError("--complete_dynamic_extra_weight requires --complete_multi_extra_weight")
+    if args.complete_dynamic_keep_top_ratio <= 0 or args.complete_dynamic_keep_top_ratio > 1:
+        raise ValueError("--complete_dynamic_keep_top_ratio must be in (0, 1]")
     rows = []
     pairs = selected_pairs(args.pairs)
     if args.reuse_upstream_run_dir and len(pairs) != 1:
@@ -1487,7 +1601,7 @@ def main() -> None:
     if args.complete_multi_extra_weight > 0:
         complete_tag = complete_multi_weight_tag(args.complete_multi_extra_weight)
         if args.complete_dynamic_extra_weight > 0:
-            complete_tag = f"{complete_tag}_{complete_dynamic_weight_tag(args.complete_dynamic_extra_weight, args.complete_dynamic_min_triplets, args.high_precision_max_token_distance)}"
+            complete_tag = f"{complete_tag}_{complete_dynamic_weight_tag(args.complete_dynamic_extra_weight, args.complete_dynamic_min_triplets, args.high_precision_max_token_distance, args.complete_dynamic_keep_top_ratio)}"
         summary_tag = f"{summary_tag}_{complete_tag}".strip("_")
         summary_tag = append_sentiment_summary_tag(
             summary_tag,
