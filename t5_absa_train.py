@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import shutil
 from pathlib import Path
 
@@ -29,6 +30,52 @@ from t5_aste_data import (
     parse_triplet_text_list,
     triplet_count_diagnostics,
 )
+
+
+def reproducibility_training_args(seed: int, mode: str) -> dict:
+    if mode == "legacy":
+        return {"seed": seed}
+    if mode not in {"seeded", "deterministic"}:
+        raise ValueError(f"unsupported reproducibility mode: {mode}")
+    return {
+        "seed": seed,
+        "data_seed": seed,
+        "full_determinism": mode == "deterministic",
+        "dataloader_num_workers": 0,
+    }
+
+
+def configure_reproducibility(seed: int, mode: str) -> dict:
+    deterministic = mode == "deterministic"
+    if mode == "legacy":
+        os.environ.pop("PYTHONHASHSEED", None)
+        os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+    else:
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    return {
+        "seed": seed,
+        "mode": mode,
+        "deterministic": deterministic,
+        "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED"),
+        "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+    }
 
 
 TASK_SPECIAL_TOKENS = ["<pos>", "<neg>", "<neu>", "<opinion>", "<aspect>"]
@@ -1169,6 +1216,9 @@ def main() -> None:
     parser.add_argument("--save_total_limit", type=int, default=2)
     parser.add_argument("--resume_from_checkpoint", choices=["none", "auto"], default="none")
     parser.add_argument("--seed", type=int, default=1000)
+    reproducibility_group = parser.add_mutually_exclusive_group()
+    reproducibility_group.add_argument("--deterministic", action="store_true")
+    reproducibility_group.add_argument("--legacy_stochastic", action="store_true")
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--gradient_checkpointing", action="store_true")
@@ -1213,9 +1263,9 @@ def main() -> None:
     args = parser.parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    reproducibility_mode = "deterministic" if args.deterministic else "legacy"
+    reproducibility_config = configure_reproducibility(args.seed, reproducibility_mode)
+    print("reproducibility:", reproducibility_config)
     output_dir = Path(args.output_dir)
     checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
     resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
@@ -1360,7 +1410,7 @@ def main() -> None:
         save_total_limit=args.save_total_limit,
         fp16=bool(args.fp16 and torch.cuda.is_available()),
         report_to=[],
-        seed=args.seed,
+        **reproducibility_training_args(args.seed, reproducibility_mode),
         **checkpoint_selection_config,
     )
     collator = DataCollatorForSeq2SeqWithPairing(DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model))

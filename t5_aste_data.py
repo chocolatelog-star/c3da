@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import random
 import re
+import tempfile
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -34,9 +37,28 @@ def normalize_space(text: str) -> str:
 def write_jsonl(path: str | Path, rows: Iterable[dict]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    for attempt in range(3):
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                delete=False,
+                dir=str(target.parent),
+                prefix=f".{target.stem}.",
+                suffix=".tmp",
+            ) as f:
+                tmp_path = Path(f.name)
+                for row in rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            os.replace(tmp_path, target)
+            return
+        except PermissionError:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            if attempt == 2:
+                raise
+            time.sleep(0.2 * (attempt + 1))
 
 
 def read_jsonl(path: str | Path) -> list[dict]:
@@ -47,8 +69,27 @@ def read_jsonl(path: str | Path) -> list[dict]:
 def dump_json(path: str | Path, obj: dict | list) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+    for attempt in range(3):
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                delete=False,
+                dir=str(target.parent),
+                prefix=f".{target.stem}.",
+                suffix=".tmp",
+            ) as f:
+                tmp_path = Path(f.name)
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target)
+            return
+        except PermissionError:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            if attempt == 2:
+                raise
+            time.sleep(0.2 * (attempt + 1))
 
 
 def _span_text(tokens: list[str], indexes: list[int]) -> str:

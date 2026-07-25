@@ -1026,6 +1026,41 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
         self.assertIn("complete_multi2_w025", output)
         self.assertIn("--resume_from_checkpoint auto", output)
 
+    def test_complete_multi_ablation_uses_upstream_pseudo_file_when_reusing_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            upstream = Path(temp_dir) / "upstream"
+            self._ready_legacy_upstream(upstream)
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "--output_root",
+                temp_dir,
+                "--pairs",
+                "rest16:laptop14",
+                "--reuse_upstream_run_dir",
+                str(upstream),
+                "--generator_prompt_style",
+                "label_to_text",
+                "--augment_prompt_style",
+                "masked_mutual",
+                "--domain_prefix_style",
+                "text",
+                "--complete_multi_extra_weight",
+                "0.25",
+                "--dry_run",
+            ]
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        output = result.stdout
+        self.assertIn(f"--pseudo_train_file {upstream}\\target_pseudo_high_precision.jsonl", output)
+        self.assertNotIn(r"--pseudo_train_file runs\bgca_aste_stage1_bgca_generator25_last_v1", output)
+
     def test_complete_multi_weight_ablation_isolates_final_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir) / "rest16_to_laptop14"

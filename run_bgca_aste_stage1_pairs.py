@@ -267,6 +267,12 @@ def augment_experiment_tag(
     raise ValueError(f"unsupported opinion replacement mode: {opinion_replacement_mode}")
 
 
+def augment_prompt_tag(prompt_style: str) -> str:
+    if prompt_style == "label_to_text":
+        return "aug_l2t"
+    return ""
+
+
 def metric_value(data: dict, *keys: str):
     current = data
     for key in keys:
@@ -369,6 +375,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         "--seed",
         str(args.seed),
     ]
+    if args.deterministic:
+        common_train.append("--deterministic")
+    elif getattr(args, "legacy_stochastic", False):
+        common_train.append("--legacy_stochastic")
 
     if not stage_done(
         status,
@@ -560,6 +570,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             mark_done(status_path, status, pseudo_stage)
 
     pseudo_input_run_dir = upstream_run_dir or run_dir
+    base_hp1_pseudo_train_file = pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"
     pseudo_train_file = pseudo_input_run_dir / "target_pseudo_high_precision.jsonl"
     pseudo_analysis_file = pseudo_input_run_dir / "target_pseudo_high_precision_analysis.json"
     pseudo_tag = pseudo_filter_tag(
@@ -846,6 +857,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         generator_result_tag = f"{generator_result_tag}_ep{args.generator_epochs}"
     if args.generator_checkpoint_selection != "best":
         generator_result_tag = f"{generator_result_tag}_{args.generator_checkpoint_selection}"
+    augment_prompt_suffix = augment_prompt_tag(args.augment_prompt_style)
 
     pseudo_suffix = "" if use_legacy_pseudo_filter else f"_{pseudo_tag}"
     if complete_multi_tag:
@@ -856,6 +868,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         args.sentiment_vector_backend,
         args.sentiment_vector_use_polarity_axis,
     )
+    if augment_prompt_suffix:
+        final_tag = f"{final_tag}_{augment_prompt_suffix}"
     final_weight_suffix = final_weight_tag(args.final_pseudo_weight, args.final_augment_weight)
     if final_weight_suffix:
         final_tag = f"{final_tag}_{final_weight_suffix}"
@@ -874,12 +888,17 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     )
     augment_legacy_stages = legacy_stage_names.get("augment", ())
     if complete_multi_tag:
+        augment_pseudo_train_file = (
+            pseudo_train_file if args.augment_complete_pseudo else base_hp1_pseudo_train_file
+        )
         base_augment_tag = augment_experiment_tag(
             f"strict_aug150_w020_{generator_result_tag}",
             args.opinion_replacement_mode,
             args.sentiment_vector_backend,
             args.sentiment_vector_use_polarity_axis,
         )
+        if augment_prompt_suffix:
+            base_augment_tag = f"{base_augment_tag}_{augment_prompt_suffix}"
         selected_augment_file = run_dir / f"c3da_two_channel_augmented_selected_{base_augment_tag}.jsonl"
         base_augment_stage = f"augment_{base_augment_tag}"
         if not reuse_for_auxiliary_loss and (args.rerun or not selected_augment_file.exists()):
@@ -937,7 +956,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                     "--pseudo_train_source",
                     "high_precision",
                     "--pseudo_train_file",
-                    str(run_dir / "target_pseudo_high_precision.jsonl"),
+                    str(augment_pseudo_train_file),
                     "--high_precision_max_triplets",
                     "1",
                     "--high_precision_max_token_distance",
@@ -1534,6 +1553,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--complete_dynamic_keep_top_ratio", type=float, default=1.0)
     parser.add_argument("--final_pseudo_weight", type=float, default=0.5)
     parser.add_argument("--final_augment_weight", type=float, default=0.2)
+    parser.add_argument("--augment_complete_pseudo", action="store_true")
     parser.add_argument("--dynamic_multitriplet", action="store_true")
     parser.add_argument("--dynamic_multitriplet_strict", action="store_true")
     parser.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
@@ -1544,6 +1564,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--seed", type=int, default=1000)
+    reproducibility_group = parser.add_mutually_exclusive_group()
+    reproducibility_group.add_argument("--deterministic", action="store_true")
+    reproducibility_group.add_argument("--legacy_stochastic", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--rerun", action="store_true")
     parser.add_argument("--rerun_pseudo_variants", action="store_true")
@@ -1572,6 +1595,7 @@ def main() -> None:
         raise ValueError("--reuse_upstream_run_dir requires exactly one source:target pair")
     if args.dynamic_multitriplet_strict:
         args.dynamic_multitriplet = True
+    augment_prompt_suffix = augment_prompt_tag(args.augment_prompt_style)
     pseudo_tag = (
         dynamic_pseudo_filter_tag(
             args.high_precision_max_token_distance,
@@ -1612,6 +1636,8 @@ def main() -> None:
     final_weight_suffix = final_weight_tag(args.final_pseudo_weight, args.final_augment_weight)
     if final_weight_suffix:
         summary_tag = f"{summary_tag}_{final_weight_suffix}".strip("_")
+    if augment_prompt_suffix:
+        summary_tag = f"{summary_tag}_{augment_prompt_suffix}".strip("_")
     for source, target in pairs:
         rows.append(run_pair(args, source, target))
         if not args.dry_run:

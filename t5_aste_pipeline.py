@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -1744,6 +1745,84 @@ def build_final_training_rows(
     return final_rows
 
 
+def extract_selected_augment_rows(
+    rows: list[dict],
+    source_name: str,
+    expected_rows: int,
+    selected_weight: float,
+) -> tuple[list[dict], dict]:
+    selected_rows: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    duplicate_rows_rejected = 0
+    triplet_counts: Counter[str] = Counter()
+
+    for row in rows:
+        if row.get("selected_augmentation") is not True:
+            continue
+        augmentation = str(row.get("augmentation", "")).strip()
+        if not augmentation or augmentation == "target_pseudo":
+            continue
+        text = str(row.get("text", "")).strip()
+        label = canonicalize_triplet_text(row.get("label", ""))
+        if not text or not label:
+            continue
+        key = (text.lower(), label.lower())
+        if key in seen:
+            duplicate_rows_rejected += 1
+            continue
+        seen.add(key)
+
+        selected_row = {
+            key: value
+            for key, value in row.items()
+            if key not in {"input", "target", "final_weight_flags"}
+        }
+        selected_row.update(
+            {
+                "text": text,
+                "label": label,
+                "sample_weight": round(selected_weight, 6),
+                "hybrid_augment_source": source_name,
+            }
+        )
+        selected_rows.append(selected_row)
+        triplet_counts[str(len(parse_triplet_text_list(label)))] += 1
+
+    if len(selected_rows) != expected_rows:
+        raise ValueError(f"expected {expected_rows} selected augment rows, found {len(selected_rows)}")
+
+    stats = {
+        "source_name": source_name,
+        "input_rows": len(rows),
+        "selected_rows": len(selected_rows),
+        "duplicate_rows_rejected": duplicate_rows_rejected,
+        "selected_weight": round(selected_weight, 6),
+        "triplet_count_distribution": dict(sorted(triplet_counts.items())),
+    }
+    return selected_rows, stats
+
+
+def extract_selected_augment_from_final_train(args: argparse.Namespace) -> None:
+    source_path = Path(args.source_final_train_file)
+    output_path = Path(args.output_file)
+    analysis_path = Path(args.analysis_file)
+    selected_rows, stats = extract_selected_augment_rows(
+        read_jsonl(source_path),
+        source_name=str(source_path),
+        expected_rows=args.expected_rows,
+        selected_weight=args.selected_weight,
+    )
+    analysis = {
+        **stats,
+        "source_file": str(source_path),
+        "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "output_file": str(output_path),
+    }
+    write_jsonl(output_path, selected_rows)
+    dump_json(analysis_path, analysis)
+    print(analysis)
+
+
 def run_nli_filter(
     rows: list[dict],
     model_path: str | Path,
@@ -3301,7 +3380,8 @@ def evaluate(args: argparse.Namespace) -> None:
     model_path = Path(args.model_path) if args.model_path else run_dir / "models" / "final" / "best"
     if not model_path.exists():
         model_path = run_dir / "models" / "extractor" / "best"
-    eval_file = Path(args.eval_file) if args.eval_file else run_dir / "target_test.jsonl"
+    eval_file_arg = getattr(args, "eval_file", "")
+    eval_file = Path(eval_file_arg) if eval_file_arg else run_dir / "target_test.jsonl"
     rows = read_jsonl(eval_file)
     preds = generate_texts(
         model_path=model_path,
@@ -3621,6 +3701,14 @@ def main() -> None:
     p.add_argument("--final_max_weight", type=float, default=1.0)
     p.add_argument("--no_task_prefix", action="store_true")
     p.set_defaults(func=build_final_train_from_files)
+
+    p = sub.add_parser("extract_selected_augment_from_final_train")
+    p.add_argument("--source_final_train_file", required=True)
+    p.add_argument("--output_file", required=True)
+    p.add_argument("--analysis_file", required=True)
+    p.add_argument("--expected_rows", type=int, default=150)
+    p.add_argument("--selected_weight", type=float, default=0.2)
+    p.set_defaults(func=extract_selected_augment_from_final_train)
 
     args = parser.parse_args()
     args.func(args)
