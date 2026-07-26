@@ -8,7 +8,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from reproducibility import ReproducibilityError, RunContext
+from reproducibility import (
+    GoldenMismatchError,
+    ReproducibilityError,
+    RunContext,
+    compare_observed_rows,
+    read_jsonl,
+    semantic_text_label_sha256,
+    sha256_file,
+    validate_metrics,
+    write_json_atomic,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -53,6 +63,168 @@ def validate_git_state(project_root: Path, allow_dirty: bool) -> tuple[str, str]
     if dirty and not allow_dirty:
         raise ReproducibilityError("formal run requires a clean git worktree")
     return commit, branch
+
+
+def validate_external_inputs(recipe: dict) -> dict[str, str]:
+    validated = {}
+    for name, declaration in recipe.get("external_inputs", {}).items():
+        path = Path(declaration["path"])
+        if not path.is_file():
+            raise ReproducibilityError(f"external input is missing for {name}: {path}")
+        actual_hash = sha256_file(path)
+        expected_hash = declaration["sha256"].upper()
+        if actual_hash != expected_hash:
+            raise ReproducibilityError(
+                f"external input hash mismatch for {name}: "
+                f"{actual_hash} != {expected_hash}"
+            )
+        validated[name] = actual_hash
+    return validated
+
+
+def validate_golden_artifact(stage: Stage, recipe: dict) -> dict | None:
+    golden = recipe.get("golden", {})
+    if not stage.golden_key or stage.golden_key not in golden:
+        return None
+    expected = golden[stage.golden_key]
+    artifact_path = stage.outputs[-1] if stage.golden_key in {"base_pseudo", "predictions"} else stage.outputs[0]
+    if not artifact_path.is_file():
+        raise GoldenMismatchError(f"golden artifact is missing: {artifact_path}")
+
+    result = {
+        "stage": stage.name,
+        "golden_key": stage.golden_key,
+        "path": str(artifact_path.resolve()),
+    }
+    observed_rows = expected.get("observed_golden_rows")
+    if observed_rows is not None:
+        row_comparison = compare_observed_rows(
+            stage.name, read_jsonl(artifact_path), observed_rows
+        )
+        result["rows"] = row_comparison
+        if not row_comparison["matched"]:
+            raise GoldenMismatchError(
+                f"observed rows mismatch for {stage.name}: "
+                f"{row_comparison['actual_rows']} != {observed_rows}"
+            )
+
+    expected_hash = expected.get("sha256")
+    if expected_hash:
+        actual_hash = sha256_file(artifact_path)
+        result["sha256"] = actual_hash
+        result["sha256_matched"] = actual_hash == expected_hash
+        if actual_hash != expected_hash:
+            raise GoldenMismatchError(
+                f"golden hash mismatch for {stage.name}: "
+                f"{actual_hash} != {expected_hash}"
+            )
+
+    expected_semantic_hash = expected.get("semantic_sha256")
+    if expected_semantic_hash:
+        actual_semantic_hash = semantic_text_label_sha256(artifact_path)
+        result["semantic_sha256"] = actual_semantic_hash
+        result["semantic_sha256_matched"] = (
+            actual_semantic_hash == expected_semantic_hash
+        )
+        if actual_semantic_hash != expected_semantic_hash:
+            raise GoldenMismatchError(
+                f"golden semantic hash mismatch for {stage.name}: "
+                f"{actual_semantic_hash} != {expected_semantic_hash}"
+            )
+
+    if stage.name == "evaluate" and "metrics" in recipe:
+        raw_metrics = json.loads(stage.outputs[0].read_text(encoding="utf-8"))
+        fixed_metrics = json.loads(stage.outputs[1].read_text(encoding="utf-8"))
+        validate_metrics(raw_metrics, recipe["metrics"]["raw"])
+        validate_metrics(fixed_metrics, recipe["metrics"]["fixed"])
+        result["metrics_matched"] = True
+    return result
+
+
+def collect_internal_input_hashes(stage: Stage, run_root: Path) -> dict[str, str]:
+    run_root = Path(run_root).resolve()
+    output_paths = {path.resolve() for path in stage.outputs}
+    hashes = {}
+    for token in stage.argv:
+        candidate = Path(token)
+        if not candidate.exists():
+            continue
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(run_root) or resolved in output_paths:
+            continue
+        hash_target = resolved
+        if resolved.is_dir():
+            model_weights = resolved / "model.safetensors"
+            if not model_weights.is_file():
+                continue
+            hash_target = model_weights
+        if hash_target.is_file():
+            hashes[str(resolved)] = sha256_file(hash_target)
+    return hashes
+
+
+def execute_stages(
+    stages: list[Stage],
+    context: RunContext,
+    recipe: dict,
+    project_root: Path,
+    dry_run: bool,
+) -> None:
+    total = len(stages)
+    for index, stage in enumerate(stages, start=1):
+        input_hashes = collect_internal_input_hashes(stage, context.run_root)
+        if stage.name == "prepare_final":
+            pseudo_source = context.run_root / "target_pseudo.jsonl"
+            if pseudo_source.is_file():
+                input_hashes[str(pseudo_source.resolve())] = sha256_file(pseudo_source)
+
+        if stage.name in context.manifest.get("stages", {}):
+            if context.validate_completed_stage(stage.name, stage.outputs, input_hashes):
+                validate_golden_artifact(stage, recipe)
+                print(
+                    f"[native-repro] SKIP {index}/{total} {stage.name} "
+                    "(validated checkpoint)",
+                    flush=True,
+                )
+                continue
+
+        print(f"[native-repro] START {index}/{total} {stage.name}", flush=True)
+        print(subprocess.list2cmdline(stage.argv), flush=True)
+        context.run_command(
+            stage.name,
+            list(stage.argv),
+            cwd=project_root,
+            dry_run=dry_run,
+        )
+        if dry_run:
+            print(f"[native-repro] DONE {index}/{total} {stage.name}", flush=True)
+            continue
+
+        if stage.name == "prepare_final":
+            source = context.run_root / "target_pseudo.jsonl"
+            destination = context.run_root / "final_data" / "target_pseudo.jsonl"
+            context.require_internal_artifact(source)
+            context.require_internal_artifact(destination)
+            shutil.copy2(source, destination)
+
+        context.mark_stage_complete(stage.name, stage.outputs, input_hashes)
+        try:
+            golden_result = validate_golden_artifact(stage, recipe)
+        except GoldenMismatchError as error:
+            context.manifest.setdefault("golden_comparisons", {})[stage.name] = {
+                "matched": False,
+                "error": str(error),
+            }
+            write_json_atomic(context.manifest_path, context.manifest)
+            context.render_run_record_cn()
+            raise
+        if golden_result is not None:
+            context.manifest.setdefault("golden_comparisons", {})[stage.name] = {
+                "matched": True,
+                **golden_result,
+            }
+            write_json_atomic(context.manifest_path, context.manifest)
+        print(f"[native-repro] DONE {index}/{total} {stage.name}", flush=True)
 
 
 def _command(python: Path, script: Path, *arguments: str) -> tuple[str, ...]:
@@ -187,7 +359,7 @@ def build_best_v1_stages(
                 "auto",
                 *common_train,
             ),
-            (extractor,),
+            (extractor / "model.safetensors",),
             "extractor",
         ),
         Stage(
@@ -250,7 +422,7 @@ def build_best_v1_stages(
                 "auto",
                 *common_train,
             ),
-            (generator,),
+            (generator / "model.safetensors",),
             "generator",
         ),
         Stage(
@@ -433,7 +605,7 @@ def build_best_v1_stages(
                 "--sentiment_contrastive_class_balanced",
                 *common_train,
             ),
-            (final_model,),
+            (final_model / "model.safetensors",),
             "final_model",
         ),
         Stage(
@@ -501,25 +673,32 @@ def main() -> None:
         [sys.executable, *sys.argv]
     )
     context.write_user_command(user_command)
+    if not args.dry_run:
+        try:
+            external_hashes = validate_external_inputs(recipe)
+        except ReproducibilityError as error:
+            context.manifest["external_inputs"] = {
+                "matched": False,
+                "error": str(error),
+            }
+            write_json_atomic(context.manifest_path, context.manifest)
+            context.render_run_record_cn()
+            raise
+        context.manifest["external_inputs"] = {
+            "matched": True,
+            "sha256": external_hashes,
+        }
+        write_json_atomic(context.manifest_path, context.manifest)
+        model_paths = [
+            Path(recipe["external_inputs"][name]["path"])
+            for name in ("t5_weights", "nli_weights")
+            if name in recipe.get("external_inputs", {})
+        ]
+        context.capture_environment(sys.executable, model_paths)
     stages = build_best_v1_stages(
         PROJECT_ROOT, run_root, recipe, Path(sys.executable), args.cuda
     )
-    for index, stage in enumerate(stages, start=1):
-        print(f"[native-repro] START {index}/10 {stage.name}", flush=True)
-        print(subprocess.list2cmdline(stage.argv), flush=True)
-        context.run_command(
-            stage.name,
-            list(stage.argv),
-            cwd=PROJECT_ROOT,
-            dry_run=args.dry_run,
-        )
-        if stage.name == "prepare_final" and not args.dry_run:
-            source = run_root / "target_pseudo.jsonl"
-            destination = run_root / "final_data" / "target_pseudo.jsonl"
-            context.require_internal_artifact(source)
-            context.require_internal_artifact(destination)
-            shutil.copy2(source, destination)
-        print(f"[native-repro] DONE {index}/10 {stage.name}", flush=True)
+    execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run)
     context.render_run_record_cn()
 
 

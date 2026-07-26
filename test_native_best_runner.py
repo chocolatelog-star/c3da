@@ -1,7 +1,10 @@
 import json
+import io
 import subprocess
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -11,6 +14,95 @@ RECIPE = ROOT / "configs" / "recipes" / "rest16_to_laptop14_best_v1.json"
 
 
 class NativeBestRunnerTest(unittest.TestCase):
+    def test_internal_input_hashes_include_files_but_exclude_outputs(self):
+        from run_reproducible_pipeline import Stage, collect_internal_input_hashes
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.jsonl"
+            output = root / "output.jsonl"
+            source.write_text("source", encoding="utf-8")
+            output.write_text("old", encoding="utf-8")
+            stage = Stage(
+                "build",
+                ("python", "script.py", "--input", str(source), "--output", str(output)),
+                (output,),
+            )
+            hashes = collect_internal_input_hashes(stage, root)
+            self.assertIn(str(source.resolve()), hashes)
+            self.assertNotIn(str(output.resolve()), hashes)
+
+    def test_completed_stage_is_skipped_only_after_hash_validation(self):
+        from reproducibility import RunContext
+        from run_reproducible_pipeline import Stage, execute_stages
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "run"
+            output = root / "output.txt"
+            context = RunContext.open_or_create(
+                root, "run-001", "recipe-v1", "abc123", "feature/test"
+            )
+            stage = Stage(
+                "write",
+                (
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(output)!r}).write_text('once')",
+                ),
+                (output,),
+            )
+            execute_stages([stage], context, {}, ROOT, dry_run=False)
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                execute_stages([stage], context, {}, ROOT, dry_run=False)
+            self.assertIn("SKIP", buffer.getvalue())
+            self.assertEqual(output.read_text(encoding="utf-8"), "once")
+
+    def test_golden_validation_never_modifies_rows_on_mismatch(self):
+        from reproducibility import GoldenMismatchError, sha256_file
+        from run_reproducible_pipeline import Stage, validate_golden_artifact
+
+        with tempfile.TemporaryDirectory() as temp:
+            pseudo = Path(temp) / "pseudo.jsonl"
+            original = "".join(
+                json.dumps({"id": str(index), "text": "x", "label": "y"}) + "\n"
+                for index in range(3)
+            )
+            pseudo.write_text(original, encoding="utf-8")
+            stage = Stage("pseudo", ("python",), (pseudo,), "base_pseudo")
+            recipe = {
+                "golden": {
+                    "base_pseudo": {
+                        "observed_golden_rows": 2,
+                        "sha256": sha256_file(pseudo),
+                    }
+                }
+            }
+            with self.assertRaisesRegex(GoldenMismatchError, "observed rows"):
+                validate_golden_artifact(stage, recipe)
+            self.assertEqual(pseudo.read_text(encoding="utf-8"), original)
+
+    def test_recipe_without_golden_skips_validation(self):
+        from run_reproducible_pipeline import Stage, validate_golden_artifact
+
+        stage = Stage("pseudo", ("python",), (Path("missing.jsonl"),), "base_pseudo")
+        self.assertIsNone(validate_golden_artifact(stage, {"recipe_id": "other-pair"}))
+
+    def test_external_input_hash_mismatch_stops_before_training(self):
+        from reproducibility import ReproducibilityError
+        from run_reproducible_pipeline import validate_external_inputs
+
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "train.txt"
+            source.write_text("source", encoding="utf-8")
+            recipe = {
+                "external_inputs": {
+                    "source_train": {"path": str(source), "sha256": "0" * 64}
+                }
+            }
+            with self.assertRaisesRegex(ReproducibilityError, "source_train"):
+                validate_external_inputs(recipe)
+
     def test_dry_run_uses_current_repository_for_all_ten_stages(self):
         with tempfile.TemporaryDirectory() as temp:
             result = subprocess.run(

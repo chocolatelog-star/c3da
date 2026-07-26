@@ -12,11 +12,76 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence, TypeVar
 
 
 class ReproducibilityError(RuntimeError):
     pass
+
+
+class GoldenMismatchError(ReproducibilityError):
+    pass
+
+
+RowType = TypeVar("RowType")
+
+
+def compare_observed_rows(
+    stage: str, rows: Sequence[dict], observed_golden_rows: int
+) -> dict:
+    actual_rows = len(rows)
+    return {
+        "stage": stage,
+        "actual_rows": actual_rows,
+        "observed_golden_rows": observed_golden_rows,
+        "matched": actual_rows == observed_golden_rows,
+    }
+
+
+def apply_selection_limit(
+    rows: Sequence[RowType], selection_limit: int | None
+) -> list[RowType]:
+    if selection_limit is None:
+        return list(rows)
+    return list(rows[:selection_limit])
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def semantic_text_label_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    for row in read_jsonl(path):
+        payload = json.dumps(
+            {"label": row["label"], "text": row["text"]},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest.update((payload + "\n").encode("utf-8"))
+    return digest.hexdigest().upper()
+
+
+def validate_metrics(
+    actual: Mapping[str, object],
+    expected: Mapping[str, object],
+    tolerance: float = 1e-12,
+) -> None:
+    for key, expected_value in expected.items():
+        if key not in actual:
+            raise GoldenMismatchError(f"metric missing for {key}")
+        actual_value = actual[key]
+        if isinstance(expected_value, float):
+            if abs(float(actual_value) - expected_value) > tolerance:
+                raise GoldenMismatchError(
+                    f"metric mismatch for {key}: {actual_value} != {expected_value}"
+                )
+        elif actual_value != expected_value:
+            raise GoldenMismatchError(
+                f"metric mismatch for {key}: {actual_value} != {expected_value}"
+            )
 
 
 def write_json_atomic(path: Path, value: object) -> None:
@@ -449,11 +514,15 @@ class RunContext:
         self.manifest["stages"][stage] = {
             "status": "completed",
             "outputs": [str(path) for path in resolved_outputs],
+            "input_hashes": dict(input_hashes or {}),
         }
         write_json_atomic(self.manifest_path, self.manifest)
 
     def validate_completed_stage(
-        self, stage: str, outputs: Iterable[Path]
+        self,
+        stage: str,
+        outputs: Iterable[Path],
+        input_hashes: Mapping[str, str] | None = None,
     ) -> bool:
         stage_record = self.manifest["stages"].get(stage)
         if not stage_record or stage_record.get("status") != "completed":
@@ -461,6 +530,12 @@ class RunContext:
         expected_outputs = [str(self.require_internal_artifact(path)) for path in outputs]
         if stage_record.get("outputs") != expected_outputs:
             raise ReproducibilityError(f"stage output mismatch: {stage}")
+        expected_input_hashes = dict(input_hashes or {})
+        if stage_record.get("input_hashes", {}) != expected_input_hashes:
+            raise ReproducibilityError(
+                f"input hash mismatch for stage {stage}: "
+                f"{stage_record.get('input_hashes', {})} != {expected_input_hashes}"
+            )
         for output in expected_outputs:
             path = Path(output)
             artifact = self.manifest["artifacts"].get(output)

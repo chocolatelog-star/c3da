@@ -5,10 +5,52 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from reproducibility import ReproducibilityError, RunContext, sha256_file
+from reproducibility import (
+    GoldenMismatchError,
+    ReproducibilityError,
+    RunContext,
+    apply_selection_limit,
+    compare_observed_rows,
+    semantic_text_label_sha256,
+    sha256_file,
+    validate_metrics,
+)
 
 
 class ProvenanceTest(unittest.TestCase):
+    def test_observed_golden_rows_never_changes_actual_rows(self):
+        rows = [{"id": str(index)} for index in range(3)]
+        result = compare_observed_rows("pseudo", rows, observed_golden_rows=2)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(result["actual_rows"], 3)
+        self.assertFalse(result["matched"])
+
+    def test_selection_limit_is_applied_only_when_recipe_declares_it(self):
+        self.assertEqual(apply_selection_limit([1, 2, 3], 2), [1, 2])
+        self.assertEqual(apply_selection_limit([1, 2, 3], None), [1, 2, 3])
+
+    def test_semantic_hash_uses_only_text_and_label(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = Path(temp) / "first.jsonl"
+            second = Path(temp) / "second.jsonl"
+            first.write_text(
+                json.dumps({"text": "great food", "label": "<pos> food", "score": 1})
+                + "\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                json.dumps({"label": "<pos> food", "text": "great food", "score": 0})
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                semantic_text_label_sha256(first), semantic_text_label_sha256(second)
+            )
+
+    def test_metric_mismatch_is_rejected(self):
+        with self.assertRaisesRegex(GoldenMismatchError, "micro_f1"):
+            validate_metrics({"micro_f1": 0.4}, {"micro_f1": 0.5})
+
     def test_environment_snapshot_records_runtime_and_model_hashes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "run"
@@ -123,6 +165,25 @@ class ProvenanceTest(unittest.TestCase):
             output.write_text("changed", encoding="utf-8")
             with self.assertRaisesRegex(ReproducibilityError, "hash mismatch"):
                 context.validate_completed_stage("pseudo", [output])
+
+    def test_completed_stage_with_changed_input_hash_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "run"
+            context = RunContext.open_or_create(
+                root, "run-001", "recipe-v1", "abc123", "feature/test"
+            )
+            source = root / "source.jsonl"
+            output = root / "target_pseudo.jsonl"
+            source.write_text("first", encoding="utf-8")
+            output.write_text("output", encoding="utf-8")
+            context.mark_stage_complete(
+                "pseudo", [output], {str(source): sha256_file(source)}
+            )
+            source.write_text("changed", encoding="utf-8")
+            with self.assertRaisesRegex(ReproducibilityError, "input hash mismatch"):
+                context.validate_completed_stage(
+                    "pseudo", [output], {str(source): sha256_file(source)}
+                )
 
 
 if __name__ == "__main__":
