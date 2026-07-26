@@ -13,11 +13,15 @@ from reproducibility import (
     compare_observed_rows,
     semantic_text_label_sha256,
     sha256_file,
+    console_safe_text,
     validate_metrics,
 )
 
 
 class ProvenanceTest(unittest.TestCase):
+    def test_console_text_replaces_characters_unsupported_by_windows_encoding(self):
+        self.assertEqual(console_safe_text("progress \ufffd", "gbk"), "progress ?")
+
     def test_observed_golden_rows_never_changes_actual_rows(self):
         rows = [{"id": str(index)} for index in range(3)]
         result = compare_observed_rows("pseudo", rows, observed_golden_rows=2)

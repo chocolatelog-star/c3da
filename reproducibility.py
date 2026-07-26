@@ -26,6 +26,11 @@ class GoldenMismatchError(ReproducibilityError):
 RowType = TypeVar("RowType")
 
 
+def console_safe_text(value: str, encoding: str | None = None) -> str:
+    target_encoding = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    return value.encode(target_encoding, errors="replace").decode(target_encoding)
+
+
 def compare_observed_rows(
     stage: str, rows: Sequence[dict], observed_golden_rows: int
 ) -> dict:
@@ -387,7 +392,7 @@ class RunContext:
             assert process.stdout is not None
             with process.stdout:
                 for line in process.stdout:
-                    print(line, end="", flush=True)
+                    print(console_safe_text(line), end="", flush=True)
                     log_handle.write(line)
                     log_handle.flush()
         exit_code = process.wait()
