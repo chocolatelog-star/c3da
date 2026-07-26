@@ -54,5 +54,6 @@ description: Use when working in J:\nlp\CD-C3DA on BGCA/C3DA cross-domain ASTE e
 
 - BGCA paper `rest16 -> laptop14` label-to-text F1 is 47.28.
 - Current best `rest16 -> laptop14` result is raw F1 48.93 and fixed F1 50.21.
+- Native current-code run `native-best-v2-training-semantic` at commit `558e4de` reproduces all ten stages, golden artifacts, predictions, and metrics without reading historical run outputs.
 - Current best run uses `hp1 + complete_multi2_w025`, DANN with `lambda_domain_adv=0.03`, sentiment contrastive with `lambda_sentiment_contrastive=0.01`, final pseudo weight 0.65, final augment weight 0.20, and generator `label_to_text` from `J:\nlp\models\t5-base-py` for 8 epochs with best checkpoint selection.
 - The BGCA-style generator ablation should keep the current best pipeline fixed and only change the generator to 25 epochs with last checkpoint selection.
