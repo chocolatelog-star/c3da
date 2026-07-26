@@ -11,9 +11,54 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 PYTHON = Path(r"J:\conda\envs\c3da\python.exe")
 RECIPE = ROOT / "configs" / "recipes" / "rest16_to_laptop14_best_v1.json"
+POWERSHELL_ENTRYPOINT = ROOT / "run_best_reproducible_pipeline.ps1"
 
 
 class NativeBestRunnerTest(unittest.TestCase):
+    def test_powershell_entrypoint_is_current_code_only_and_supports_resume_options(self):
+        script = POWERSHELL_ENTRYPOINT.read_text(encoding="utf-8")
+        lowered = script.lower()
+        for parameter in (
+            "RunId",
+            "OutputRoot",
+            "Cuda",
+            "DryRun",
+            "AllowDirtyDiagnostic",
+        ):
+            self.assertIn(parameter, script)
+        self.assertIn("run_reproducible_pipeline.py", script)
+        self.assertIn("--user_command", script)
+        self.assertNotIn(".worktrees", lowered)
+        self.assertNotIn("reuse_upstream", lowered)
+        self.assertNotIn("9e78904", lowered)
+        self.assertNotIn("8c7f6b4", lowered)
+
+    def test_powershell_entrypoint_dry_run_preserves_user_command_as_one_argument(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(POWERSHELL_ENTRYPOINT),
+                    "-RunId",
+                    "powershell-dry-run",
+                    "-OutputRoot",
+                    str(Path(temp) / "runs"),
+                    "-Cuda",
+                    "0",
+                    "-DryRun",
+                    "-AllowDirtyDiagnostic",
+                ],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.stdout.lower().count("[native-repro] start"), 10)
+
     def test_internal_input_hashes_include_files_but_exclude_outputs(self):
         from run_reproducible_pipeline import Stage, collect_internal_input_hashes
 

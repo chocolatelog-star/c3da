@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import shutil
 import subprocess
@@ -671,9 +672,13 @@ def main() -> None:
         commit,
         branch,
     )
-    user_command = args.user_command or subprocess.list2cmdline(
-        [sys.executable, *sys.argv]
-    )
+    user_command = args.user_command
+    if user_command.startswith("base64:"):
+        user_command = base64.b64decode(user_command.removeprefix("base64:")).decode(
+            "utf-8"
+        )
+    if not user_command:
+        user_command = subprocess.list2cmdline([sys.executable, *sys.argv])
     context.write_user_command(user_command)
     if not args.dry_run:
         try:
