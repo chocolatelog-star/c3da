@@ -22,7 +22,7 @@
 | 当前正在验证 | 用真实历史代码边界从头复现48.93：`9e78904`负责抽取器、生成器、基础伪标签和增强，`8c7f6b4`负责完整双三元组补充、最终训练和评估 |
 | 当前运行状态 | 双工作树两阶段入口已完成试运行；上游以`9e78904`为历史基线并叠加`a7e7778`检查点恢复兼容补丁；下游以`8c7f6b4`为训练代码基线并固定到仅新增复现命令的`a7d1473`；正式GPU（图形处理器）训练尚未启动 |
 | 进度与日志 | 入口为 `run_historical_best_two_stage.ps1`；输出位于 `runs\historical_best_two_stage_v1\<source>_to_<target>`，状态、日志和哈希清单分别为 `stage_status.json`、`logs` 和 `manifest.json` |
-| GitHub 推送状态 | 2026-07-25 已重新整理全部本地提交；HTTPS（加密网页传输）因 `github.com:443` TCP（传输控制协议）不可达而三次失败，SSH（安全外壳）443可达但本机无公钥授权；九个分支均完整保留在本地，网络恢复后统一重推 |
+| GitHub 推送状态 | 2026-07-26 网络恢复后已重新推送全部九个本地分支；`master`及四个功能分支、四个历史复现分支均已建立远端跟踪关系，无失败提交滞留在本地 |
 | 项目空间状态 | 2026-07-24 已删除 76 个已有 `best` 的历史 `checkpoint-*`（中间检查点），释放约 **189.67 GB**；保留全部最佳模型、指标、数据、清单，以及活动实验和未完成 `ge20` 的 6 个可恢复检查点（约14.94 GB） |
 | full rerun（完整重跑）掉分原因 | 从零重跑会重新训练 extractor（提取器）和 generator（生成器），导致 base pseudo（基础伪标签）从历史 421 条变为 385 条、complete pseudo（补全伪标签）从 494 条变为 457 条、final_train（最终训练集）从 1499 条变为 1463 条 |
 | 最新完整重跑诊断 | 本次 base pseudo（基础伪标签）414 条、complete pseudo（补全伪标签）488 条、final_train（最终训练集）1494 条；完整伪标签隐藏金标 F1 为 **51.25**，略高于历史 **51.08**，但选中增强与历史仅重合 **2/150**，最终模型精确率明显下降 |
@@ -266,9 +266,9 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && powershell -NoProfi
 |---|---|
 | 仓库 | `https://github.com/chocolatelog-star/c3da.git` |
 | 分支 | `master` |
-| 最近推送 | 本轮未成功：GitHub HTTPS（加密网页传输）端口当前被网络阻断；禁止误记为已推送 |
+| 最近推送 | 2026-07-26 已成功通过 HTTPS（加密网页传输）推送全部九个目标分支 |
 | 当前代码基线 | 诊断代码`5057ef2`，双阶段总览`717f49a`，上游恢复兼容`a7e7778`，下游命令兼容`a7d1473`，下游校验修复`abd9d71`；本节网络状态为后续本地提交 |
-| 待统一推送分支 | `master`、`feature/complete-multitriplet-ablation`、`feature/encoder-pairing-loss`、`feature/mixed-generator-training`、`feature/triplet-coverage`、`historical/best-upstream-9e78904`、`historical/reproduce-best-8c7f6b4`、`historical/reproduce-best-0332aee`、`historical/reproduce-best-c0b2730` |
+| 已同步分支 | `master`、`feature/complete-multitriplet-ablation`、`feature/encoder-pairing-loss`、`feature/mixed-generator-training`、`feature/triplet-coverage`、`historical/best-upstream-9e78904`、`historical/reproduce-best-8c7f6b4`、`historical/reproduce-best-0332aee`、`historical/reproduce-best-c0b2730` |
 | 训练环境 | `conda activate c3da` |
 | GPU（显卡） | NVIDIA RTX 3070，8GB 显存 |
 | 推荐训练参数 | batch size（批大小）1，eval batch size（验证批大小）2，gradient accumulation（梯度累积）16，fp16（半精度），gradient checkpointing（梯度检查点） |
