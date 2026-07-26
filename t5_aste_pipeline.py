@@ -800,6 +800,14 @@ def opinion_augmented_label_boundary_valid(row: dict) -> bool:
     return True
 
 
+def filter_augmented_rows_for_compatibility(
+    rows: list[dict], compatibility_profile: str
+) -> list[dict]:
+    if compatibility_profile == "historical_best_v1":
+        return list(rows)
+    return [row for row in rows if opinion_augmented_label_boundary_valid(row)]
+
+
 def _is_opinion_augment_channel(row: dict) -> bool:
     return row.get("augmentation") in OPINION_AUGMENT_CHANNELS
 
@@ -3058,6 +3066,7 @@ def augment(args: argparse.Namespace) -> None:
         sentiment_vector_use_polarity_axis=args.sentiment_vector_use_polarity_axis,
         sentiment_vector_min_old_similarity=args.sentiment_vector_min_old_similarity,
         sentiment_vector_no_cooccurrence_min_similarity=args.sentiment_vector_no_cooccurrence_min_similarity,
+        compatibility_profile=args.compatibility_profile,
     )
     output_tag = args.augment_output_tag
     if not args.sentiment_vector_diagnostics_only:
@@ -3139,25 +3148,25 @@ def augment(args: argparse.Namespace) -> None:
         if key in seen_aug:
             continue
         seen_aug.add(key)
-        augmented_rows.append(
-            {
-                "text": text,
-                "label": label,
-                "augmentation": req["channel"],
-                "base_text": req["base_text"],
-                "base_id": req.get("base_id"),
-                "prompt": req["input"],
-                "old_triplet": req.get("old_triplet"),
-                "new_triplet": req.get("new_triplet"),
-                "new_triplets": req.get("new_triplets"),
-                "replacement_rank": req.get("replacement_rank"),
-                "domain_name": req.get("domain_name"),
-                "domain_prefix_style": req.get("domain_prefix_style"),
-                "domain_prefix": req.get("domain_prefix"),
-                "opinion_replacement_mode": req.get("opinion_replacement_mode"),
-                "opinion_replacement_rank": req.get("opinion_replacement_rank"),
-            }
-        )
+        augmented_row = {
+            "text": text,
+            "label": label,
+            "augmentation": req["channel"],
+            "base_text": req["base_text"],
+            "base_id": req.get("base_id"),
+            "prompt": req["input"],
+            "old_triplet": req.get("old_triplet"),
+            "new_triplet": req.get("new_triplet"),
+            "new_triplets": req.get("new_triplets"),
+            "replacement_rank": req.get("replacement_rank"),
+            "domain_name": req.get("domain_name"),
+            "domain_prefix_style": req.get("domain_prefix_style"),
+            "domain_prefix": req.get("domain_prefix"),
+        }
+        if args.compatibility_profile != "historical_best_v1":
+            augmented_row["opinion_replacement_mode"] = req.get("opinion_replacement_mode")
+            augmented_row["opinion_replacement_rank"] = req.get("opinion_replacement_rank")
+        augmented_rows.append(augmented_row)
     write_jsonl(tagged_output_path(run_dir, "c3da_two_channel_augmented.jsonl", output_tag), augmented_rows)
     write_jsonl(
         tagged_output_path(run_dir, "c3da_augmented_aspect_channel.jsonl", output_tag),
@@ -3218,7 +3227,9 @@ def augment(args: argparse.Namespace) -> None:
         dump_json(tagged_output_path(run_dir, "c3da_model_filter_analysis.json", output_tag), model_filter_stats)
 
     before_opinion_boundary_filter = len(augmented_rows)
-    augmented_rows = [row for row in augmented_rows if opinion_augmented_label_boundary_valid(row)]
+    augmented_rows = filter_augmented_rows_for_compatibility(
+        augmented_rows, args.compatibility_profile
+    )
     filtered_opinion_boundary = before_opinion_boundary_filter - len(augmented_rows)
 
     selected_augmented_rows, selection_stats = select_high_value_augmented_rows(
@@ -3237,6 +3248,7 @@ def augment(args: argparse.Namespace) -> None:
         "generated": len(generated_texts),
         "augmentation_input_run_dir": str(input_run_dir),
         "prompt_style": args.augment_prompt_style,
+        "compatibility_profile": args.compatibility_profile,
         "augment_channel_mode": args.augment_channel_mode,
         "domain_prefix_style": args.domain_prefix_style,
         "opinion_replacement_mode": args.opinion_replacement_mode,
@@ -3583,6 +3595,7 @@ def main() -> None:
         choices=["coupled_random", "semantic_same_sentiment", "sentiment_vector"],
         default="coupled_random",
     )
+    p.add_argument("--compatibility_profile", choices=["", "historical_best_v1"], default="")
     p.add_argument("--sentiment_vector_model_path", default="")
     p.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
     p.add_argument("--glove_path", default=r"J:\models\glove.6B.300d.txt")

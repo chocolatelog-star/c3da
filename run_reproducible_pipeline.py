@@ -443,6 +443,8 @@ def build_best_v1_stages(
                 augment["channel_mode"],
                 "--domain_prefix_style",
                 augment["domain_prefix_style"],
+                "--compatibility_profile",
+                augment["compatibility_profile"],
                 "--augment_output_tag",
                 "strict_aug150_w020_label_to_text_gen",
                 "--final_train_output_tag",

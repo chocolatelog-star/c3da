@@ -171,6 +171,9 @@ class NativeBestRunnerTest(unittest.TestCase):
         self.assert_command_value(commands["generator"], "--checkpoint_selection", "best")
         self.assert_command_value(commands["augment"], "--augment_select_max_rows", "150")
         self.assert_command_value(
+            commands["augment"], "--compatibility_profile", "historical_best_v1"
+        )
+        self.assert_command_value(
             commands["complete_multi2"], "--complete_multi_extra_weight", "0.25"
         )
         self.assert_command_value(commands["final_train"], "--pseudo_weight", "0.65")

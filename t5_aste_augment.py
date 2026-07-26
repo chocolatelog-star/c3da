@@ -22,6 +22,7 @@ PROMPT_STYLES = {
 }
 CHANNEL_MODES = {"all", "aspect", "opinion"}
 OPINION_REPLACEMENT_MODES = {"coupled_random", "semantic_same_sentiment", "sentiment_vector"}
+COMPATIBILITY_PROFILES = {"", "historical_best_v1"}
 GENERIC_ASPECTS = {
     "about",
     "all",
@@ -1098,6 +1099,7 @@ def build_augmentation_requests(
     sentiment_vector_use_polarity_axis: bool = False,
     sentiment_vector_min_old_similarity: float = 0.35,
     sentiment_vector_no_cooccurrence_min_similarity: float = 0.50,
+    compatibility_profile: str = "",
 ) -> list[dict]:
     """Build C3DA-style generation prompts for ASTE augmentation.
 
@@ -1114,6 +1116,8 @@ def build_augmentation_requests(
         raise ValueError("channel_mode must be one of all, aspect, opinion")
     if opinion_replacement_mode not in OPINION_REPLACEMENT_MODES:
         raise ValueError("opinion_replacement_mode must be one of coupled_random, semantic_same_sentiment, sentiment_vector")
+    if compatibility_profile not in COMPATIBILITY_PROFILES:
+        raise ValueError("compatibility_profile must be empty or historical_best_v1")
     memory = domain_memory or build_domain_memory(pseudo_rows)
     domain_prefix = format_domain_prefix(target_domain_name, domain_prefix_style)
     aspect_bank = (
@@ -1495,7 +1499,7 @@ def build_augmentation_requests(
                     channel = "opinion_sentiment_channel"
                 before_count = len(requests)
                 add_request(row, new_triplets, channel, prompt, old_triplet, new_triplet, replacement_rank)
-                if len(requests) > before_count:
+                if len(requests) > before_count and compatibility_profile != "historical_best_v1":
                     requests[-1]["opinion_replacement_mode"] = opinion_replacement_mode
                     if replacement_rank is not None:
                         requests[-1]["opinion_replacement_rank"] = replacement_rank
