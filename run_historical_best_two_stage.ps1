@@ -15,7 +15,8 @@ $UpstreamTree = "J:\nlp\CD-C3DA\.worktrees\historical-best-upstream-9e78904"
 $DownstreamTree = "J:\nlp\CD-C3DA\.worktrees\reproduce-best-8c7f6b4"
 $UpstreamBaseCommit = "9e789045b41df7af0dd73ccebc90f06a91d94f8e"
 $UpstreamCommit = "a7e7778869dce92fe778837715a814b5c6d2014b"
-$DownstreamCommit = "8c7f6b47b1b2b4ef9c11d7dffdf64758db7aace3"
+$DownstreamBaseCommit = "8c7f6b47b1b2b4ef9c11d7dffdf64758db7aace3"
+$DownstreamCommit = "a7d147364d4b7de37814e6ee12871a386394d5f5"
 $PairName = "${SourceDataset}_to_${TargetDataset}"
 $RunRoot = Join-Path $OutputRoot $PairName
 $UpstreamRun = Join-Path $RunRoot "upstream_9e78904"
@@ -54,6 +55,14 @@ function Get-WorktreeCommit {
         throw "Cannot read Git commit from $Worktree"
     }
     return $commit
+}
+
+function Assert-CommitAncestor {
+    param([string]$Worktree, [string]$Ancestor, [string]$Descendant)
+    & git -C $Worktree merge-base --is-ancestor $Ancestor $Descendant
+    if ($LASTEXITCODE -ne 0) {
+        throw "Commit $Ancestor is not an ancestor of $Descendant in $Worktree"
+    }
 }
 
 function Write-Status {
@@ -123,7 +132,12 @@ function Write-Manifest {
             worktree = $UpstreamTree
             run_dir = $UpstreamRun
         }
-        downstream = [ordered]@{ commit = $DownstreamCommit; worktree = $DownstreamTree; run_dir = $DownstreamRun }
+        downstream = [ordered]@{
+            historical_base_commit = $DownstreamBaseCommit
+            command_compat_commit = $DownstreamCommit
+            worktree = $DownstreamTree
+            run_dir = $DownstreamRun
+        }
         completed_stages = @($script:CompletedStages | Sort-Object)
         artifacts = $artifacts
         metrics = $metrics
@@ -204,6 +218,7 @@ if ((Get-WorktreeCommit $UpstreamTree) -ne $UpstreamCommit) {
 if ((Get-WorktreeCommit $DownstreamTree) -ne $DownstreamCommit) {
     throw "Downstream worktree is not pinned to $DownstreamCommit"
 }
+Assert-CommitAncestor $DownstreamTree $DownstreamBaseCommit $DownstreamCommit
 
 New-Item -ItemType Directory -Path $UpstreamRun, $DownstreamRun, $LogDir -Force | Out-Null
 $script:CompletedStages = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
@@ -217,7 +232,7 @@ if (Test-Path -LiteralPath $StatusPath) {
 Start-Transcript -Path $LogPath -Append | Out-Null
 try {
     Write-Host "[historical-best-two-stage] pair=$PairName seed=$Seed cuda=$Cuda"
-    Write-Host "[historical-best-two-stage] upstream_base=$UpstreamBaseCommit resume_compat=$UpstreamCommit downstream=$DownstreamCommit"
+    Write-Host "[historical-best-two-stage] upstream_base=$UpstreamBaseCommit resume_compat=$UpstreamCommit downstream_base=$DownstreamBaseCommit command_compat=$DownstreamCommit"
 
     Invoke-Stage "upstream_prepare" $UpstreamTree @(
         "t5_aste_pipeline.py", "prepare",

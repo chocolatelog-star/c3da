@@ -16,8 +16,12 @@ class HistoricalBestTwoStageRunnerTests(unittest.TestCase):
         self.assertIn("9e789045b41df7af0dd73ccebc90f06a91d94f8e", self.script)
         self.assertIn("a7e7778869dce92fe778837715a814b5c6d2014b", self.script)
         self.assertIn("8c7f6b47b1b2b4ef9c11d7dffdf64758db7aace3", self.script)
+        self.assertIn("a7d147364d4b7de37814e6ee12871a386394d5f5", self.script)
         self.assertIn("historical-best-upstream-9e78904", self.script)
         self.assertIn("reproduce-best-8c7f6b4", self.script)
+        self.assertIn("merge-base", self.script)
+        self.assertIn("historical_base_commit", self.script)
+        self.assertIn("command_compat_commit", self.script)
 
     def test_preserves_historical_upstream_parameters(self):
         required = (
