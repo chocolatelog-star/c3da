@@ -20,7 +20,7 @@
 | 最新完整复现结论 | legacy stochastic（旧式随机）完整流程得到 raw F1 **45.68** / fixed F1 **47.86**。抽取器、8轮生成器、421条基础伪标签、494条补全伪标签均与历史文件 SHA256（文件哈希）完全一致；本次增强与历史真正进入48.93训练集的150条中有147条文本和标签相同，仅3条不同，但最终模型仍明显掉分 |
 | 关键哈希证据 | 本次最终训练集 SHA256 为 `71F5948F...9F5DBEF`，最终模型为 `613C4E6A...8C0F1FF`，与此前 `bgca_aste_stage1_best_full_rerun_v1` 完全一致；说明旧式随机模式准确复现的是7月21日覆盖后的45.68流程，不是7月20日的48.93最终训练轨迹 |
 | 当前正在验证 | 用真实历史代码边界从头复现48.93：`9e78904`负责抽取器、生成器、基础伪标签和增强，`8c7f6b4`负责完整双三元组补充、最终训练和评估 |
-| 当前运行状态 | 双工作树两阶段入口已完成试运行；上游以`9e78904`为历史基线，仅叠加`a7e7778`检查点恢复兼容补丁，下游固定`8c7f6b4`；正式GPU（图形处理器）训练尚未启动 |
+| 当前运行状态 | 双工作树两阶段入口已完成试运行；上游以`9e78904`为历史基线并叠加`a7e7778`检查点恢复兼容补丁；下游以`8c7f6b4`为训练代码基线并固定到仅新增复现命令的`a7d1473`；正式GPU（图形处理器）训练尚未启动 |
 | 进度与日志 | 入口为 `run_historical_best_two_stage.ps1`；输出位于 `runs\historical_best_two_stage_v1\<source>_to_<target>`，状态、日志和哈希清单分别为 `stage_status.json`、`logs` 和 `manifest.json` |
 | GitHub 推送状态 | 2026-07-25 已重新整理全部本地提交；HTTPS（加密网页传输）因 `github.com:443` TCP（传输控制协议）不可达而三次失败，SSH（安全外壳）443可达但本机无公钥授权；九个分支均完整保留在本地，网络恢复后统一重推 |
 | 项目空间状态 | 2026-07-24 已删除 76 个已有 `best` 的历史 `checkpoint-*`（中间检查点），释放约 **189.67 GB**；保留全部最佳模型、指标、数据、清单，以及活动实验和未完成 `ge20` 的 6 个可恢复检查点（约14.94 GB） |
@@ -86,7 +86,7 @@ runs\bgca_aste_stage1_full_pipeline_seed_sweep_v1\logs\historical_augment_hybrid
 | 代码阶段 | 固定提交 | 实际职责 | 关键约束 |
 |---|---|---|---|
 | 历史上游 | 基线`9e789045b41df7af0dd73ccebc90f06a91d94f8e`；恢复兼容`a7e7778869dce92fe778837715a814b5c6d2014b` | 数据准备、25轮抽取器、基础伪标签、8轮生成器、双通道增强与过滤 | 兼容提交只加入中断恢复，不改变未中断训练路径；只传 `seed=1000`；抽取器取 last（最后检查点），生成器取 best（最优检查点）；增强读取基础伪标签 |
-| 历史下游 | `8c7f6b47b1b2b4ef9c11d7dffdf64758db7aace3` | 从基础伪标签补充完整双三元组、组装最终训练集、DANN（领域对抗）与情感对比训练、目标域评估 | 完整双三元组权重0.25、最终伪标签权重0.65、增强权重0.20、最终训练5轮 |
+| 历史下游 | 训练基线`8c7f6b47b1b2b4ef9c11d7dffdf64758db7aace3`；命令兼容`a7d147364d4b7de37814e6ee12871a386394d5f5` | 从基础伪标签补充完整双三元组、组装最终训练集、DANN（领域对抗）与情感对比训练、目标域评估 | `a7d1473`相对基线只新增两个`.cmd`（命令）文件，训练代码不变；脚本同时校验当前提交和祖先关系 |
 | 编排层 | 当前主分支的 `run_historical_best_two_stage.ps1` | 校验两个提交、串联数据、记录日志/行数/SHA256（文件哈希）、断点恢复 | 不把两个历史版本手工合并成不存在的第三个代码版本；已完成阶段按状态文件跳过，训练阶段使用检查点自动恢复 |
 
 ## 4. 历史实验索引
@@ -140,8 +140,8 @@ runs\bgca_aste_stage1_full_pipeline_seed_sweep_v1\logs\historical_augment_hybrid
 
 | 主题 | 主要 commit（提交号） | 说明文档或结果文件 |
 |---|---|---|
-| 当前总览、差距和待改进清单 | `5057ef2` + 本次文档提交 | `实验记录与模型索引_CN.md` |
-| 双历史版本完整复现入口 | 上游基线`9e78904`、恢复兼容`a7e7778`、下游`8c7f6b4`、编排`5057ef2` | `run_historical_best_two_stage.ps1`、`test_historical_best_two_stage_runner.py` |
+| 当前总览、差距和待改进清单 | 诊断基线`5057ef2`、双阶段总览`717f49a`、下游校验修复`abd9d71` + 本次文档提交 | `实验记录与模型索引_CN.md` |
+| 双历史版本完整复现入口 | 上游基线`9e78904`、恢复兼容`a7e7778`；下游训练基线`8c7f6b4`、命令兼容`a7d1473`；当前编排修复`abd9d71` | `run_historical_best_two_stage.ps1`、`test_historical_best_two_stage_runner.py` |
 | 项目文档维护规则 | `11ca672` | `docs\skills\c3da-experiment-workflow\SKILL.md` |
 | BGCA-style generator（BGCA风格生成器）参数支持、源域 dev 评估 | `68bc0d0` | `run_bgca_aste_stage1_pairs.py`、`t5_aste_pipeline.py` |
 | 完整双三元组补充与严格消融实现 | `62113b4` | `test_complete_multitriplet_pseudo.py`、`run_bgca_aste_stage1_pairs.py` |
@@ -267,7 +267,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA && conda activate c3da && powershell -NoProfi
 | 仓库 | `https://github.com/chocolatelog-star/c3da.git` |
 | 分支 | `master` |
 | 最近推送 | 本轮未成功：GitHub HTTPS（加密网页传输）端口当前被网络阻断；禁止误记为已推送 |
-| 当前代码基线 | 代码`5057ef2`，双阶段总览`717f49a`，上游恢复兼容`a7e7778`；本节网络状态为后续本地提交 |
+| 当前代码基线 | 诊断代码`5057ef2`，双阶段总览`717f49a`，上游恢复兼容`a7e7778`，下游命令兼容`a7d1473`，下游校验修复`abd9d71`；本节网络状态为后续本地提交 |
 | 待统一推送分支 | `master`、`feature/complete-multitriplet-ablation`、`feature/encoder-pairing-loss`、`feature/mixed-generator-training`、`feature/triplet-coverage`、`historical/best-upstream-9e78904`、`historical/reproduce-best-8c7f6b4`、`historical/reproduce-best-0332aee`、`historical/reproduce-best-c0b2730` |
 | 训练环境 | `conda activate c3da` |
 | GPU（显卡） | NVIDIA RTX 3070，8GB 显存 |
