@@ -154,6 +154,48 @@ class NativeBestRunnerTest(unittest.TestCase):
                 validate_golden_artifact(stage, recipe)
             self.assertEqual(pseudo.read_text(encoding="utf-8"), original)
 
+    def test_final_train_golden_validation_uses_training_semantics(self):
+        from reproducibility import GoldenMismatchError
+        import reproducibility
+        from run_reproducible_pipeline import Stage, validate_golden_artifact
+
+        self.assertTrue(hasattr(reproducibility, "semantic_training_rows_sha256"))
+        with tempfile.TemporaryDirectory() as temp:
+            final_train = Path(temp) / "final_train.jsonl"
+            row = {
+                "id": 1,
+                "input": "great food",
+                "target": "<pos> food <opinion> great",
+                "sample_weight": 1.0,
+            }
+            final_train.write_text(
+                json.dumps({**row, "audit_only": None}) + "\n", encoding="utf-8"
+            )
+            expected = Path(temp) / "expected.jsonl"
+            expected.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            stage = Stage(
+                "build_final_train", ("python",), (final_train,), "final_train"
+            )
+            recipe = {
+                "golden": {
+                    "final_train": {
+                        "observed_golden_rows": 1,
+                        "training_semantic_sha256": reproducibility.semantic_training_rows_sha256(
+                            expected
+                        ),
+                    }
+                }
+            }
+            result = validate_golden_artifact(stage, recipe)
+            self.assertTrue(result["training_semantic_sha256_matched"])
+
+            final_train.write_text(
+                json.dumps({**row, "sample_weight": 0.5}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(GoldenMismatchError, "training semantic"):
+                validate_golden_artifact(stage, recipe)
+
     def test_recipe_without_golden_skips_validation(self):
         from run_reproducible_pipeline import Stage, validate_golden_artifact
 

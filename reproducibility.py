@@ -69,6 +69,29 @@ def semantic_text_label_sha256(path: Path) -> str:
     return digest.hexdigest().upper()
 
 
+TRAINING_ROW_FIELDS = (
+    "input",
+    "target",
+    "sample_weight",
+    "augmentation",
+    "base_id",
+    "id",
+)
+
+
+def semantic_training_rows_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    for row in read_jsonl(path):
+        payload = json.dumps(
+            {key: row[key] for key in TRAINING_ROW_FIELDS if key in row},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest.update((payload + "\n").encode("utf-8"))
+    return digest.hexdigest().upper()
+
+
 def validate_metrics(
     actual: Mapping[str, object],
     expected: Mapping[str, object],

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import reproducibility
 from reproducibility import (
     GoldenMismatchError,
     ReproducibilityError,
@@ -50,6 +51,78 @@ class ProvenanceTest(unittest.TestCase):
             self.assertEqual(
                 semantic_text_label_sha256(first), semantic_text_label_sha256(second)
             )
+
+    def test_training_semantic_hash_ignores_non_training_audit_fields(self):
+        self.assertTrue(
+            hasattr(reproducibility, "semantic_training_rows_sha256"),
+            "training semantic hash function is missing",
+        )
+        hash_training_rows = reproducibility.semantic_training_rows_sha256
+        with tempfile.TemporaryDirectory() as temp:
+            historical = Path(temp) / "historical.jsonl"
+            current = Path(temp) / "current.jsonl"
+            training_row = {
+                "id": 7,
+                "base_id": 3,
+                "input": "great food",
+                "target": "<pos> food <opinion> great",
+                "sample_weight": 0.2,
+                "augmentation": "masked_aspect_channel",
+            }
+            historical.write_text(
+                json.dumps(training_row) + "\n", encoding="utf-8"
+            )
+            current.write_text(
+                json.dumps(
+                    {
+                        **training_row,
+                        "model_filter_opinion_similarity": None,
+                        "model_filter_opinion_polarity_score": None,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                hash_training_rows(historical), hash_training_rows(current)
+            )
+
+    def test_training_semantic_hash_covers_every_training_input_field(self):
+        self.assertTrue(
+            hasattr(reproducibility, "semantic_training_rows_sha256"),
+            "training semantic hash function is missing",
+        )
+        hash_training_rows = reproducibility.semantic_training_rows_sha256
+        base = {
+            "id": 7,
+            "base_id": 3,
+            "input": "great food",
+            "target": "<pos> food <opinion> great",
+            "sample_weight": 0.2,
+            "augmentation": "masked_aspect_channel",
+        }
+        replacements = {
+            "id": 8,
+            "base_id": 4,
+            "input": "bad food",
+            "target": "<neg> food <opinion> bad",
+            "sample_weight": 0.3,
+            "augmentation": "target_pseudo",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            baseline = Path(temp) / "baseline.jsonl"
+            changed = Path(temp) / "changed.jsonl"
+            baseline.write_text(json.dumps(base) + "\n", encoding="utf-8")
+            baseline_hash = hash_training_rows(baseline)
+            for field, value in replacements.items():
+                changed.write_text(
+                    json.dumps({**base, field: value}) + "\n", encoding="utf-8"
+                )
+                self.assertNotEqual(
+                    baseline_hash,
+                    hash_training_rows(changed),
+                    f"training field was not hashed: {field}",
+                )
 
     def test_metric_mismatch_is_rejected(self):
         with self.assertRaisesRegex(GoldenMismatchError, "micro_f1"):

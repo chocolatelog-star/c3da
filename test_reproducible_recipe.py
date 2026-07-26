@@ -40,10 +40,15 @@ class ReproducibleRecipeTest(unittest.TestCase):
             "predictions",
         }
         self.assertEqual(set(self.recipe["golden"]), required)
-        for item in required - {"augment"}:
+        for item in required - {"augment", "final_train"}:
             self.assertRegex(self.recipe["golden"][item]["sha256"], r"^[A-F0-9]{64}$")
         self.assertRegex(
             self.recipe["golden"]["augment"]["semantic_sha256"],
+            r"^[A-F0-9]{64}$",
+        )
+        self.assertNotIn("sha256", self.recipe["golden"]["final_train"])
+        self.assertRegex(
+            self.recipe["golden"]["final_train"]["training_semantic_sha256"],
             r"^[A-F0-9]{64}$",
         )
 

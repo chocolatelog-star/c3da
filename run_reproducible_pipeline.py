@@ -16,6 +16,7 @@ from reproducibility import (
     compare_observed_rows,
     read_jsonl,
     semantic_text_label_sha256,
+    semantic_training_rows_sha256,
     sha256_file,
     validate_metrics,
     write_json_atomic,
@@ -147,6 +148,19 @@ def validate_golden_artifact(stage: Stage, recipe: dict) -> dict | None:
             raise GoldenMismatchError(
                 f"golden semantic hash mismatch for {stage.name}: "
                 f"{actual_semantic_hash} != {expected_semantic_hash}"
+            )
+
+    expected_training_hash = expected.get("training_semantic_sha256")
+    if expected_training_hash:
+        actual_training_hash = semantic_training_rows_sha256(artifact_path)
+        result["training_semantic_sha256"] = actual_training_hash
+        result["training_semantic_sha256_matched"] = (
+            actual_training_hash == expected_training_hash
+        )
+        if actual_training_hash != expected_training_hash:
+            raise GoldenMismatchError(
+                f"golden training semantic hash mismatch for {stage.name}: "
+                f"{actual_training_hash} != {expected_training_hash}"
             )
 
     if stage.name == "evaluate" and "metrics" in recipe:
