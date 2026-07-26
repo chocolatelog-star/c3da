@@ -5,20 +5,48 @@ description: Use when working in J:\nlp\CD-C3DA on BGCA/C3DA cross-domain ASTE e
 
 # C3DA Experiment Workflow
 
-## Required Workflow
+## 核心原则
 
-- Before changing experiment code, restate the intended change, affected modules, and whether the change requires rerunning experiments.
-- Use GPU-safe defaults for RTX 3070 8GB: train batch size 1, eval batch size 2, gradient accumulation 16, fp16, gradient checkpointing, CUDA 0 unless the user says otherwise.
-- When giving runnable commands, provide one-line `cmd /c "..."` commands and explain what each command runs.
-- After every code change that affects experiments, update the main Chinese Markdown experiment index in the repository root.
-- Update the Markdown document by rewriting the relevant summary sections as a coherent current-state document. Do not append an endless chronological log to the bottom.
-- Keep the first screen of the Markdown document focused on current best version, model path, BGCA paper baseline, our raw/fixed metrics, gap against BGCA, active experiment, and next decision.
-- Maintain a dedicated improvement backlog section in the Markdown document. It must list current weaknesses, improvement goals, concrete changes to try, priority, and the metric condition for accepting or rejecting each direction.
-- Maintain a traceable experiment history section. Each historical experiment row must include commit id, result tag or run directory, raw/fixed metrics, key change, conclusion, and file cleanup status. Add a short lookup section that maps important topics to commits and document/result paths.
-- Put failed or superseded experiment results in a compact historical table with status equivalent to deleted, recommended-to-delete, or metrics-retained.
-- Do not delete files or experiment runs without explicit user permission. When a run is bad, ask for confirmation or record it as recommended-to-delete.
-- When an experiment finishes, update the best-vs-BGCA table first, then compress the history table. Keep metrics and paths, but remove repetitive narrative.
-- Use raw F1 as the main comparison metric. Use fixed F1 only as auxiliary analysis unless the user asks otherwise.
+正式实验必须能够仅凭当前 Git 提交、配方、原始数据和声明模型从头复现。历史提交、历史工作树和历史运行目录只允许审计与对照，禁止作为正式训练输入。
+
+## 修改与分支
+
+- 修改前创建新分支，不在 `master` 直接开发。
+- `master` 永远只保存已经通过完整 GPU 实验验证的当前最佳版本。
+- 候选分支通过单元测试、试运行和完整实验后，先报告证据并获得用户许可，再合并到 `master` 和打标签。
+- 修改前说明目标、受影响模块、参数变化、是否需要重跑；用户确认后再编辑。
+- 使用 TDD：先写失败测试，确认正确失败，再实现和验证；每个独立任务单独提交。
+
+## 正式运行与恢复
+
+- 正式入口只调用当前仓库代码，禁止跨运行复用或混合产物，禁止读取其他 `runs`、历史工作树、旧模型、旧伪标签、旧增强或旧训练集。
+- 所有阶段产物必须位于本次 `run_id` 根目录；断点恢复只能使用同一 `run_id`。
+- 恢复前必须校验 Git 身份、配方身份、上游输入 SHA256 和阶段输出 SHA256。缺失或不一致时立即停止，不能静默重算、复制或回退。
+- 每次运行保存完整训练命令、十阶段展开命令、Git 提交与分支、Python/Conda/PyTorch/CUDA/cuDNN/GPU/驱动、`pip freeze`、随机环境变量、模型与数据 SHA256、阶段状态和指标。
+- 所有训练、生成和筛选阶段必须显示进度；训练器保留 checkpoint，重复同一命令可以恢复。
+- RTX 3070 8GB 默认参数：训练批次 1、评估批次 2、梯度累积 16、fp16、gradient checkpointing、CUDA 0，除非用户明确修改。
+- 给用户的多步命令必须合并成一行 `cmd /c "..."`，并逐步解释用途。
+
+## 数量与黄金基准
+
+- 421 条基础伪标签、494 条完整伪标签和 1499 条最终训练行是黄金观察值，不是筛选配额。
+- 伪标签和最终训练数据使用本次模型实际产生并通过规则的全部数据；禁止为匹配历史数量裁剪、补齐或读取旧产物。
+- 只有配方显式声明的 `selection_limit` 才能限制数量；当前最佳增强上限为 150。
+- 黄金观察值只用于比较、定位首次偏差和验收，绝不修改本次源文件。
+
+## 文档与实验历史
+
+- 每次影响实验的代码改动或运行结束后，整体更新根目录中文 Markdown 实验索引，不能在末尾无限追加叙述。
+- 文档首屏必须展示当前最佳与 BGCA 对比、Git 版本、指标差距、当前工作、首次偏差和下一步。
+- 保留“待改进”部分：当前不足、改进目标、计划改动、优先级、接受/拒绝指标。
+- 历史表每行记录提交、分支、运行目录、完整命令记录、raw/fixed 指标、关键改动、结论和清理状态。
+- raw F1 是主要比较指标，fixed F1 用于辅助分析，除非用户另有要求。
+
+## 清理与失败
+
+- 未经用户明确许可不得删除任何文件、模型、检查点或实验目录。
+- 失败或较差实验先保留指标、清单、命令、日志和首次错误，在文档标记“建议删除”，获得许可后再清理。
+- CUDA OOM、进程崩溃或连续失败时停止自动重启并报告具体阶段；不得通过删除产物掩盖问题。
 
 ## Current Baseline Facts
 
