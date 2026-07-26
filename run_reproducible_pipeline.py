@@ -33,6 +33,7 @@ class Stage:
     argv: tuple[str, ...]
     outputs: tuple[Path, ...]
     golden_key: str = ""
+    inputs: tuple[Path, ...] = ()
 
 
 def load_recipe(path: Path) -> dict:
@@ -81,6 +82,21 @@ def validate_external_inputs(recipe: dict) -> dict[str, str]:
             )
         validated[name] = actual_hash
     return validated
+
+
+def initialize_recipe_manifest(
+    context: RunContext, recipe: dict, recipe_path: Path
+) -> None:
+    context.manifest.update(
+        {
+            "source_dataset": recipe["source_dataset"],
+            "target_dataset": recipe["target_dataset"],
+            "seed": recipe["seed"],
+            "recipe_path": str(Path(recipe_path).resolve()),
+            "recipe_sha256": sha256_file(Path(recipe_path)),
+        }
+    )
+    write_json_atomic(context.manifest_path, context.manifest)
 
 
 def validate_golden_artifact(stage: Stage, recipe: dict) -> dict | None:
@@ -146,8 +162,9 @@ def collect_internal_input_hashes(stage: Stage, run_root: Path) -> dict[str, str
     run_root = Path(run_root).resolve()
     output_paths = {path.resolve() for path in stage.outputs}
     hashes = {}
-    for token in stage.argv:
-        candidate = Path(token)
+    candidates = [Path(path) for path in stage.inputs]
+    candidates.extend(Path(token) for token in stage.argv)
+    for candidate in candidates:
         if not candidate.exists():
             continue
         resolved = candidate.resolve()
@@ -315,6 +332,8 @@ def build_best_v1_stages(
                 "--no_task_prefix",
             ),
             (
+                run_root / "source_train.jsonl",
+                run_root / "source_dev.jsonl",
                 run_root / "extract_train.jsonl",
                 run_root / "extract_dev.jsonl",
                 run_root / "c3da_generator_train_label_to_text_gen.jsonl",
@@ -362,6 +381,10 @@ def build_best_v1_stages(
             ),
             (extractor / "model.safetensors",),
             "extractor",
+            (
+                run_root / "extract_train.jsonl",
+                run_root / "extract_dev.jsonl",
+            ),
         ),
         Stage(
             "pseudo",
@@ -392,9 +415,14 @@ def build_best_v1_stages(
             ),
             (
                 run_root / "target_pseudo.jsonl",
+                run_root / "target_pseudo_selected.jsonl",
                 run_root / "target_pseudo_high_precision.jsonl",
             ),
             "base_pseudo",
+            (
+                run_root / "target_unlabeled.jsonl",
+                extractor / "model.safetensors",
+            ),
         ),
         Stage(
             "generator",
@@ -425,6 +453,10 @@ def build_best_v1_stages(
             ),
             (generator / "model.safetensors",),
             "generator",
+            (
+                run_root / "c3da_generator_train_label_to_text_gen.jsonl",
+                run_root / "c3da_generator_dev_label_to_text_gen.jsonl",
+            ),
         ),
         Stage(
             "augment",
@@ -480,6 +512,13 @@ def build_best_v1_stages(
             ),
             (selected_augment,),
             "augment",
+            (
+                run_root / "source_train.jsonl",
+                run_root / "source_dev.jsonl",
+                run_root / "target_pseudo_selected.jsonl",
+                generator / "model.safetensors",
+                extractor / "model.safetensors",
+            ),
         ),
         Stage(
             "prepare_final",
@@ -511,6 +550,7 @@ def build_best_v1_stages(
                 final_data / "target_test.jsonl",
                 final_data / "target_pseudo.jsonl",
             ),
+            inputs=(run_root / "target_pseudo.jsonl",),
         ),
         Stage(
             "complete_multi2",
@@ -536,6 +576,10 @@ def build_best_v1_stages(
                 complete_dir / "target_pseudo_high_precision_analysis.json",
             ),
             "complete_pseudo",
+            (
+                final_data / "target_pseudo.jsonl",
+                run_root / "target_pseudo_high_precision.jsonl",
+            ),
         ),
         Stage(
             "build_final_train",
@@ -557,6 +601,12 @@ def build_best_v1_stages(
             ),
             (final_train, final_dev),
             "final_train",
+            (
+                final_data / "source_train.jsonl",
+                final_data / "source_dev.jsonl",
+                complete_pseudo,
+                selected_augment,
+            ),
         ),
         Stage(
             "final_train",
@@ -610,6 +660,7 @@ def build_best_v1_stages(
             ),
             (final_model / "model.safetensors",),
             "final_model",
+            (final_train, final_dev),
         ),
         Stage(
             "evaluate",
@@ -640,6 +691,10 @@ def build_best_v1_stages(
                 final_data / f"aste_predictions_raw_fixed_{RESULT_TAG}.jsonl",
             ),
             "predictions",
+            (
+                final_data / "target_test.jsonl",
+                final_model / "model.safetensors",
+            ),
         ),
     ]
 
@@ -672,6 +727,7 @@ def main() -> None:
         commit,
         branch,
     )
+    initialize_recipe_manifest(context, recipe, Path(args.recipe))
     user_command = args.user_command
     if user_command.startswith("base64:"):
         user_command = base64.b64decode(user_command.removeprefix("base64:")).decode(

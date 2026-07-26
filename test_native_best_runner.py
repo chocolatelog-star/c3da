@@ -70,12 +70,39 @@ class NativeBestRunnerTest(unittest.TestCase):
             output.write_text("old", encoding="utf-8")
             stage = Stage(
                 "build",
-                ("python", "script.py", "--input", str(source), "--output", str(output)),
+                ("python", "script.py", "--output", str(output)),
                 (output,),
+                inputs=(source,),
             )
             hashes = collect_internal_input_hashes(stage, root)
             self.assertIn(str(source.resolve()), hashes)
             self.assertNotIn(str(output.resolve()), hashes)
+
+    def test_recipe_identity_is_persisted_in_run_manifest(self):
+        from reproducibility import RunContext
+        from run_reproducible_pipeline import initialize_recipe_manifest
+
+        with tempfile.TemporaryDirectory() as temp:
+            context = RunContext.open_or_create(
+                Path(temp) / "run",
+                "run-001",
+                "recipe-v1",
+                "abc123",
+                "feature/test",
+            )
+            initialize_recipe_manifest(
+                context,
+                {
+                    "source_dataset": "rest16",
+                    "target_dataset": "laptop14",
+                    "seed": 1000,
+                },
+                RECIPE,
+            )
+            self.assertEqual(context.manifest["source_dataset"], "rest16")
+            self.assertEqual(context.manifest["target_dataset"], "laptop14")
+            self.assertEqual(context.manifest["seed"], 1000)
+            self.assertEqual(len(context.manifest["recipe_sha256"]), 64)
 
     def test_completed_stage_is_skipped_only_after_hash_validation(self):
         from reproducibility import RunContext
