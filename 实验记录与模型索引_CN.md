@@ -35,7 +35,7 @@
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 从安全单生成器提交 `753bbb5` 建立新分支，先实现只诊断、不进入训练的目标域方面候选发现与独立验证；不再扩展动态比例，也不采用教师—学生网络 |
+| 当前下一步 | `feature/target-aspect-discovery-v1` 已完成只诊断、不进入训练的目标域方面候选发现与独立验证代码；下一步从原始数据运行 `rest14 -> laptop14` 单种子诊断，并依据候选精确率、召回增量和新增方面覆盖决定是否进入训练注入版本 |
 | 当前实施计划 | `docs\superpowers\plans\2026-08-08-target-aspect-discovery-v1_CN.md` |
 
 ## 2. 当前最佳与 BGCA 对比
@@ -113,6 +113,22 @@ J:\nlp\CD-C3DA\runs\reproducible\rest14_to_laptop14_dynamic_ratio_tiered_v1\rest
 动态实验实际十阶段为 `prepare/extractor/pseudo/generator/augment/prepare_final/complete_multi2/build_final_train/final_train/evaluate`，模型目录只有一个 `generator_label_to_text_gen_ep8`，增强阶段只接收一个 `--model_path`。因此双通道表示一个生成器服务方面与观点两个数据通道，不是两个生成器。
 
 聚焦回归测试30项中29项通过；唯一失败是历史命令图哈希。根因是动态分支为支持多请求而给历史配方无条件加入语义等价的 `--per_row 1`，导致命令图哈希从期望 `205a94...` 变成 `3185fc...`。移除该参数后哈希精确恢复。这不是双生成器残留，也不影响正式 `master`，但说明失败动态分支不适合作为新开发基点。下一阶段固定从单生成器且同方向对照为52.60的 `753bbb5` 创建隔离分支，并新增单生成器与历史命令图防回归测试。
+
+### 2.3 目标域方面候选发现诊断 v1
+
+实现分支为 `feature/target-aspect-discovery-v1`，安全基点为 `753bbb5`。当前实现提交依次为：`07865a7`（单生成器命令图门禁）、`91b8f6c`（候选聚合与验证）和 `3a7b766`（诊断编排、配方与断点恢复）。教师—学生网络和指数移动平均未采用。
+
+新诊断阶段位于唯一生成器之后，阶段顺序固定为 `prepare/extractor/pseudo/generator/target_aspect_discovery`，随后停止，不生成增强句子、不组装最终训练集、不训练最终模型。候选来自目标无标签文本的4路抽取解码，经过原文跨度、多序列支持、目标语料文档频率、方面—观点距离和现有单个标签到文本生成器的重构负对数似然门禁。源域开发集使用源域前缀校准阈值，目标候选使用目标域前缀评分。
+
+候选保留完成后才读取 `target_train_gold_analysis.jsonl` 计算诊断精确率、召回率和 F1；该文件不进入运行阶段输入哈希，也不参与阈值、排序或候选保留。多候选解码完成后立即写入状态与预测文件，后续评分中断时可从该阶段恢复。配方显式设置 `use_for_training=false`，运行器遇到训练注入会直接拒绝。
+
+验证结果：43项相关回归测试全部通过；历史配方阶段图保持不变；新配方干运行严格停在第5阶段；RTX 3070 两行显卡冒烟测试通过，两个 T5 模型按顺序加载和释放，每行返回2个候选，重构损失均为有限值。正式诊断尚未运行，因此目前没有新实验指标或可删除模型。
+
+正式运行命令：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1\configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_diag_v1.json -RunId rest14-laptop14-target-aspect-discovery-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
 
 ## 3. 最佳流程和当前原生模块
 
