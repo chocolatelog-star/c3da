@@ -34,7 +34,7 @@
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；固定150条和统一权重会让高质量观点候选挤占方面候选，多三元组召回随之下降 |
-| 当前下一步 | 多生成建立候选供给，使用情感比例区间而非固定条数；强过滤后按质量分级保留，并用样本权重而不是逐样本学习率控制训练贡献 |
+| 当前下一步 | 动态比例与质量分层代码已在 `feature/opinion-constrained-edit-quota-v1` / `e49bfb6` 实现；等待运行 `rest14 -> laptop14` 正式 GPU 实验 |
 | 当前实施计划 | `05_CD-C3DA双通道增强实施方案_CN.md` |
 
 ## 2. 当前最佳与 BGCA 对比
@@ -155,7 +155,8 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 |---|---|---|---:|---:|---|---|
 | 历史边界从头精确复现 | 上游 `9e78904` + 恢复兼容 `a7e7778`；下游 `8c7f6b4` + 命令兼容 `a7d1473` | `historical_best_two_stage_v1` | **48.93** | **50.21** | 全部模型、伪标签、增强和最终训练重新产生；当前正式基准 | 全部保留 |
 | `rest14 -> laptop14` 观点软过滤250条 | `feature/opinion-soft-filter-v1` / `d09fdca` | `rest14-laptop14-softop-seed1000-v1` | 51.04 | 52.70 | 通过率和配额达标，但编辑目标未保持、正面膨胀、多三元组下降；不合并 | 全部保留，作为失败归因证据 |
-| `rest14 -> laptop14` 观点契约供给150条 | `feature/opinion-constrained-edit-quota-v1` / `1269759` | `rest14-laptop14-opinion-supply150-seed1000-v1` | 51.94 | 54.45 | 供给与编辑正确性达标，但观点77条挤占方面候选，正负召回与多三元组下降；250条取消 | 建议删除模型和检查点约17.47 GB，保留约0.02 GB指标、清单、日志与数据；等待用户许可 |
+| `rest14 -> laptop14` 观点契约供给150条 | `feature/opinion-constrained-edit-quota-v1` / `1269759` | `rest14-laptop14-opinion-supply150-seed1000-v1` | 51.94 | 54.45 | 供给与编辑正确性达标，但观点77条挤占方面候选，正负召回与多三元组下降；250条取消 | 模型和检查点约17.47 GB已按用户许可删除；约0.022 GB指标、清单、日志和数据保留 |
+| 动态比例与质量分层代码 | `feature/opinion-constrained-edit-quota-v1` / `e49bfb6`；文档 `1e942fc` | 配方 `rest14_to_laptop14_dynamic_ratio_tiered_v1` | 未运行 | 未运行 | 单生成器每条3个编辑请求；强过滤；动态比例区间；高/中/探索权重0.25/0.18/0.08 | 10项相关测试、语法检查和十阶段干运行通过；等待正式 GPU 实验 |
 | 当前代码原生迁移 | `feature/native-best-reproduction-v1`；`afc0d3d..5a57449` | 配方 `rest16_to_laptop14_best_v1` | 已完成 | 已完成 | 已完成来源隔离、命令归档、黄金校验、增强兼容和 Windows 输出修复 | 已纳入当前主线 |
 | 原生 GPU 首次验收 | 候选 `a755300` | `native-best-v1-a755300` | 中断 | 中断 | 抽取器 16/1325 step 遇到 `UnicodeEncodeError`；非模型、显存或 CUDA 错误，日志与清单保留 | 保留失败现场，不删除 |
 | 原生 GPU 第二次验收 | `5a57449` | `native-best-v1-5a57449` | 未进入评估 | 未进入评估 | 前 7 阶段黄金值全部匹配；第 8 阶段因 34 条记录新增空审计字段触发整文件哈希误报，最终训练未开始 | 保留失败现场，不删除 |
