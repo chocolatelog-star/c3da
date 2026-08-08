@@ -14,7 +14,8 @@
 6. `04_CD-C3DA双通道增强设计_CN.md`
 7. `05_CD-C3DA双通道增强实施方案_CN.md`
 8. `06_CD-C3DA最佳流程复现说明_CN.md`
-9. `AGENTS.md`
+9. `07_CD-C3DA六组跨域实验详细分析与GPT交接_CN.md`（需要交给外部 GPT 分析时阅读）
+10. `AGENTS.md`
 
 根目录的 `02` 到 `05` 是便于接手阅读的副本。Skill（技能）和设计记录的正式维护位置仍分别是 `docs\skills` 与 `docs\superpowers`；修改正式文件后必须同步更新根目录副本。
 
