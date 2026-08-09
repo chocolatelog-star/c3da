@@ -30,12 +30,12 @@
 | 相对 BGCA raw F1 | **+1.65** |
 | 数值诊断最高 | raw F1 **49.01** / fixed F1 **51.83**；复用了历史增强，只用于归因，不作为正式可复现主线 |
 | 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、目标域方面候选发现诊断均已从头运行并完成归因 |
-| 最新实验 | 目标方面发现从1889条候选保留237条，其中后验正确130条，precision（精确率）54.85%、recall（召回率）8.93%、F1为15.36%；低于现有421条高精度伪标签61.995%的精确率门槛，不进入训练注入 |
+| 最新实验 | 源域联合门槛诊断从1889条目标候选保留702条，后验 precision/recall/F1（精确率/召回率/F1）为48.15%/23.21%/31.33%；源域精度65.59%未能迁移到目标域，低于现有421条高精度伪标签61.995%的精度门槛，不进入训练注入 |
 | 当前主分支版本 | `master`；当前最好流程提交 `d2f2a35`；正式 GPU 验收代码提交 `558e4de`；用户已确认这是当前最好流程 |
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 源域独立联合门槛代码已完成；下一步运行 `rest14 -> laptop14` 单种子诊断，检查源域门槛能否在目标域达到候选精度门禁。诊断通过前不把候选注入训练 |
+| 当前下一步 | 停止“只设65%源域精度下限后最大化覆盖”的校准目标；下一版需要加入安全余量、分层最差精度和覆盖惩罚，避免再次选中损失分位点1.0。新门槛仍只能用源域开发集确定，目标隐藏金标只作审计 |
 | 当前实施计划 | `docs\superpowers\plans\2026-08-08-target-aspect-discovery-v1_CN.md` |
 
 ## 2. 当前最佳与 BGCA 对比
@@ -142,13 +142,19 @@ J:\nlp\CD-C3DA\runs\reproducible\rest14_to_laptop14_target_aspect_discovery_diag
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1\configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_diag_v1.json -RunId rest14-laptop14-target-aspect-discovery-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
-### 2.4 源域独立联合门槛诊断 v2（待运行）
+### 2.4 源域独立联合门槛诊断 v2（已完成，未通过注入门禁）
 
-实现分支为 `feature/source-calibrated-aspect-discovery-v2`，代码提交为 `b16fab0`，仍以单生成器诊断流程为基础，不采用教师—学生网络。新配方为 `configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_source_calibrated_v2.json`。
+实现分支为 `feature/source-calibrated-aspect-discovery-v2`，代码提交为 `b16fab0`，仍以单生成器诊断流程为基础，不采用教师—学生网络。配方为 `configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_source_calibrated_v2.json`。正式运行目录为 `runs\reproducible\rest14_to_laptop14_target_aspect_discovery_source_calibrated_v2\rest14-laptop14-target-aspect-source-calibrated-seed1000-v2`；五个阶段全部完成，运行清单、汇总、哈希和中文运行记录完整。
 
 源域开发集现在先执行与目标域相同的4路候选解码、原文跨度与距离检查、文档频率检查及生成器重构评分。联合门槛只在固定网格中搜索：序列支持度下限为2、3、4，生成器损失分位点为0.5、0.6、0.7、0.8、0.9、1.0；候选门槛必须在源域至少保留30条且精确率不低于65%，再选择覆盖量最大的门槛。若没有门槛满足条件，诊断阶段直接停止，不自动降低标准。
 
-选出的支持度和生成器损失阈值会冻结后原样应用到目标域。`target_train_gold_analysis.jsonl` 仍不属于该阶段输入，只在目标候选全部冻结后计算审计指标。新流程新增源域多候选、源域候选及源域候选损失三个可恢复产物；旧 v1 命令图归一化哈希保持不变，生成器阶段仍严格只有一个。相关语法、联合门槛、断点恢复、短流程汇总、旧配方和单生成器回归共62项测试通过；显卡模型推理函数没有改动，因此本次不重复做无信息增益的显卡冒烟测试，正式五阶段运行会完成实际显卡验证。
+选出的支持度和生成器损失阈值会冻结后原样应用到目标域。`target_train_gold_analysis.jsonl` 仍不属于该阶段输入，只在目标候选全部冻结后计算审计指标。新流程新增源域多候选、源域候选及源域候选损失三个可恢复产物；旧 v1 命令图归一化哈希保持不变，生成器阶段仍严格只有一个。相关语法、联合门槛、断点恢复、短流程汇总、旧配方和单生成器回归共62项测试通过。
+
+正式结果表明当前校准目标失败。源域686条候选中，搜索最终选择 `min_sequence_support=2`、损失分位点1.0和 `generator_nll_max=4.529653`；源域保留340条，TP/FP为223/117，精度65.59%，只是刚刚越过65%的最低线。该阈值应用到目标域后，从1889条候选保留702条，TP/FP/FN为338/364/1118，precision/recall/F1（精确率/召回率/F1）为48.15%/23.21%/31.33%。相对 v1 的237条、130个TP和107个FP，v2多保留465条，只增加208个TP却增加257个FP，增量精度仅44.73%。候选F1上升来自大幅扩大输出，不代表最终 ASTE（方面级情感三元组抽取）模型提升。
+
+失败原因是搜索目标“先达到65%源域精度，再最大化数量”会自然选择最宽松门槛。损失分位点1.0使目标域1889条候选中只有4条被生成器损失拒绝，生成器强过滤实际上失效。目标域2/3/4路支持候选精度分别为39.38%/52.88%/58.62%；正面/负面/中性为52.31%/43.35%/9.38%；逐行不在421条高精度伪标签中的612条新候选精度只有45.59%。损失大于3.0的266条精度仅39.47%，单三元组金标句中的候选精度仅28.22%。这些证据说明源域总体平均精度不能直接代表跨域安全性，当前702条候选禁止注入训练。
+
+该实验标记为“诊断失败、建议删除模型但尚未删除”。分析文件、清单、命令、哈希、候选文件和首次失败证据必须保留；模型与检查点是否删除等待用户许可。
 
 正式运行命令：
 
