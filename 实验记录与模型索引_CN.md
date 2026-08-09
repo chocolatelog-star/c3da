@@ -35,7 +35,7 @@
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 不直接使用237条候选训练；先在源域开发集上增加与目标候选完全同构的多候选解码，用源域金标校准序列支持度与生成器损失联合门禁，再以预注册阈值运行新的目标方面诊断，避免依据目标隐藏金标调参 |
+| 当前下一步 | 源域独立联合门槛代码已完成；下一步运行 `rest14 -> laptop14` 单种子诊断，检查源域门槛能否在目标域达到候选精度门禁。诊断通过前不把候选注入训练 |
 | 当前实施计划 | `docs\superpowers\plans\2026-08-08-target-aspect-discovery-v1_CN.md` |
 
 ## 2. 当前最佳与 BGCA 对比
@@ -140,6 +140,20 @@ J:\nlp\CD-C3DA\runs\reproducible\rest14_to_laptop14_target_aspect_discovery_diag
 
 ```cmd
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1\configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_diag_v1.json -RunId rest14-laptop14-target-aspect-discovery-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
+### 2.4 源域独立联合门槛诊断 v2（待运行）
+
+实现分支为 `feature/source-calibrated-aspect-discovery-v2`，代码提交为 `b16fab0`，仍以单生成器诊断流程为基础，不采用教师—学生网络。新配方为 `configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_source_calibrated_v2.json`。
+
+源域开发集现在先执行与目标域相同的4路候选解码、原文跨度与距离检查、文档频率检查及生成器重构评分。联合门槛只在固定网格中搜索：序列支持度下限为2、3、4，生成器损失分位点为0.5、0.6、0.7、0.8、0.9、1.0；候选门槛必须在源域至少保留30条且精确率不低于65%，再选择覆盖量最大的门槛。若没有门槛满足条件，诊断阶段直接停止，不自动降低标准。
+
+选出的支持度和生成器损失阈值会冻结后原样应用到目标域。`target_train_gold_analysis.jsonl` 仍不属于该阶段输入，只在目标候选全部冻结后计算审计指标。新流程新增源域多候选、源域候选及源域候选损失三个可恢复产物；旧 v1 命令图归一化哈希保持不变，生成器阶段仍严格只有一个。相关语法、联合门槛、断点恢复、短流程汇总、旧配方和单生成器回归共62项测试通过；显卡模型推理函数没有改动，因此本次不重复做无信息增益的显卡冒烟测试，正式五阶段运行会完成实际显卡验证。
+
+正式运行命令：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery-v2 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery-v2\configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_source_calibrated_v2.json -RunId rest14-laptop14-target-aspect-source-calibrated-seed1000-v2 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
 ## 3. 最佳流程和当前原生模块
