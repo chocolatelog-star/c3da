@@ -29,14 +29,15 @@
 | 完整从头可复现最佳 | raw P/R/F1 = **58.31 / 42.14 / 48.93**；fixed F1 = **50.21** |
 | 相对 BGCA raw F1 | **+1.65** |
 | 数值诊断最高 | raw F1 **49.01** / fixed F1 **51.83**；复用了历史增强，只用于归因，不作为正式可复现主线 |
-| 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、两版目标域方面候选发现诊断均已完成归因；`rest15 -> laptop14` 保守多候选最终解码已完成十阶段正式实验及失败检查点清理 |
+| 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、两版目标域方面候选发现诊断均已完成归因；`rest15 -> laptop14` 保守多候选最终解码已完成十阶段正式实验及失败检查点清理；`laptop14 -> rest15` 最终训练转化诊断、单层受控复用入口及冻结消融矩阵已完成代码实现 |
 | 最新实验 | `rest15 -> laptop14` 同次 beam 4（束搜索宽度4）基础 raw F1（原始F1）45.135，多候选合并后45.585，提升0.451；但仍低于 BGCA 45.69约0.105个百分点，且多三元组召回36.695%未达到38%门槛，判定未通过 |
+| 最新代码验证 | `feature/final-training-conflict-diagnostics-v1` 已通过235项全量测试、Python（编程语言）语法编译、十阶段锚点配方干运行和 RTX 3070 GPU（图形处理器）真实反向传播检查；探针62个参数均有梯度，峰值显存954.01 MiB（兆二进制字节）；尚未启动正式实验 |
 | 当前主分支版本 | `master`；当前最好流程提交 `d2f2a35`；正式 GPU 验收代码提交 `558e4de`；用户已确认这是当前最好流程 |
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 不根据目标测试金标把支持度从3改成4，也不把该解码规则扩展到其他方向；按既定路线转向 `laptop14 -> rest15` 的伪标签到最终训练转化诊断。该改动预计最早影响第9阶段，先实现受控复用入口并复用完整父运行的第1–8阶段做快速消融，候选通过后再完整从头验收 |
-| 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第7节和第11节；实现分支 `feature/multi-candidate-decoding-v1`，功能提交 `b1c3705`，命令行修复提交 `f1581f7` |
+| 当前下一步 | 先运行 `laptop14 -> rest15` 完整从头锚点，生成可封存且复用深度为0的第1–8阶段；旧六组基线的抽取器、生成器和最终模型目录已清理，不能作为复用父运行。锚点完成后，四个快速消融子运行只复用该锚点第1–8阶段并重跑第9–10阶段；候选通过后仍须完整从头验收 |
+| 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第11节；实现分支 `feature/final-training-conflict-diagnostics-v1`，受控复用提交 `dd2d5f5`，梯度冲突诊断提交 `f7b6c85`，冻结实验矩阵提交 `49903c8`；教师—学生网络和双生成器均未采用 |
 
 ## 2. 当前最佳与 BGCA 对比
 
@@ -203,6 +204,59 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1 && con
 
 预测 SHA256 为 `0AC9456ABC7CFA85BBD8A24D29BFE4BBF1A24867170C20FF919551D898FEB9E7`，多候选分析 SHA256 为 `86ABE0533E954978E4A7F9C33B8FB2DAE7B230EA427D4AA5EB3BA4F80A282EEE`。模型目录清理前共17.47 GiB（吉比字节）；2026-08-10经用户许可，已永久删除6个 `checkpoint-*`（训练检查点）目录并释放约14.97 GiB（吉比字节），抽取器、生成器和最终模型的3个 `best`（最佳）目录共约2.50 GiB（吉比字节）仍完整保留，供后续受控单层复用。指标、预测、候选分析、清单、日志和首次命令行失败证据也全部保留。由于检查点已经删除，该运行不能再从训练中间步恢复；如需重新训练，必须建立新 `RunId`（运行标识）并按复现规则运行。
 
+### 2.6 `laptop14 -> rest15` 最终训练转化诊断 v1（代码完成，待正式实验）
+
+该方向的高精度伪标签 raw F1（原始F1）为56.77，完整伪标签为61.17，但最终模型只有51.64，低于 BGCA 58.95共7.31个百分点。当前问题不再优先归因于“伪标签本身不够好”，而是检查源域监督、目标域伪标签、DANN（领域对抗神经网络）和分层样本权重在第9阶段是否冲突。安全基点仍是已审计的单生成器提交 `753bbb5`；新分支 `feature/final-training-conflict-diagnostics-v1` 的三个实现提交依次为：`dd2d5f5`（受控阶段复用）、`f7b6c85`（梯度冲突诊断）和 `49903c8`（冻结消融矩阵）。第4阶段仍严格只有一个 label-to-text generator（标签到文本生成器），没有恢复双生成器，也没有采用教师—学生网络。
+
+历史运行 `runs\reproducible\laptop14_to_rest15_baseline_v1\phase1-five-seed1000-v1` 虽保留数据、清单和指标，但抽取器、生成器及最终模型的三个 `best`（最佳）目录均已不存在，不能通过产物完整性和哈希门禁，因此禁止把它作为复用父运行。本轮必须先建立一个新的完整从头锚点，不能为了省时手工拼接旧数据与旧模型。
+
+实现边界如下：
+
+1. 配方显式区分 `full_from_scratch`（完整从头）和 `controlled_stage_reuse`（受控阶段复用）。父运行必须与当前代码提交、方向、随机种子、原始输入、阶段命令、相关代码指纹及产物 SHA256 全部一致，十阶段成功且 `reuse_depth=0`（复用深度0）。
+2. 子运行只允许一个父运行，固定导入父运行第1–8阶段到本次 `RunId`（运行标识）目录，记录 `reuse_provenance.json`（复用来源记录），并标记 `reuse_depth=1`（复用深度1）。深度1子运行不能再次作为父运行；缺文件、哈希不符、脏工作树、代码或命令变化都会在训练前拒绝。
+3. 新增 `pseudo_weight_scale`（伪标签权重比例缩放），按比例缩放目标伪标签行已有权重，不覆盖分层差异，也不改变源域真实样本和增强样本。0.75方案把0.65/0.25分别变为0.75/0.28846；0.80方案分别变为0.80/0.30769。
+4. 梯度诊断不增加第二次前向或反向传播，只在真实训练每隔8个同域小批次读取基础编码器和解码器 LayerNorm（层归一化）权重的当前梯度增量；源域记为0、目标伪标签记为1、增强样本不参与配对。输出包含两域梯度范数、余弦相似度、负余弦比例和时间线，写入 `gradient_conflict_diagnostics.json`（梯度冲突诊断文件）。该诊断用于解释结果，不改变优化器更新。
+
+冻结矩阵如下；除表内变量外，第1–8阶段数据和第9阶段其他参数完全一致：
+
+| 配方 | 运行类型 | DANN 系数 | 伪标签权重比例 | 实际高/探索层权重 | 必须运行的阶段 |
+|---|---|---:|---:|---:|---|
+| `laptop14_to_rest15_final_conversion_anchor_v1.json` | 完整从头锚点 | 0.03 | 1.0 | 0.65 / 0.25 | 第1–10阶段 |
+| `laptop14_to_rest15_final_conversion_dann0_v1.json` | 快速消融 | 0 | 1.0 | 0.65 / 0.25 | 复用第1–8阶段；重跑第9–10阶段 |
+| `laptop14_to_rest15_final_conversion_dann001_v1.json` | 快速消融 | 0.01 | 1.0 | 0.65 / 0.25 | 复用第1–8阶段；重跑第9–10阶段 |
+| `laptop14_to_rest15_final_conversion_pw075_v1.json` | 快速消融 | 0.03 | 15/13 | 0.75 / 0.28846 | 复用第1–8阶段；重跑第9–10阶段 |
+| `laptop14_to_rest15_final_conversion_pw080_v1.json` | 快速消融 | 0.03 | 16/13 | 0.80 / 0.30769 | 复用第1–8阶段；重跑第9–10阶段 |
+
+所有配方都按 RTX 3070 8GB 固定为训练批次1、评估批次2、梯度累积16、fp16（半精度）、gradient checkpointing（梯度检查点）和 CUDA 0。代码已通过235项全量测试、语法编译和十阶段锚点干运行；本地 T5-base（基础文本到文本模型）真实反向传播检查中，62个探针参数全部有梯度，峰值显存954.01 MiB（兆二进制字节）。这些只证明实现和显存路径可运行，不构成模型实验结果。
+
+比较时以新锚点而不是旧51.64的不同代码运行作为直接对照。快速消融只有在 raw F1（原始F1）至少比锚点提高0.50，且负面与多三元组 raw F1（原始F1）任一下降不超过0.30个百分点时才晋级；同时结合负余弦比例判断是 DANN、权重不足还是其他训练冲突。晋级版本仍必须建立新 `RunId`（运行标识）并完整从原始数据运行第1–10阶段，快速消融结果不能直接合并到 `master`。
+
+先运行完整锚点：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\laptop14_to_rest15_final_conversion_anchor_v1.json -RunId laptop14-rest15-final-conversion-anchor-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
+锚点十阶段成功后，依次运行四个只重跑第9–10阶段的快速消融：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\laptop14_to_rest15_final_conversion_dann0_v1.json -RunId laptop14-rest15-final-conversion-dann0-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\laptop14_to_rest15_final_conversion_dann001_v1.json -RunId laptop14-rest15-final-conversion-dann001-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\laptop14_to_rest15_final_conversion_pw075_v1.json -RunId laptop14-rest15-final-conversion-pw075-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\laptop14_to_rest15_final_conversion_pw080_v1.json -RunId laptop14-rest15-final-conversion-pw080-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
+同一命令和同一 `RunId`（运行标识）可在中断后恢复。四个子运行不得在锚点十阶段成功前启动；任何门禁失败都应先检查父运行完整性，禁止使用 `-AllowDirtyDiagnostic`（允许脏工作树诊断）绕过正式实验约束。
+
 ## 3. 最佳流程和当前原生模块
 
 当前最佳配方：`configs\recipes\rest16_to_laptop14_best_v1.json`。
@@ -292,12 +346,13 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 
 | 优先级 | 当前不足 | 改进目标 | 下一步改动 | 接受标准 |
 |---|---|---|---|---|
-| P0 | 过去可任意跨目录混合产物；完全禁止复用又会重复训练未受影响模块 | 建立可审计的单层阶段复用 | 只允许从一个完整从头且封存的父运行按阶段指纹导入；复用深度固定为1，结果先标记快速消融 | 任一多父运行、复用链、相关代码/命令/输入哈希变化或来源不明均被拒绝；候选晋级后完整从头验收 |
+| P0 | 过去可任意跨目录混合产物；完全禁止复用又会重复训练未受影响模块 | 建立可审计的单层阶段复用 | 专用入口和门禁已在 `dd2d5f5` 实现；先用新的完整从头锚点验证，再只从该锚点导入第1–8阶段 | 235项测试与锚点干运行已通过；正式父/子运行仍须验证来源记录、哈希、复用深度和阶段状态，候选晋级后完整从头验收 |
+| P0 | `laptop14 -> rest15` 完整伪标签F1为61.17，最终模型却只有51.64 | 定位并改善伪标签到最终模型的转化效率 | 冻结 DANN 0/0.01/0.03与伪标签高层权重0.65/0.75/0.80矩阵；记录源域/目标伪标签稀疏梯度余弦和范数 | 快速候选相对同次锚点 raw F1至少提高0.50，负面与多三元组F1任一下降不超过0.30；晋级后完整从头验收 |
 | P0 | 失败观点编辑会被抽取器重新贴成其他标签后保留 | 建立生成意图与最终标签闭环 | 控制符硬门禁、通道编辑契约、抽取器只作软支持、150条隔离消融 | 占位符为0；计划三元组、目标情感和未编辑三元组保持率均为100% |
 | P0 | 动态增强和两版目标方面候选诊断都在扩大召回时放大 FP（误检），源域平均精度不能可靠迁移 | 控制候选噪声并避免确认偏差 | 暂停候选训练注入；先用冻结规则测试只发生在最终评估的多候选一致性合并 | 不使用目标测试标签调参；总体精确率下降不超过1个百分点；raw F1（原始F1）和召回率同时上升 |
 | P1 | 缺少结构化 FN/FP（漏检/误检）归因 | 定位召回损失首次出现的阶段 | 自动分类方面词、观点词、配对、情感、边界、否定和多三元组错误 | 每个错误可追溯，明确贡献最大的两个召回瓶颈 |
 | P1 | neutral（中性）F1 接近 0 | 学到真实中性边界 | 先分离否定、缺失属性、弱情绪三类错误，再构造少量高质量样本 | neutral F1 提升且 pos/neg F1 不明显下降 |
-| P1 | 多三元组 recall（召回率）仍低 | 提升完整抽取而不引入 3+ 噪声 | 保留 complete_multi2_w025；先运行 `rest15 -> laptop14` 的6候选、3票支持、每句最多补1条的最终解码消融 | 多三元组 raw F1 和 recall 同升，总体 raw F1 超过同次基础输出；首方向同时超过 BGCA 45.69 |
+| P1 | 多三元组 recall（召回率）仍低 | 提升完整抽取而不引入 3+ 噪声 | 6候选最终解码虽提高召回但未过 BGCA，当前暂停扩展；保留 complete_multi2_w025，等待更强基础模型后再评估候选合并 | 不根据目标金标搜索支持度；重新启用时仍要求多三元组 raw F1和recall同升且总体超过对应BGCA |
 | P1 | 48.93 主要依赖精确率 58.31，召回只有 42.14 | 提高召回同时控制 FP | 按 FN 结构设计分层伪标签和增强候选，不再单纯放宽数量 | recall 超过 42.14，precision 不低于 58.0，raw F1 首先突破 50.0 |
 | P2 | 单方向、单 seed（随机种子）有效不等于整体稳定 | 六个方向分别超过 BGCA | 先在三个代表方向筛选，再对候选版本运行六组至少3个 seed，报告 mean +/- std（均值加减标准差） | 六个方向的 raw F1 分别超过对应 BGCA，全部运行可复现 |
 
@@ -351,7 +406,7 @@ logs\<stage>.log
 
 2026-08-10起，实验不再默认“每次全部从头”或“持续复用上游”两个极端。每次给命令前必须先报告改动影响边界、真实下游依赖、可复用阶段、重跑阶段和实验级别。运行分为：同一 `run_id` 断点恢复、新 `run_id` 受控复用、完整从头验收。
 
-受控复用只能来自一个同方向、同 seed（随机种子）、同原始数据和声明模型的完整成功父运行。父运行必须具有干净 Git、完整清单和阶段哈希，并标记复用深度0；子运行标记复用深度1并记录每个复用阶段的来源提交、命令、代码指纹及输入输出 SHA256。子运行不得再次作为父运行，也不得直接读取父运行活动目录；专用复用入口尚未实现或门禁未通过时，禁止手工跨目录复制。
+受控复用只能来自一个同方向、同 seed（随机种子）、同原始数据和声明模型的完整成功父运行。父运行必须具有干净 Git、完整清单和阶段哈希，并标记复用深度0；子运行标记复用深度1并记录每个复用阶段的来源提交、命令、代码指纹及输入输出 SHA256。子运行不得再次作为父运行，也不得直接读取父运行活动目录。专用入口已在 `feature/final-training-conflict-diagnostics-v1` 的 `dd2d5f5` 实现并通过自动测试；正式使用仍必须让入口逐项通过门禁。入口不可用或任一门禁不通过时，禁止手工跨目录复制或引用。
 
 默认失效边界为：只改评估时复用第1–9阶段；改最终训练时复用第1–8阶段；改最终训练集组合时复用第1–7阶段；改增强时复用准备、抽取器、伪标签和生成器；改伪标签时复用准备和抽取器，独立生成器分支指纹一致时也可复用；改抽取器时其真实下游全部失效；改变数据、方向、随机种子、分词、任务格式或共同基础模型时全部从头运行。
 
