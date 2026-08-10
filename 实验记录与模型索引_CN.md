@@ -29,13 +29,13 @@
 | 完整从头可复现最佳 | raw P/R/F1 = **58.31 / 42.14 / 48.93**；fixed F1 = **50.21** |
 | 相对 BGCA raw F1 | **+1.65** |
 | 数值诊断最高 | raw F1 **49.01** / fixed F1 **51.83**；复用了历史增强，只用于归因，不作为正式可复现主线 |
-| 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、两版目标域方面候选发现诊断均已从头运行并完成归因；保守多候选最终解码已实现，等待正式 GPU（图形处理器）实验 |
-| 最新实验 | 源域联合门槛诊断从1889条目标候选保留702条，后验 precision/recall/F1（精确率/召回率/F1）为48.15%/23.21%/31.33%；源域精度65.59%未能迁移到目标域，低于现有421条高精度伪标签61.995%的精度门槛，不进入训练注入 |
+| 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、两版目标域方面候选发现诊断均已完成归因；`rest15 -> laptop14` 保守多候选最终解码已完成十阶段正式实验 |
+| 最新实验 | `rest15 -> laptop14` 同次 beam 4（束搜索宽度4）基础 raw F1（原始F1）45.135，多候选合并后45.585，提升0.451；但仍低于 BGCA 45.69约0.105个百分点，且多三元组召回36.695%未达到38%门槛，判定未通过 |
 | 当前主分支版本 | `master`；当前最好流程提交 `d2f2a35`；正式 GPU 验收代码提交 `558e4de`；用户已确认这是当前最好流程 |
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | `rest15 -> laptop14` 已完成第1–9阶段；第10阶段首次调用因新增参数误注册到伪标签子命令而在模型推理前退出。重复原命令只恢复最终评估，以同一最终模型比较 beam 4（束搜索宽度4）基础输出与保守候选合并输出 |
+| 当前下一步 | 不根据目标测试金标把支持度从3改成4，也不把该解码规则扩展到其他方向；按既定路线转向 `laptop14 -> rest15` 的伪标签到最终训练转化诊断。该改动预计最早影响第9阶段，先实现受控复用入口并复用完整父运行的第1–8阶段做快速消融，候选通过后再完整从头验收 |
 | 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第7节和第11节；实现分支 `feature/multi-candidate-decoding-v1`，功能提交 `b1c3705`，命令行修复提交 `f1581f7` |
 
 ## 2. 当前最佳与 BGCA 对比
@@ -162,7 +162,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1 && cond
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery-v2 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery-v2\configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_source_calibrated_v2.json -RunId rest14-laptop14-target-aspect-source-calibrated-seed1000-v2 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
-### 2.5 保守多候选最终解码 v1（代码完成，正式实验待运行）
+### 2.5 保守多候选最终解码 v1（正式实验完成，未通过门槛）
 
 两版目标方面候选诊断都表明，扩大训练候选会快速引入 FP（误检），因此下一步暂不把候选注入训练。新实验改为只在最终 evaluate（评估）阶段提高召回：实现分支为 `feature/multi-candidate-decoding-v1`，安全基点为单生成器提交 `753bbb5`，功能提交为 `b1c3705`，命令行修复提交为 `f1581f7`，配方为 `configs\recipes\experiments\rest15_to_laptop14_multi_candidate_decoding_v1.json`。教师—学生网络、双生成器、伪标签、增强、训练权重和模型结构均未改变。
 
@@ -174,13 +174,34 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery
 
 首个方向选择 `rest15 -> laptop14`：当前 raw P/R/F1（原始精确率/召回率/F1）为53.25/39.37/45.27，距离 BGCA 45.69仅0.42，而且多三元组F1只有42.76，适合低风险验证召回导向解码。成功门槛是：合并后 raw F1 同时高于同次运行的基础输出和 BGCA 45.69；raw recall（原始召回率）上升；raw precision（原始精确率）下降不超过1.0个百分点；多三元组 recall/F1（召回率/F1）不下降。若不满足则标记失败，不根据目标金标反向调整支持度。
 
+十阶段现已全部完成，`evaluate`（评估）状态、`observed_outputs.json` 和运行记录完整。同一最终模型的基础与合并结果如下：
+
+| 指标 | beam 4 基础 | 6候选合并 | 变化 |
+|---|---:|---:|---:|
+| raw precision（原始精确率） | 51.294% | 51.270% | -0.024个百分点 |
+| raw recall（原始召回率） | 40.296% | 41.035% | +0.739个百分点 |
+| raw F1（原始F1） | 45.135 | **45.585** | **+0.451** |
+| fixed F1（修正F1） | 47.303 | 47.580 | +0.277 |
+| 单三元组 raw F1（原始F1） | 46.787 | 46.310 | -0.476 |
+| 多三元组 raw precision（原始精确率） | 57.727% | 58.482% | +0.755个百分点 |
+| 多三元组 raw recall（原始召回率） | 35.574% | 36.695% | +1.120个百分点 |
+| 多三元组 raw F1（原始F1） | 44.021 | 45.095 | +1.074 |
+
+候选合并把 TP/FP/FN（真阳性/假阳性/假阴性）从218/207/323变为222/211/319：新增8条中4条正确、4条错误，新增精确率50%。4条正确新增全部落在多三元组句，使多三元组TP增加4且FP不变；4条错误新增全部落在单三元组句，使单三元组FP增加4。正面F1从48.336升至48.997，负面F1从48.113降至47.887，中性仍为0。
+
+支持度3的5条新增只有1条正确，后验精确率20%；支持度4、5、6各1条且均正确。这个分层只在预测冻结后读取目标金标，不能据此把下一版阈值改为4。即使事后只保留支持度至少4的3条正确新增，raw F1也只有45.614，仍低于BGCA 45.69。拒绝原因中506个候选支持不足、23个与基础方面—观点对冲突、2个原文跨度不成立，最终只有8行获得新增，说明当前问题同时包含一致候选供给不足和3票候选噪声。
+
+本实验通过了“相对同次基础F1提升、总体召回提升、精确率下降小于1个百分点、多三元组F1与召回同升”四项门槛，但未通过“超过BGCA 45.69”和“多三元组召回至少38%”两项硬门槛，因此总体判定未通过，不合并到 `master`，也不扩展到其他方向。它证明多候选合并能把4个多三元组FN转为TP，可作为未来更强基础模型的备用解码模块，但当前不是解决六方向差距的主线。
+
+控制台的两类警告不构成结果异常：模型配置词表和分词器长度均为32104，四个任务特殊词元编号32100–32103，说明新增词元嵌入已完成扩展并随训练保存；`domain_adversarial_head`（领域对抗头）和 `sentiment_prototype_head`（情感原型头）只用于训练辅助损失，最终生成使用标准T5生成模型，加载时忽略这两个辅助头符合设计。
+
 正式运行命令：
 
 ```cmd
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1\configs\recipes\experiments\rest15_to_laptop14_multi_candidate_decoding_v1.json -RunId rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
-重复完全相同的命令和 `RunId` 会按阶段状态继续；当前恢复时第1–9阶段会被校验后跳过，只运行第10阶段。不得把目标方面候选诊断运行或任何历史运行目录作为输入。正式结果尚未产生，当前不得把本实现记为性能改进，也没有待删除的新模型。
+重复完全相同的命令和 `RunId` 现会校验并跳过全部十阶段。预测 SHA256 为 `0AC9456ABC7CFA85BBD8A24D29BFE4BBF1A24867170C20FF919551D898FEB9E7`，多候选分析 SHA256 为 `86ABE0533E954978E4A7F9C33B8FB2DAE7B230EA427D4AA5EB3BA4F80A282EEE`。模型目录共17.47 GiB（吉比字节）；建议在用户许可后删除6个 `checkpoint-*`（训练检查点）目录约14.97 GiB（吉比字节），保留抽取器、生成器和最终模型的3个 `best`（最佳）目录约2.50 GiB（吉比字节），供后续受控单层复用。指标、预测、候选分析、清单、日志和首次命令行失败证据全部保留。
 
 ## 3. 最佳流程和当前原生模块
 
@@ -246,6 +267,7 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 | `rest14 -> laptop14` 观点软过滤250条 | `feature/opinion-soft-filter-v1` / `d09fdca` | `rest14-laptop14-softop-seed1000-v1` | 51.04 | 52.70 | 通过率和配额达标，但编辑目标未保持、正面膨胀、多三元组下降；不合并 | 全部保留，作为失败归因证据 |
 | `rest14 -> laptop14` 观点契约供给150条 | `feature/opinion-constrained-edit-quota-v1` / `1269759` | `rest14-laptop14-opinion-supply150-seed1000-v1` | 51.94 | 54.45 | 供给与编辑正确性达标，但观点77条挤占方面候选，正负召回与多三元组下降；250条取消 | 模型和检查点约17.47 GB已按用户许可删除；约0.022 GB指标、清单、日志和数据保留 |
 | `rest14 -> laptop14` 动态比例与质量分层 | `feature/opinion-constrained-edit-quota-v1` / `e49bfb6`；运行身份 `1e942fc` | `rest14-laptop14-dynamic-ratio-tiered-seed1000-v1` | 50.25 | 53.82 | 伪标签与对照相同；增强从150增至336且有效权重超过两倍，自洽过滤未拦住不自然文本，FP和多三元组误检上升；不扩展 | 约17.47 GB模型和检查点建议删除，等待用户许可；约0.035 GB证据应保留 |
+| `rest15 -> laptop14` 保守多候选最终解码 | `feature/multi-candidate-decoding-v1`；功能 `b1c3705`，入口修复 `f1581f7` | `rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1` | 45.59 | 47.58 | 相对同次基础F1提升0.45且多三元组F1提升1.07，但低于BGCA 45.69约0.10；不合并、不扩展 | 建议删6个 `checkpoint-*`（训练检查点）目录约14.97 GiB（吉比字节），保留3个 `best`（最佳）模型约2.50 GiB（吉比字节），等待用户许可；其余证据保留 |
 | 当前代码原生迁移 | `feature/native-best-reproduction-v1`；`afc0d3d..5a57449` | 配方 `rest16_to_laptop14_best_v1` | 已完成 | 已完成 | 已完成来源隔离、命令归档、黄金校验、增强兼容和 Windows 输出修复 | 已纳入当前主线 |
 | 原生 GPU 首次验收 | 候选 `a755300` | `native-best-v1-a755300` | 中断 | 中断 | 抽取器 16/1325 step 遇到 `UnicodeEncodeError`；非模型、显存或 CUDA 错误，日志与清单保留 | 保留失败现场，不删除 |
 | 原生 GPU 第二次验收 | `5a57449` | `native-best-v1-5a57449` | 未进入评估 | 未进入评估 | 前 7 阶段黄金值全部匹配；第 8 阶段因 34 条记录新增空审计字段触发整文件哈希误报，最终训练未开始 | 保留失败现场，不删除 |
