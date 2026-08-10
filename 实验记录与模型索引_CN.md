@@ -29,14 +29,14 @@
 | 完整从头可复现最佳 | raw P/R/F1 = **58.31 / 42.14 / 48.93**；fixed F1 = **50.21** |
 | 相对 BGCA raw F1 | **+1.65** |
 | 数值诊断最高 | raw F1 **49.01** / fixed F1 **51.83**；复用了历史增强，只用于归因，不作为正式可复现主线 |
-| 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、目标域方面候选发现诊断均已从头运行并完成归因 |
+| 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、两版目标域方面候选发现诊断均已从头运行并完成归因；保守多候选最终解码已实现，等待正式 GPU（图形处理器）实验 |
 | 最新实验 | 源域联合门槛诊断从1889条目标候选保留702条，后验 precision/recall/F1（精确率/召回率/F1）为48.15%/23.21%/31.33%；源域精度65.59%未能迁移到目标域，低于现有421条高精度伪标签61.995%的精度门槛，不进入训练注入 |
 | 当前主分支版本 | `master`；当前最好流程提交 `d2f2a35`；正式 GPU 验收代码提交 `558e4de`；用户已确认这是当前最好流程 |
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 停止“只设65%源域精度下限后最大化覆盖”的校准目标；下一版需要加入安全余量、分层最差精度和覆盖惩罚，避免再次选中损失分位点1.0。新门槛仍只能用源域开发集确定，目标隐藏金标只作审计 |
-| 当前实施计划 | `docs\superpowers\plans\2026-08-08-target-aspect-discovery-v1_CN.md` |
+| 当前下一步 | 暂停继续扩大目标方面候选；先在 `rest15 -> laptop14` 完整从头运行保守多候选最终解码，以同一最终模型的 beam 4（束搜索宽度4）原始输出为对照，只补入6个候选中至少3路一致、原文跨度存在且情感严格多数的至多1个新三元组 |
+| 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第7节和第11节；实现分支 `feature/multi-candidate-decoding-v1`，代码提交 `b1c3705` |
 
 ## 2. 当前最佳与 BGCA 对比
 
@@ -162,6 +162,24 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\target-aspect-discovery-v1 && cond
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery-v2 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery-v2\configs\recipes\experiments\rest14_to_laptop14_target_aspect_discovery_source_calibrated_v2.json -RunId rest14-laptop14-target-aspect-source-calibrated-seed1000-v2 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
+### 2.5 保守多候选最终解码 v1（代码完成，正式实验待运行）
+
+两版目标方面候选诊断都表明，扩大训练候选会快速引入 FP（误检），因此下一步暂不把候选注入训练。新实验改为只在最终 evaluate（评估）阶段提高召回：实现分支为 `feature/multi-candidate-decoding-v1`，安全基点为单生成器提交 `753bbb5`，代码提交为 `b1c3705`，配方为 `configs\recipes\experiments\rest15_to_laptop14_multi_candidate_decoding_v1.json`。教师—学生网络、双生成器、伪标签、增强、训练权重和模型结构均未改变。
+
+该配方仍从原始输入执行原有十阶段流程，generator（生成器）阶段严格只有一个标签到文本生成器。第10阶段先保留现有 beam 4（束搜索宽度4）的基础预测，再独立生成 beam 6（束搜索宽度6）的6个候选序列。新增三元组必须同时满足：至少3个候选序列支持；方面和观点都是原句中的完整 token span（词元跨度）；同一方面—观点对的情感支持为严格多数；不覆盖基础预测中已有的方面—观点对；每句最多补入1个。选择过程不读取目标测试金标，金标只在预测冻结后统计新增三元组正确率。
+
+评估会同时保存同一最终模型的基础 beam 4（束搜索宽度4）指标、合并后指标、逐句候选、支持度、拒绝原因和新增三元组后验正确性。基础输出与合并输出来自同一次运行，因此可以直接判断提升是否来自候选合并，而不受两次训练差异干扰。实现已通过30项聚焦回归、Python（编程语言）语法编译、11项外部输入哈希校验和两行 RTX 3070 GPU（图形处理器）生成冒烟检查；历史配方的命令图未改变。
+
+首个方向选择 `rest15 -> laptop14`：当前 raw P/R/F1（原始精确率/召回率/F1）为53.25/39.37/45.27，距离 BGCA 45.69仅0.42，而且多三元组F1只有42.76，适合低风险验证召回导向解码。成功门槛是：合并后 raw F1 同时高于同次运行的基础输出和 BGCA 45.69；raw recall（原始召回率）上升；raw precision（原始精确率）下降不超过1.0个百分点；多三元组 recall/F1（召回率/F1）不下降。若不满足则标记失败，不根据目标金标反向调整支持度。
+
+正式运行命令：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1\configs\recipes\experiments\rest15_to_laptop14_multi_candidate_decoding_v1.json -RunId rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
+重复完全相同的命令和 `RunId` 会按阶段状态继续；不得把目标方面候选诊断运行或任何历史运行目录作为输入。正式结果尚未产生，当前不得把本实现记为性能改进，也没有待删除的新模型。
+
 ## 3. 最佳流程和当前原生模块
 
 当前最佳配方：`configs\recipes\rest16_to_laptop14_best_v1.json`。
@@ -252,10 +270,10 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 |---|---|---|---|---|
 | P0 | 过去可跨目录复用上游产物，导致表面重跑实际混合 | 永久阻断混合产物 | 继续维护 `manifest.json`、输入/输出 SHA256 和同一 `run_id` 恢复门禁 | 任一跨目录或变更输入被测试和运行时拒绝 |
 | P0 | 失败观点编辑会被抽取器重新贴成其他标签后保留 | 建立生成意图与最终标签闭环 | 控制符硬门禁、通道编辑契约、抽取器只作软支持、150条隔离消融 | 占位符为0；计划三元组、目标情感和未编辑三元组保持率均为100% |
-| P0 | 动态实验把增强有效贡献扩大到对照2.18倍，且同源抽取器/NLI自洽不能识别不自然编辑 | 控制增强噪声并避免确认偏差 | 停止按现有质量分层扩大数据；下一轮将候选发现与独立验证解耦，首先针对目标域方面候选 | 新候选必须提高方面覆盖；评估精确率和多三元组F1不得回退；不使用目标测试标签调参 |
+| P0 | 动态增强和两版目标方面候选诊断都在扩大召回时放大 FP（误检），源域平均精度不能可靠迁移 | 控制候选噪声并避免确认偏差 | 暂停候选训练注入；先用冻结规则测试只发生在最终评估的多候选一致性合并 | 不使用目标测试标签调参；总体精确率下降不超过1个百分点；raw F1（原始F1）和召回率同时上升 |
 | P1 | 缺少结构化 FN/FP（漏检/误检）归因 | 定位召回损失首次出现的阶段 | 自动分类方面词、观点词、配对、情感、边界、否定和多三元组错误 | 每个错误可追溯，明确贡献最大的两个召回瓶颈 |
 | P1 | neutral（中性）F1 接近 0 | 学到真实中性边界 | 先分离否定、缺失属性、弱情绪三类错误，再构造少量高质量样本 | neutral F1 提升且 pos/neg F1 不明显下降 |
-| P1 | 多三元组 recall（召回率）仍低 | 提升完整抽取而不引入 3+ 噪声 | 保留 complete_multi2_w025，优化候选多样性与回抽一致性 | 多三元组 raw F1 和 recall 同升，总体 raw F1 不下降 |
+| P1 | 多三元组 recall（召回率）仍低 | 提升完整抽取而不引入 3+ 噪声 | 保留 complete_multi2_w025；先运行 `rest15 -> laptop14` 的6候选、3票支持、每句最多补1条的最终解码消融 | 多三元组 raw F1 和 recall 同升，总体 raw F1 超过同次基础输出；首方向同时超过 BGCA 45.69 |
 | P1 | 48.93 主要依赖精确率 58.31，召回只有 42.14 | 提高召回同时控制 FP | 按 FN 结构设计分层伪标签和增强候选，不再单纯放宽数量 | recall 超过 42.14，precision 不低于 58.0，raw F1 首先突破 50.0 |
 | P2 | 单方向、单 seed（随机种子）有效不等于整体稳定 | 六个方向分别超过 BGCA | 先在三个代表方向筛选，再对候选版本运行六组至少3个 seed，报告 mean +/- std（均值加减标准差） | 六个方向的 raw F1 分别超过对应 BGCA，全部运行可复现 |
 
