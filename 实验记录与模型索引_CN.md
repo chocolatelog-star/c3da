@@ -36,8 +36,8 @@
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 权重0.75通过快速消融晋级门槛，应先建立新的完整从头配方并运行第1–10阶段验收；验收复现后把0.75作为 `laptop14 -> rest15` 后续增强研究的训练基线。DANN=0和权重0.80不晋级，DANN=0.01按条件式策略不再补跑；主线随后转向以目标域真实句为主的混合增强重构 |
-| 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第11节；实现分支 `feature/final-training-conflict-diagnostics-v1`，受控复用提交 `dd2d5f5`，梯度冲突诊断提交 `f7b6c85`，冻结实验矩阵提交 `49903c8`；教师—学生网络和双生成器均未采用 |
+| 当前下一步 | 权重0.75完整从头验收已于2026-08-11启动，当前从原始数据运行第1–10阶段；完成后先核对运行类型、阶段哈希和54.01快速消融结果能否复现，再决定是否将0.75作为 `laptop14 -> rest15` 后续增强研究的训练基线 |
+| 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第11节；实现分支 `feature/final-training-conflict-diagnostics-v1`，受控复用提交 `dd2d5f5`，梯度诊断提交 `f7b6c85`，冻结矩阵提交 `49903c8`，完整0.75验收配方提交 `e2adc73`；教师—学生网络和双生成器均未采用 |
 
 ## 2. 当前最佳与 BGCA 对比
 
@@ -226,6 +226,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1 && con
 | `laptop14_to_rest15_final_conversion_dann001_v1.json` | 快速消融 | 0.01 | 1.0 | 0.65 / 0.25 | 复用第1–8阶段；重跑第9–10阶段 |
 | `laptop14_to_rest15_final_conversion_pw075_v1.json` | 快速消融 | 0.03 | 15/13 | 0.75 / 0.28846 | 复用第1–8阶段；重跑第9–10阶段 |
 | `laptop14_to_rest15_final_conversion_pw080_v1.json` | 快速消融 | 0.03 | 16/13 | 0.80 / 0.30769 | 复用第1–8阶段；重跑第9–10阶段 |
+| `laptop14_to_rest15_final_conversion_pw075_full_v1.json` | 正式完整验收 | 0.03 | 15/13 | 0.75 / 0.28846 | 不复用；第1–10阶段全部从头运行 |
 
 所有配方都按 RTX 3070 8GB 固定为训练批次1、评估批次2、梯度累积16、fp16（半精度）、gradient checkpointing（梯度检查点）和 CUDA 0。代码已通过235项全量测试、语法编译和十阶段锚点干运行；本地 T5-base（基础文本到文本模型）真实反向传播检查中，62个探针参数全部有梯度，峰值显存954.01 MiB（兆二进制字节）。这些只证明实现和显存路径可运行，不构成模型实验结果。
 
@@ -282,6 +283,8 @@ J:\nlp\CD-C3DA\runs\reproducible\laptop14_to_rest15_final_conversion_anchor_v1\l
 
 2026-08-10经用户许可，已永久删除DANN=0和伪标签权重0.80两个非晋级运行中的4个 `checkpoint-*`（训练检查点）目录，共释放9.981 GiB（吉比字节）。两组各自的 `best`（最佳）模型、指标、预测、日志、清单和复用来源记录均完整保留，仍可重新评估和审计；由于训练检查点已删除，这两组不能再从第9阶段的中间训练步恢复。完整锚点和唯一晋级候选权重0.75的训练检查点均未删除。
 
+权重0.75正式完整验收配方已在提交 `e2adc73` 加入，配方模式为 `full_from_scratch`（完整从头），并由专门测试确认其十阶段命令与快速消融0.75一致，唯一运行层差异是取消前八阶段复用。正式运行 `laptop14-rest15-final-conversion-pw075-full-seed1000-v1` 已于2026-08-11启动，运行目录为 `runs\reproducible\laptop14_to_rest15_final_conversion_pw075_full_v1\laptop14-rest15-final-conversion-pw075-full-seed1000-v1`；启动核对时第1阶段完成、第2阶段正在训练。
+
 已完成锚点的运行与恢复命令：
 
 ```cmd
@@ -307,6 +310,12 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostic
 ```
 
 同一命令和同一 `RunId`（运行标识）可在中断后恢复。锚点已经通过父运行门禁；任何子运行门禁失败仍应先检查父运行完整性，禁止使用 `-AllowDirtyDiagnostic`（允许脏工作树诊断）绕过正式实验约束。权重0.75当前仍是快速消融结果，在新的完整从头运行完成前不得写入 `master` 或作为正式BGCA对比结果。
+
+权重0.75完整从头验收的启动与断点恢复命令如下；该命令不读取任何父运行产物：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\laptop14_to_rest15_final_conversion_pw075_full_v1.json -RunId laptop14-rest15-final-conversion-pw075-full-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
 
 ## 3. 最佳流程和当前原生模块
 
