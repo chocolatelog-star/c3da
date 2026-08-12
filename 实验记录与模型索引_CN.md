@@ -36,8 +36,8 @@
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 权重0.75不能直接跨方向推广。若继续做严格因果诊断，使用本次完整运行作为唯一父运行，固定第1–8阶段，仅把权重还原0.65并重跑第9–10阶段；否则停止权重路线，回到以目标域真实句为主、源域金标迁移为辅的混合增强主线 |
-| 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第11节；实现分支 `feature/final-training-conflict-diagnostics-v1`，完整0.75验收配方提交 `e2adc73`，跨方向迁移配方提交 `606e2ec`；教师—学生网络和双生成器均未采用 |
+| 当前下一步 | 已按用户确认准备同上游权重0.65严格对照：唯一父运行是本次0.75完整运行，固定第1–8阶段，只重跑第9–10阶段。实验尚未启动；完成后0.65与45.90的差异可直接归因于最终伪标签权重 |
+| 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第11节；实现分支 `feature/final-training-conflict-diagnostics-v1`，完整0.75验收配方提交 `e2adc73`，跨方向迁移配方提交 `606e2ec`，同上游0.65严格对照提交 `ef96011`；教师—学生网络和双生成器均未采用 |
 
 ## 2. 当前最佳与 BGCA 对比
 
@@ -341,6 +341,16 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostic
 
 严格隔离权重效应的最低成本方案，是把本次完整运行作为唯一 `reuse_depth=0` 父运行，固定第1–8阶段的457条完整伪标签、150条增强和1463行最终训练集，新建权重0.65子配方，只重跑 `final_train/evaluate`（最终训练/评估）。若0.65同上游显著高于45.90，则可确认0.75在该方向有害；若两者接近，则主要问题来自本次上游随机轨迹。该诊断只需第9–10阶段，不需要重新训练提取器和生成器。
 
+2026-08-12经用户确认，提交 `ef96011` 已新增 `rest16_to_laptop14_final_conversion_pw065_same_upstream_v1.json`。配方显式锁定父运行、父配方和父提交 `606e2ec`，权重比例缩放还原为1.0，即高层/探索层权重回到0.65/0.25；其他最终训练参数完全不变。受控复用入口增加显式父提交锁定能力：旧配方未声明时仍要求父子同提交，新配方声明时允许父子提交不同，但必须精确匹配声明父提交，并继续校验完整父运行、复用深度0、工作树干净、方向、种子、外部输入、阶段命令、代码指纹、输入和输出SHA256，禁止跨提交无约束复用。
+
+必要验证已通过：20项相关测试全部成功，语法编译通过，真实父运行只读干运行门禁通过，执行清单只有 `final_train/evaluate`（最终训练/评估）两阶段。干运行使用预定运行标识创建了审计清单但没有复制训练产物或启动训练；正式执行同一命令时会按哈希导入前8阶段快照并继续。该运行属于 `controlled_stage_reuse`（受控阶段复用）、`reuse_depth=1`（复用深度1）的快速因果消融，不能作为新父运行，也不能代替候选晋级后的完整从头验收。
+
+同上游0.65严格对照的完整命令如下；第1–8阶段为可复用阶段，第9–10阶段为必须重跑阶段，本次不是完整从头验收：
+
+```cmd
+cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\rest16_to_laptop14_final_conversion_pw065_same_upstream_v1.json -RunId rest16-laptop14-final-conversion-pw065-same-upstream-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
+```
+
 本次运行及模型、检查点、指标、日志和清单暂时全部保留，标记为“建议删除失败模型，等待用户许可”；在完成或放弃上述0.65严格对照前，不执行清理。
 
 完整运行与断点恢复命令归档如下；实验已完成，不需要再次执行：
@@ -416,6 +426,7 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 | `rest15 -> laptop14` 保守多候选最终解码 | `feature/multi-candidate-decoding-v1`；功能 `b1c3705`，入口修复 `f1581f7` | `rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1` | 45.59 | 47.58 | 相对同次基础F1提升0.45且多三元组F1提升1.07，但低于BGCA 45.69约0.10；不合并、不扩展 | 已按用户许可永久删除6个 `checkpoint-*`（训练检查点）目录并释放约14.97 GiB（吉比字节）；3个 `best`（最佳）模型约2.50 GiB（吉比字节）及其余证据保留 |
 | `laptop14 -> rest15` 伪标签权重0.75完整验收 | `feature/final-training-conflict-diagnostics-v1` / `e2adc73` | `laptop14-rest15-final-conversion-pw075-full-seed1000-v1` | **54.01** | **55.53** | 完整从头、复用深度0；驱动崩溃后同运行标识恢复，八类产物哈希和指标与快速消融完全一致；比锚点提高2.81，仍低于BGCA 4.94 | 全部保留，作为该方向后续增强研究的正式训练基线 |
 | `rest16 -> laptop14` 伪标签权重0.75跨方向迁移 | `feature/final-training-conflict-diagnostics-v1` / `606e2ec` | `rest16-laptop14-final-conversion-pw075-full-seed1000-v1` | 45.90 | 48.72 | 完整从头、复用深度0；中断后同运行标识合法恢复并完成十阶段；相对48.93下降3.03且低于BGCA 1.38，主要因FP增加48；上游随机产物同时变化，不能把全部下降归因于权重 | 全部保留；建议删除失败模型，等待用户许可；可先做同上游0.65严格对照 |
+| `rest16 -> laptop14` 同上游伪标签权重0.65严格对照 | `feature/final-training-conflict-diagnostics-v1` / `ef96011` | `rest16-laptop14-final-conversion-pw065-same-upstream-seed1000-v1` | 待运行 | 待运行 | 唯一父运行是上一行0.75完整运行；固定第1–8阶段的457条伪标签、150条增强和1463行训练集，只重跑第9–10阶段 | 干运行清单已创建，无训练产物；等待用户在CMD执行 |
 | 当前代码原生迁移 | `feature/native-best-reproduction-v1`；`afc0d3d..5a57449` | 配方 `rest16_to_laptop14_best_v1` | 已完成 | 已完成 | 已完成来源隔离、命令归档、黄金校验、增强兼容和 Windows 输出修复 | 已纳入当前主线 |
 | 原生 GPU 首次验收 | 候选 `a755300` | `native-best-v1-a755300` | 中断 | 中断 | 抽取器 16/1325 step 遇到 `UnicodeEncodeError`；非模型、显存或 CUDA 错误，日志与清单保留 | 保留失败现场，不删除 |
 | 原生 GPU 第二次验收 | `5a57449` | `native-best-v1-5a57449` | 未进入评估 | 未进入评估 | 前 7 阶段黄金值全部匹配；第 8 阶段因 34 条记录新增空审计字段触发整文件哈希误报，最终训练未开始 | 保留失败现场，不删除 |
