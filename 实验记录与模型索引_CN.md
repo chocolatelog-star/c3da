@@ -30,13 +30,13 @@
 | 相对 BGCA raw F1 | **+1.65** |
 | 数值诊断最高 | raw F1 **49.01** / fixed F1 **51.83**；复用了历史增强，只用于归因，不作为正式可复现主线 |
 | 已完成工作 | 当前最好流程已精确复现；六组跨域基线已完成；`rest14 -> laptop14` 观点软过滤、观点契约供给、动态比例与质量分层、两版目标域方面候选发现诊断均已完成归因；`rest15 -> laptop14` 保守多候选最终解码已完成；`laptop14 -> rest15` 完整锚点、三组快速消融和权重0.75完整从头验收均已完成 |
-| 最新实验 | `rest16 -> laptop14` 权重0.75跨方向迁移完整实验已启动但尚未完成：第1阶段完成，第2阶段抽取器在144/1325附近被外部非正常终止，未进入伪标签、增强、最终训练和评估，因此没有可比较F1，不能判断是否提升48.93 |
-| 最新诊断证据 | 迁移运行提交 `606e2ec`，模式为 `full_from_scratch`（完整从头）、复用深度0、工作树干净且11个外部输入哈希通过；标准错误日志为空，没有Python异常、显存溢出或Windows CUDA/驱动错误事件，保留 `checkpoint-53` 和 `checkpoint-107`，可用同一运行标识从第107步恢复 |
+| 最新实验 | `rest16 -> laptop14` 权重0.75跨方向迁移完整实验取得 raw P/R/F1（原始精确率/召回率/F1）51.49/41.40/45.90，fixed F1（修正F1）48.72；低于当前48.93共3.03个百分点，也低于BGCA 47.28共1.38个百分点，不晋级 |
+| 最新诊断证据 | 迁移运行提交 `606e2ec`，模式为 `full_from_scratch`（完整从头）、复用深度0、工作树干净且11个外部输入哈希通过；中断后以同一运行标识合法恢复，十阶段全部完成。相对48.93仅少4个TP（真阳性），但多48个FP（假阳性），下降主要来自精确率而非召回 |
 | 当前主分支版本 | `master`；当前最好流程提交 `d2f2a35`；正式 GPU 验收代码提交 `558e4de`；用户已确认这是当前最好流程 |
 | `master` 状态 | 当前最好流程；十阶段原生 GPU 验收、全部黄金哈希和指标均已通过 |
 | 当前首次偏差处理 | `native-best-v1-5a57449` 的第 8 阶段误报已由训练语义哈希修复；新运行 `native-best-v2-training-semantic` 十阶段全部通过，旧失败现场仍保留 |
 | 当前主要模型短板 | 六组均以召回不足为主；neutral（中性）伪标签缺失；领域方面词直接重合仅2.0%到11.1%；增强过滤只保证标签自洽而不能保证语言自然，扩大增强数量会同时放大伪自然文本和多三元组误检 |
-| 当前下一步 | 由用户在CMD（命令提示符）中使用同一命令和运行标识恢复 `rest16 -> laptop14` 权重0.75迁移实验；完成后先与当前48.93和BGCA 47.28比较，再决定权重0.75是否跨方向推广。该诊断不改变随后以目标域真实句为主、源域金标迁移为辅的混合增强主线 |
+| 当前下一步 | 权重0.75不能直接跨方向推广。若继续做严格因果诊断，使用本次完整运行作为唯一父运行，固定第1–8阶段，仅把权重还原0.65并重跑第9–10阶段；否则停止权重路线，回到以目标域真实句为主、源域金标迁移为辅的混合增强主线 |
 | 当前实施计划 | 根目录 `03_CD-C3DA下一阶段改进计划_CN.md` 第11节；实现分支 `feature/final-training-conflict-diagnostics-v1`，完整0.75验收配方提交 `e2adc73`，跨方向迁移配方提交 `606e2ec`；教师—学生网络和双生成器均未采用 |
 
 ## 2. 当前最佳与 BGCA 对比
@@ -325,13 +325,25 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostic
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\laptop14_to_rest15_final_conversion_pw075_full_v1.json -RunId laptop14-rest15-final-conversion-pw075-full-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
-### 2.7 `rest16 -> laptop14` 权重0.75跨方向迁移（运行中断，等待恢复）
+### 2.7 `rest16 -> laptop14` 权重0.75跨方向迁移（完整实验完成，未通过）
 
 本实验用于检验 `laptop14 -> rest15` 上有效的伪标签权重0.75能否迁移到当前唯一超过BGCA的 `rest16 -> laptop14`。配方 `rest16_to_laptop14_final_conversion_pw075_full_v1.json` 在提交 `606e2ec` 加入；相对48.93基线只增加 `pseudo_weight_scale=15/13`，把高层/探索层伪标签权重从0.65/0.25同比例调整为0.75/0.28846，并增加只读梯度冲突诊断。数据、单生成器、增强150条上限、增强权重0.20、DANN（领域对抗神经网络）0.03、情感对比0.01、随机种子1000和RTX 3070 8GB参数均保持不变。
 
-运行 `rest16-laptop14-final-conversion-pw075-full-seed1000-v1` 为 `full_from_scratch`（完整从头）、`reuse_depth=0`（复用深度0），工作树干净，11个声明外部输入的SHA256全部通过。第1阶段准备完成；第2阶段抽取器训练到日志约144/1325时进程消失，阶段清单仍为 `running`（运行中）。标准错误日志为0字节，没有Python异常、显存溢出、CUDA错误或同期Windows应用/系统错误事件。由于没有正常退出码，只能定性为外部非正常终止，不能归因于模型、权重0.75或CUDA驱动。
+运行 `rest16-laptop14-final-conversion-pw075-full-seed1000-v1` 为 `full_from_scratch`（完整从头）、`reuse_depth=0`（复用深度0），工作树干净，11个声明外部输入的SHA256全部通过。第2阶段曾在约144/1325时外部非正常终止，随后使用同一运行标识从合法检查点恢复；清单记录 `resume_count=1`（恢复次数1），最终十阶段全部以退出码0完成。
 
-当前保留 `checkpoint-53` 和 `checkpoint-107`，后者对应全局步107、约第2轮结束。没有任何最终预测或指标，因此本次不能与48.93或BGCA 47.28比较，也不能接受或拒绝权重0.75的跨方向泛化。使用下列同一命令和同一运行标识时，入口会验证已有产物并由训练器从最近合法检查点恢复；不得改用新运行标识或复制其他运行产物。
+最终 raw P/R/F1（原始精确率/召回率/F1）为51.49/41.40/45.90，fixed F1（修正F1）为48.72。相对当前48.93基线，精确率下降6.82个百分点、召回率下降0.74个百分点、F1下降3.03个百分点；TP/FP/FN从228/163/313变为224/211/317，即只少4个正确三元组，却多48个错误三元组。相对BGCA 47.28低1.38个百分点，因此该结果不能晋级，48.93仍是保护基线。
+
+分项同样显示主要问题是误检扩张。正面F1从51.54降到49.42，负面F1从55.05降到48.46，中性F1从3.03降到0；单三元组F1从53.05降到49.87，多三元组F1从46.13降到43.27。多三元组召回仅从35.85%小降到35.57%，但精确率从64.65%降到55.22%；负面召回从52.63%降到48.25%，精确率从57.69%降到48.67%。预测集合逐行比较得到27行改善、34行退化、267行不变；相对基线新增31个正确和130个错误三元组，同时移除35个正确和82个错误三元组，说明新模型发生了明显预测重排，并净增加48个误检。
+
+本次不能把全部下降归因于0.75。生成器模型SHA256仍与48.93基线完全一致，但抽取器模型SHA256不同，基础高精度伪标签从421条变为385条，完整伪标签从494条变为457条，增强语义和最终训练语义SHA256也不同，最终训练行从1499降到1463。完整伪标签隐藏金标F1从51.08降到50.30，其中精确率从58.20%降到55.39%，说明上游目标信号本身更噪。恢复训练没有破坏运行合法性，但旧式随机模式使完整从头重跑产生了不同的抽取器轨迹；因此当前结论是“0.75方案在该次完整运行上失败、不能跨方向推广”，而不是“已严格证明0.75权重单独导致下降”。
+
+最终训练实际使用857条源域、456条目标伪标签训练行和150条增强。权重缩放后目标伪标签平均有效权重为0.6771、总有效权重约308.77；源域、目标伪标签、增强的有效权重占比约71.67%/25.82%/2.51%。梯度诊断共282对，源域/伪标签平均梯度范数比约1.34，负余弦比例50.00%，平均余弦0.0078。提高权重确实让目标信号更强，但目标伪标签质量和增强内容同时变化，最终主要放大了错误输出。
+
+严格隔离权重效应的最低成本方案，是把本次完整运行作为唯一 `reuse_depth=0` 父运行，固定第1–8阶段的457条完整伪标签、150条增强和1463行最终训练集，新建权重0.65子配方，只重跑 `final_train/evaluate`（最终训练/评估）。若0.65同上游显著高于45.90，则可确认0.75在该方向有害；若两者接近，则主要问题来自本次上游随机轨迹。该诊断只需第9–10阶段，不需要重新训练提取器和生成器。
+
+本次运行及模型、检查点、指标、日志和清单暂时全部保留，标记为“建议删除失败模型，等待用户许可”；在完成或放弃上述0.65严格对照前，不执行清理。
+
+完整运行与断点恢复命令归档如下；实验已完成，不需要再次执行：
 
 ```cmd
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\rest16_to_laptop14_final_conversion_pw075_full_v1.json -RunId rest16-laptop14-final-conversion-pw075-full-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
@@ -403,7 +415,7 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 | `rest14 -> laptop14` 动态比例与质量分层 | `feature/opinion-constrained-edit-quota-v1` / `e49bfb6`；运行身份 `1e942fc` | `rest14-laptop14-dynamic-ratio-tiered-seed1000-v1` | 50.25 | 53.82 | 伪标签与对照相同；增强从150增至336且有效权重超过两倍，自洽过滤未拦住不自然文本，FP和多三元组误检上升；不扩展 | 约17.47 GB模型和检查点建议删除，等待用户许可；约0.035 GB证据应保留 |
 | `rest15 -> laptop14` 保守多候选最终解码 | `feature/multi-candidate-decoding-v1`；功能 `b1c3705`，入口修复 `f1581f7` | `rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1` | 45.59 | 47.58 | 相对同次基础F1提升0.45且多三元组F1提升1.07，但低于BGCA 45.69约0.10；不合并、不扩展 | 已按用户许可永久删除6个 `checkpoint-*`（训练检查点）目录并释放约14.97 GiB（吉比字节）；3个 `best`（最佳）模型约2.50 GiB（吉比字节）及其余证据保留 |
 | `laptop14 -> rest15` 伪标签权重0.75完整验收 | `feature/final-training-conflict-diagnostics-v1` / `e2adc73` | `laptop14-rest15-final-conversion-pw075-full-seed1000-v1` | **54.01** | **55.53** | 完整从头、复用深度0；驱动崩溃后同运行标识恢复，八类产物哈希和指标与快速消融完全一致；比锚点提高2.81，仍低于BGCA 4.94 | 全部保留，作为该方向后续增强研究的正式训练基线 |
-| `rest16 -> laptop14` 伪标签权重0.75跨方向迁移 | `feature/final-training-conflict-diagnostics-v1` / `606e2ec` | `rest16-laptop14-final-conversion-pw075-full-seed1000-v1` | 未进入评估 | 未进入评估 | 完整从头、复用深度0；第1阶段完成，第2阶段在约144/1325时外部非正常终止，无Python/CUDA/显存错误；保留第53和107步检查点，可用同运行标识恢复 | 全部保留，等待用户恢复，不计作模型失败 |
+| `rest16 -> laptop14` 伪标签权重0.75跨方向迁移 | `feature/final-training-conflict-diagnostics-v1` / `606e2ec` | `rest16-laptop14-final-conversion-pw075-full-seed1000-v1` | 45.90 | 48.72 | 完整从头、复用深度0；中断后同运行标识合法恢复并完成十阶段；相对48.93下降3.03且低于BGCA 1.38，主要因FP增加48；上游随机产物同时变化，不能把全部下降归因于权重 | 全部保留；建议删除失败模型，等待用户许可；可先做同上游0.65严格对照 |
 | 当前代码原生迁移 | `feature/native-best-reproduction-v1`；`afc0d3d..5a57449` | 配方 `rest16_to_laptop14_best_v1` | 已完成 | 已完成 | 已完成来源隔离、命令归档、黄金校验、增强兼容和 Windows 输出修复 | 已纳入当前主线 |
 | 原生 GPU 首次验收 | 候选 `a755300` | `native-best-v1-a755300` | 中断 | 中断 | 抽取器 16/1325 step 遇到 `UnicodeEncodeError`；非模型、显存或 CUDA 错误，日志与清单保留 | 保留失败现场，不删除 |
 | 原生 GPU 第二次验收 | `5a57449` | `native-best-v1-5a57449` | 未进入评估 | 未进入评估 | 前 7 阶段黄金值全部匹配；第 8 阶段因 34 条记录新增空审计字段触发整文件哈希误报，最终训练未开始 | 保留失败现场，不删除 |
