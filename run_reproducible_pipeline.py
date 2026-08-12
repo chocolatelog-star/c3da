@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -26,6 +28,16 @@ from reproducibility import (
 PROJECT_ROOT = Path(__file__).resolve().parent
 FINAL_TAG = "strict_aug150_w020_label_to_text_gen_complete_multi2_w025_pw065"
 RESULT_TAG = f"{FINAL_TAG}_sentiment_contrastive_l001_source_balanced"
+MODEL_SNAPSHOT_FILES = (
+    "model.safetensors",
+    "config.json",
+    "generation_config.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "spiece.model",
+    "tokenizer.json",
+)
 
 
 @dataclass(frozen=True)
@@ -50,7 +62,52 @@ def load_recipe(path: Path) -> dict:
     missing = sorted(required - set(recipe))
     if missing:
         raise ValueError(f"recipe missing required keys: {missing}")
+    reuse = recipe.get("reuse", {})
+    mode = reuse.get("mode", "full_from_scratch")
+    if mode not in {"full_from_scratch", "controlled_stage_reuse"}:
+        raise ValueError(f"unsupported reuse mode: {mode}")
+    if mode == "controlled_stage_reuse":
+        required_reuse = {
+            "parent_recipe_id",
+            "parent_run_id",
+            "parent_recipe_semantic_sha256",
+            "through_stage",
+        }
+        missing_reuse = sorted(required_reuse - set(reuse))
+        if missing_reuse:
+            raise ValueError(f"controlled reuse config is missing: {missing_reuse}")
+        if reuse["through_stage"] != "generator":
+            raise ValueError("target-anchor ablations must reuse exactly through generator")
+    target_anchor = recipe.get("augment", {}).get("target_anchor_mode")
+    if target_anchor is not None:
+        if target_anchor != "local_span_edit":
+            raise ValueError(f"unsupported target_anchor_mode: {target_anchor}")
+        if int(recipe["augment"].get("selection_limit", 0)) <= 0:
+            raise ValueError("target-anchor selection_limit must be positive")
+        if float(recipe["augment"].get("total_weight_cap", 0)) <= 0:
+            raise ValueError("target-anchor total_weight_cap must be positive")
     return recipe
+
+
+def _model_snapshot_outputs(model_dir: Path) -> tuple[Path, ...]:
+    return tuple(model_dir / name for name in MODEL_SNAPSHOT_FILES)
+
+
+def _fraction_tag(value: float) -> str:
+    scaled = round(float(value) * 100)
+    return f"{scaled:03d}"
+
+
+def _target_anchor_tags(recipe: dict) -> dict[str, str]:
+    augment = recipe["augment"]
+    final = recipe["final"]
+    step = int(augment["experiment_step"])
+    augment_tag = f"target_anchor_step{step}_v1"
+    final_tag = (
+        f"{augment_tag}_complete_multi2_w025_pw{_fraction_tag(final['effective_pseudo_weight'])}"
+    )
+    result_tag = f"{final_tag}_sentiment_contrastive_l001_source_balanced"
+    return {"augment": augment_tag, "final": final_tag, "result": result_tag}
 
 
 def validate_git_state(project_root: Path, allow_dirty: bool) -> tuple[str, str]:
@@ -88,15 +145,44 @@ def validate_external_inputs(recipe: dict) -> dict[str, str]:
 def initialize_recipe_manifest(
     context: RunContext, recipe: dict, recipe_path: Path
 ) -> None:
-    context.manifest.update(
-        {
-            "source_dataset": recipe["source_dataset"],
-            "target_dataset": recipe["target_dataset"],
-            "seed": recipe["seed"],
-            "recipe_path": str(Path(recipe_path).resolve()),
-            "recipe_sha256": sha256_file(Path(recipe_path)),
-        }
-    )
+    semantic_payload = json.dumps(
+        recipe,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    values = {
+        "source_dataset": recipe["source_dataset"],
+        "target_dataset": recipe["target_dataset"],
+        "seed": recipe["seed"],
+        "recipe_path": str(Path(recipe_path).resolve()),
+        "recipe_sha256": sha256_file(Path(recipe_path)),
+        "recipe_semantic_sha256": hashlib.sha256(semantic_payload).hexdigest().upper(),
+    }
+    for key, value in values.items():
+        existing = context.manifest.get(key)
+        if existing is not None and existing != value:
+            raise ReproducibilityError(f"run recipe identity mismatch for {key}")
+        context.manifest[key] = value
+    write_json_atomic(context.manifest_path, context.manifest)
+
+
+def initialize_run_mode_manifest(
+    context: RunContext, recipe: dict, *, git_worktree_clean: bool
+) -> None:
+    mode = recipe.get("reuse", {}).get("mode", "full_from_scratch")
+    if mode == "full_from_scratch":
+        values = {"run_type": mode, "reuse_depth": 0}
+    elif mode == "controlled_stage_reuse":
+        values = {"run_type": mode, "reuse_depth": 1}
+    else:
+        raise ReproducibilityError(f"unsupported reuse mode: {mode}")
+    values["git_worktree_clean"] = bool(git_worktree_clean)
+    for key, value in values.items():
+        existing = context.manifest.get(key)
+        if existing is not None and existing != value:
+            raise ReproducibilityError(f"run mode manifest mismatch for {key}")
+        context.manifest[key] = value
     write_json_atomic(context.manifest_path, context.manifest)
 
 
@@ -175,6 +261,7 @@ def validate_golden_artifact(stage: Stage, recipe: dict) -> dict | None:
 def collect_internal_input_hashes(stage: Stage, run_root: Path) -> dict[str, str]:
     run_root = Path(run_root).resolve()
     output_paths = {path.resolve() for path in stage.outputs}
+    output_parents = {path.parent for path in output_paths}
     hashes = {}
     candidates = [Path(path) for path in stage.inputs]
     candidates.extend(Path(token) for token in stage.argv)
@@ -182,7 +269,11 @@ def collect_internal_input_hashes(stage: Stage, run_root: Path) -> dict[str, str
         if not candidate.exists():
             continue
         resolved = candidate.resolve()
-        if not resolved.is_relative_to(run_root) or resolved in output_paths:
+        if (
+            not resolved.is_relative_to(run_root)
+            or resolved in output_paths
+            or resolved in output_parents
+        ):
             continue
         hash_target = resolved
         if resolved.is_dir():
@@ -195,6 +286,171 @@ def collect_internal_input_hashes(stage: Stage, run_root: Path) -> dict[str, str
     return hashes
 
 
+def collect_stage_input_hashes(stage: Stage, run_root: Path) -> dict[str, str]:
+    hashes = collect_internal_input_hashes(stage, run_root)
+    if stage.name == "prepare_final":
+        pseudo_source = Path(run_root).resolve() / "target_pseudo.jsonl"
+        if pseudo_source.is_file():
+            hashes[str(pseudo_source.resolve())] = sha256_file(pseudo_source)
+    return hashes
+
+
+def _normalize_run_path_token(token: str, run_root: Path) -> str:
+    text = str(token)
+    root_text = str(Path(run_root).resolve())
+    if text.casefold() == root_text.casefold():
+        return "{run_root}"
+    prefix = root_text + os.sep
+    if text.casefold().startswith(prefix.casefold()):
+        return "{run_root}/" + text[len(prefix):].replace("\\", "/")
+    return text
+
+
+def _normalized_hash_map(values: dict[str, str], run_root: Path) -> dict[str, str]:
+    return {
+        _normalize_run_path_token(path, run_root): value for path, value in values.items()
+    }
+
+
+def _import_reused_file(source: Path, destination: Path, expected_hash: str) -> str:
+    source = Path(source).resolve()
+    destination = Path(destination).resolve()
+    if destination.is_file():
+        if sha256_file(destination) != expected_hash:
+            raise ReproducibilityError(f"existing reuse destination hash mismatch: {destination}")
+        return "existing_validated"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, destination)
+        method = "hardlink"
+    except OSError:
+        shutil.copy2(source, destination)
+        method = "copy"
+    if sha256_file(destination) != expected_hash:
+        raise ReproducibilityError(f"imported artifact hash mismatch: {destination}")
+    return method
+
+
+def import_controlled_stage_reuse(
+    *,
+    context: RunContext,
+    recipe: dict,
+    stages: list[Stage],
+    output_root: Path,
+    current_git_commit: str,
+    current_external_hashes: dict[str, str],
+    dry_run: bool,
+) -> tuple[str, ...]:
+    reuse = recipe.get("reuse", {})
+    if reuse.get("mode", "full_from_scratch") != "controlled_stage_reuse":
+        return ()
+    stage_names = [stage.name for stage in stages]
+    through_stage = str(reuse["through_stage"])
+    if through_stage not in stage_names:
+        raise ReproducibilityError(f"reuse through_stage is unknown: {through_stage}")
+    reused_stages = stages[: stage_names.index(through_stage) + 1]
+    output_root = Path(output_root).resolve()
+    parent_root = (
+        output_root / str(reuse["parent_recipe_id"]) / str(reuse["parent_run_id"])
+    ).resolve()
+    if not parent_root.is_relative_to(output_root) or parent_root == context.run_root:
+        raise ReproducibilityError(f"unsafe reuse parent path: {parent_root}")
+    manifest_path = parent_root / "manifest.json"
+    status_path = parent_root / "stage_status.json"
+    if not manifest_path.is_file() or not status_path.is_file():
+        raise ReproducibilityError(f"reuse parent is missing manifest or stage status: {parent_root}")
+    parent = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if parent.get("recipe_id") != reuse["parent_recipe_id"]:
+        raise ReproducibilityError("reuse parent recipe_id mismatch")
+    if parent.get("run_id") != reuse["parent_run_id"]:
+        raise ReproducibilityError("reuse parent run_id mismatch")
+    if parent.get("recipe_semantic_sha256") != str(
+        reuse["parent_recipe_semantic_sha256"]
+    ).upper():
+        raise ReproducibilityError("reuse parent recipe semantic SHA256 mismatch")
+    statuses = json.loads(status_path.read_text(encoding="utf-8"))
+    if parent.get("reuse_depth") != 0:
+        raise ReproducibilityError("reuse parent must have reuse_depth=0")
+    if parent.get("run_type") != "full_from_scratch":
+        raise ReproducibilityError("reuse parent must be a full_from_scratch run")
+    if parent.get("git_worktree_clean") is not True:
+        raise ReproducibilityError("reuse parent must record a clean git worktree")
+    if parent.get("git_commit") != current_git_commit:
+        raise ReproducibilityError("reuse parent git commit must equal current candidate commit")
+    for key in ("source_dataset", "target_dataset", "seed"):
+        if parent.get(key) != recipe.get(key):
+            raise ReproducibilityError(f"reuse parent {key} mismatch")
+    external = parent.get("external_inputs", {})
+    if external.get("matched") is not True or external.get("sha256") != current_external_hashes:
+        raise ReproducibilityError("reuse parent external input hashes do not match")
+
+    provenance = {
+        "schema_version": 1,
+        "reuse_depth": 1,
+        "parent_run_dir": str(parent_root),
+        "parent_recipe_id": parent.get("recipe_id"),
+        "parent_run_id": parent.get("run_id"),
+        "parent_git_commit": parent.get("git_commit"),
+        "through_stage": through_stage,
+        "stages": {},
+    }
+    for stage in reused_stages:
+        parent_stage = parent.get("stages", {}).get(stage.name)
+        parent_status = statuses.get(stage.name)
+        if not parent_stage or parent_stage.get("status") != "completed":
+            raise ReproducibilityError(f"reuse parent stage is not complete: {stage.name}")
+        if not parent_status or parent_status.get("status") != "completed" or parent_status.get("exit_code") != 0:
+            raise ReproducibilityError(f"reuse parent stage status is not complete: {stage.name}")
+        parent_argv = [_normalize_run_path_token(token, parent_root) for token in parent_stage.get("argv", [])]
+        child_argv = [_normalize_run_path_token(token, context.run_root) for token in stage.argv]
+        if parent_argv != child_argv:
+            raise ReproducibilityError(f"reused stage command fingerprint mismatch: {stage.name}")
+        parent_outputs = [Path(path).resolve() for path in parent_stage.get("outputs", [])]
+        if len(parent_outputs) != len(stage.outputs):
+            raise ReproducibilityError(f"reused stage output count mismatch: {stage.name}")
+        output_records = []
+        for source, destination in zip(parent_outputs, stage.outputs):
+            if not source.is_relative_to(parent_root):
+                raise ReproducibilityError(f"reuse parent output is outside parent run: {source}")
+            if source.relative_to(parent_root) != Path(destination).resolve().relative_to(context.run_root):
+                raise ReproducibilityError(f"reused stage output layout mismatch: {stage.name}")
+            artifact = parent.get("artifacts", {}).get(str(source))
+            if artifact is None or not source.is_file():
+                raise ReproducibilityError(f"reuse parent artifact is missing: {source}")
+            expected = str(artifact.get("sha256", ""))
+            if sha256_file(source) != expected:
+                raise ReproducibilityError(f"reuse parent artifact hash mismatch: {source}")
+            method = "validated_only" if dry_run else _import_reused_file(source, destination, expected)
+            output_records.append({"parent_path": str(source), "child_path": str(Path(destination).resolve()), "sha256": expected, "import_method": method})
+        if not dry_run:
+            child_hashes = collect_stage_input_hashes(stage, context.run_root)
+            if _normalized_hash_map(parent_stage.get("input_hashes", {}), parent_root) != _normalized_hash_map(child_hashes, context.run_root):
+                raise ReproducibilityError(f"reused stage input hash mismatch: {stage.name}")
+            context.mark_stage_complete(stage.name, stage.outputs, child_hashes, stage.argv)
+            context.manifest["stages"][stage.name]["reused_from"] = {
+                "parent_run_id": parent.get("run_id"),
+                "parent_recipe_id": parent.get("recipe_id"),
+                "parent_git_commit": parent.get("git_commit"),
+                "outputs": output_records,
+            }
+            context._update_stage_status(stage.name, {"status": "completed", "exit_code": 0, "reused": True, "parent_run_id": parent.get("run_id")})
+        provenance["stages"][stage.name] = {"outputs": output_records}
+    context.manifest["reuse_parent"] = {
+        "run_dir": str(parent_root),
+        "recipe_id": parent.get("recipe_id"),
+        "run_id": parent.get("run_id"),
+        "git_commit": parent.get("git_commit"),
+        "through_stage": through_stage,
+        "validation": "dry_run" if dry_run else "imported_and_validated",
+    }
+    write_json_atomic(context.manifest_path, context.manifest)
+    if not dry_run:
+        provenance_path = context.run_root / "reuse_provenance.json"
+        write_json_atomic(provenance_path, provenance)
+        context.record_artifact("reuse_import", provenance_path)
+    return tuple(stage.name for stage in reused_stages)
+
+
 def execute_stages(
     stages: list[Stage],
     context: RunContext,
@@ -204,14 +460,10 @@ def execute_stages(
 ) -> None:
     total = len(stages)
     for index, stage in enumerate(stages, start=1):
-        input_hashes = collect_internal_input_hashes(stage, context.run_root)
-        if stage.name == "prepare_final":
-            pseudo_source = context.run_root / "target_pseudo.jsonl"
-            if pseudo_source.is_file():
-                input_hashes[str(pseudo_source.resolve())] = sha256_file(pseudo_source)
+        input_hashes = collect_stage_input_hashes(stage, context.run_root)
 
         if stage.name in context.manifest.get("stages", {}):
-            if context.validate_completed_stage(stage.name, stage.outputs, input_hashes):
+            if context.validate_completed_stage(stage.name, stage.outputs, input_hashes, stage.argv):
                 validate_golden_artifact(stage, recipe)
                 print(
                     f"[native-repro] SKIP {index}/{total} {stage.name} "
@@ -239,7 +491,7 @@ def execute_stages(
             context.require_internal_artifact(destination)
             shutil.copy2(source, destination)
 
-        context.mark_stage_complete(stage.name, stage.outputs, input_hashes)
+        context.mark_stage_complete(stage.name, stage.outputs, input_hashes, stage.argv)
         try:
             golden_result = validate_golden_artifact(stage, recipe)
         except GoldenMismatchError as error:
@@ -283,23 +535,30 @@ def build_best_v1_stages(
     augment = recipe["augment"]
     complete = recipe["complete_multi"]
     final = recipe["final"]
+    target_anchor_enabled = augment.get("target_anchor_mode") == "local_span_edit"
+    tags = (
+        _target_anchor_tags(recipe)
+        if target_anchor_enabled
+        else {"augment": "strict_aug150_w020_label_to_text_gen", "final": FINAL_TAG, "result": RESULT_TAG}
+    )
 
     extractor_dir = run_root / "models" / "extractor_ep25_plain_last"
     extractor = extractor_dir / "best"
     generator_dir = run_root / "models" / "generator_label_to_text_gen_ep8"
     generator = generator_dir / "best"
     selected_augment = (
-        run_root
-        / "c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl"
+        run_root / f"target_anchored_selected_{tags['augment']}.jsonl"
+        if target_anchor_enabled
+        else run_root / "c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl"
     )
     complete_dir = final_data / "pseudo_variants" / "hp1_complete2_dist5_w025"
     complete_pseudo = complete_dir / "target_pseudo_high_precision.jsonl"
-    final_train = final_data / f"final_train_{FINAL_TAG}.jsonl"
-    final_dev = final_data / f"final_dev_{FINAL_TAG}.jsonl"
+    final_train = final_data / f"final_train_{tags['final']}.jsonl"
+    final_dev = final_data / f"final_dev_{tags['final']}.jsonl"
     final_model_dir = (
         final_data
         / "models"
-        / f"final_dann_l0.03_{RESULT_TAG}_ep5"
+        / f"final_dann_l0.03_{tags['result']}_ep5"
     )
     final_model = final_model_dir / "best"
 
@@ -393,7 +652,7 @@ def build_best_v1_stages(
                 "auto",
                 *common_train,
             ),
-            (extractor / "model.safetensors",),
+            _model_snapshot_outputs(extractor),
             "extractor",
             (
                 run_root / "extract_train.jsonl",
@@ -465,7 +724,7 @@ def build_best_v1_stages(
                 "auto",
                 *common_train,
             ),
-            (generator / "model.safetensors",),
+            _model_snapshot_outputs(generator),
             "generator",
             (
                 run_root / "c3da_generator_train_label_to_text_gen.jsonl",
@@ -474,10 +733,80 @@ def build_best_v1_stages(
         ),
         Stage(
             "augment",
-            _command(
-                python_executable,
-                pipeline,
-                "augment",
+            (
+                _command(
+                    python_executable,
+                    project_root / "target_anchored_augment.py",
+                    "--run_dir",
+                    str(run_root),
+                    "--extractor_model_path",
+                    str(extractor),
+                    "--nli_model_path",
+                    nli_model,
+                    "--output_tag",
+                    tags["augment"],
+                    "--selection_limit",
+                    str(augment["selection_limit"]),
+                    "--max_per_base",
+                    str(augment["max_per_base"]),
+                    "--per_anchor",
+                    str(augment["per_anchor"]),
+                    "--seed",
+                    seed,
+                    "--batch_size",
+                    str(training["eval_batch_size"]),
+                    "--max_new_tokens",
+                    "96",
+                    "--model_filter_mode",
+                    str(augment["model_filter_mode"]),
+                    "--base_weight",
+                    str(augment["sample_weight"]),
+                    "--total_weight_cap",
+                    str(augment["total_weight_cap"]),
+                    "--min_selected_rows",
+                    str(augment["min_selected_rows"]),
+                    *(
+                        (
+                            "--gap_aware_selection",
+                            "--aspect_ratio_min",
+                            str(augment["aspect_ratio_min"]),
+                            "--aspect_ratio_max",
+                            str(augment["aspect_ratio_max"]),
+                            "--opinion_ratio_min",
+                            str(augment["opinion_ratio_min"]),
+                            "--opinion_ratio_max",
+                            str(augment["opinion_ratio_max"]),
+                            "--neutral_max_ratio",
+                            str(augment["neutral_max_ratio"]),
+                            "--multi_triplet_target_ratio",
+                            str(augment["multi_triplet_target_ratio"]),
+                        )
+                        if augment.get("gap_aware_selection") is True
+                        else ()
+                    ),
+                    *(
+                        (
+                            "--tiered_weights",
+                            "--high_weight",
+                            str(augment["high_weight"]),
+                            "--medium_weight",
+                            str(augment["medium_weight"]),
+                            "--neutral_high_weight",
+                            str(augment["neutral_high_weight"]),
+                            "--neutral_medium_weight",
+                            str(augment["neutral_medium_weight"]),
+                        )
+                        if augment.get("tiered_weights") is True
+                        else ()
+                    ),
+                    "--cuda",
+                    str(cuda),
+                )
+                if target_anchor_enabled
+                else _command(
+                    python_executable,
+                    pipeline,
+                    "augment",
                 "--run_dir",
                 str(run_root),
                 "--model_path",
@@ -523,14 +852,26 @@ def build_best_v1_stages(
                 "--cuda",
                 str(cuda),
                 "--no_task_prefix",
+                )
             ),
-            (selected_augment,),
-            "augment",
+            (
+                (
+                    selected_augment,
+                    run_root / f"target_anchored_analysis_{tags['augment']}.json",
+                    run_root / f"target_anchored_{tags['augment']}_candidates.jsonl",
+                    run_root / f"target_anchored_{tags['augment']}_nli.jsonl",
+                    run_root / f"target_anchored_{tags['augment']}_model_kept.jsonl",
+                    run_root / f"target_anchored_{tags['augment']}_model_removed.jsonl",
+                    run_root / f"target_anchored_{tags['augment']}_exploratory_audit.jsonl",
+                )
+                if target_anchor_enabled
+                else (selected_augment,)
+            ),
+            "" if target_anchor_enabled else "augment",
             (
                 run_root / "source_train.jsonl",
                 run_root / "source_dev.jsonl",
                 run_root / "target_pseudo_selected.jsonl",
-                generator / "model.safetensors",
                 extractor / "model.safetensors",
             ),
         ),
@@ -608,9 +949,9 @@ def build_best_v1_stages(
                 "--selected_augment_file",
                 str(selected_augment),
                 "--selected_augment_weight",
-                str(final["augment_weight"]),
+                "0.0" if target_anchor_enabled else str(final["augment_weight"]),
                 "--final_train_output_tag",
-                FINAL_TAG,
+                tags["final"],
                 "--no_task_prefix",
             ),
             (final_train, final_dev),
@@ -641,6 +982,11 @@ def build_best_v1_stages(
                 "1.0",
                 "--pseudo_weight",
                 str(final["pseudo_weight"]),
+                *(
+                    ("--pseudo_weight_scale", str(final["pseudo_weight_scale"]))
+                    if "pseudo_weight_scale" in final
+                    else ()
+                ),
                 "--augment_weight",
                 str(final["augment_weight"]),
                 "--checkpoint_selection",
@@ -672,7 +1018,7 @@ def build_best_v1_stages(
                 "--sentiment_contrastive_class_balanced",
                 *common_train,
             ),
-            (final_model / "model.safetensors",),
+            _model_snapshot_outputs(final_model),
             "final_model",
             (final_train, final_dev),
         ),
@@ -697,12 +1043,12 @@ def build_best_v1_stages(
                 "--no_task_prefix",
                 "--no_constrained_decoding",
                 "--output_tag",
-                RESULT_TAG,
+                tags["result"],
             ),
             (
-                final_data / f"aste_metrics_raw_{RESULT_TAG}.json",
-                final_data / f"aste_metrics_fixed_{RESULT_TAG}.json",
-                final_data / f"aste_predictions_raw_fixed_{RESULT_TAG}.jsonl",
+                final_data / f"aste_metrics_raw_{tags['result']}.json",
+                final_data / f"aste_metrics_fixed_{tags['result']}.json",
+                final_data / f"aste_predictions_raw_fixed_{tags['result']}.jsonl",
             ),
             "predictions",
             (
@@ -742,6 +1088,11 @@ def main() -> None:
         branch,
     )
     initialize_recipe_manifest(context, recipe, Path(args.recipe))
+    initialize_run_mode_manifest(
+        context,
+        recipe,
+        git_worktree_clean=not args.allow_dirty,
+    )
     user_command = args.user_command
     if user_command.startswith("base64:"):
         user_command = base64.b64decode(user_command.removeprefix("base64:")).decode(
@@ -772,10 +1123,28 @@ def main() -> None:
             if name in recipe.get("external_inputs", {})
         ]
         context.capture_environment(sys.executable, model_paths)
+    else:
+        external_hashes = {
+            name: str(declaration["sha256"]).upper()
+            for name, declaration in recipe.get("external_inputs", {}).items()
+        }
     stages = build_best_v1_stages(
         PROJECT_ROOT, run_root, recipe, Path(sys.executable), args.cuda
     )
-    execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run)
+    reused_stage_names = import_controlled_stage_reuse(
+        context=context,
+        recipe=recipe,
+        stages=stages,
+        output_root=Path(args.output_root),
+        current_git_commit=commit,
+        current_external_hashes=external_hashes,
+        dry_run=args.dry_run,
+    )
+    execution_stages = stages
+    if reused_stage_names:
+        reused = set(reused_stage_names)
+        execution_stages = [stage for stage in stages if stage.name not in reused]
+    execute_stages(execution_stages, context, recipe, PROJECT_ROOT, args.dry_run)
     context.render_run_record_cn()
 
 

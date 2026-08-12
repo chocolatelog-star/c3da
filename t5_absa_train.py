@@ -87,6 +87,9 @@ CSA_AUGMENT_CHANNELS = {
     "label_composition_channel",
     "label_to_text_channel",
     "sentence_fusion_composition_channel",
+    "target_anchored_aspect_channel",
+    "target_anchored_opinion_channel",
+    "target_anchored_neutral_channel",
 }
 TAG_INIT_WORDS = {
     "<pos>": "positive",
@@ -211,6 +214,7 @@ class JsonlSeq2SeqDataset(Dataset):
         source_weight: float,
         pseudo_weight: float,
         augment_weight: float,
+        pseudo_weight_scale: float = 1.0,
         multi_triplet_loss_gain: float = 0.0,
         neutral_loss_gain: float = 0.0,
         max_effective_weight: float = 1.0,
@@ -233,6 +237,7 @@ class JsonlSeq2SeqDataset(Dataset):
         self.source_weight = source_weight
         self.pseudo_weight = pseudo_weight
         self.augment_weight = augment_weight
+        self.pseudo_weight_scale = pseudo_weight_scale
         self.multi_triplet_loss_gain = multi_triplet_loss_gain
         self.neutral_loss_gain = neutral_loss_gain
         self.max_effective_weight = max_effective_weight
@@ -279,11 +284,16 @@ class JsonlSeq2SeqDataset(Dataset):
         return model_inputs
 
     def sample_weight(self, row: dict) -> float:
-        if "sample_weight" in row and not self.force_domain_weights:
-            return float(row["sample_weight"])
         augmentation = row.get("augmentation")
+        if "sample_weight" in row and not self.force_domain_weights:
+            weight = float(row["sample_weight"])
+            return (
+                weight * self.pseudo_weight_scale
+                if augmentation == "target_pseudo"
+                else weight
+            )
         if augmentation == "target_pseudo":
-            return self.pseudo_weight
+            return self.pseudo_weight * self.pseudo_weight_scale
         if augmentation in CSA_AUGMENT_CHANNELS:
             return self.augment_weight
         return self.source_weight
@@ -1224,6 +1234,7 @@ def main() -> None:
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--source_weight", type=float, default=1.0)
     parser.add_argument("--pseudo_weight", type=float, default=0.5)
+    parser.add_argument("--pseudo_weight_scale", type=float, default=1.0)
     parser.add_argument("--augment_weight", type=float, default=0.2)
     parser.add_argument("--force_domain_weights", action="store_true")
     parser.add_argument("--lambda_structure_loss", type=float, default=0.15)
@@ -1261,6 +1272,9 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    if not math.isfinite(args.pseudo_weight_scale) or args.pseudo_weight_scale <= 0:
+        parser.error("--pseudo_weight_scale must be finite and positive")
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
     reproducibility_mode = "deterministic" if args.deterministic else "legacy"
@@ -1365,6 +1379,7 @@ def main() -> None:
         args.source_weight,
         args.pseudo_weight,
         args.augment_weight,
+        pseudo_weight_scale=args.pseudo_weight_scale,
         multi_triplet_loss_gain=args.multi_triplet_loss_gain,
         neutral_loss_gain=args.neutral_loss_gain,
         max_effective_weight=args.max_effective_weight,

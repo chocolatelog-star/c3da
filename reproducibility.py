@@ -535,14 +535,21 @@ class RunContext:
         stage: str,
         outputs: Iterable[Path],
         input_hashes: Mapping[str, str] | None = None,
+        argv: Iterable[str] = (),
     ) -> None:
         resolved_outputs = [self.require_internal_artifact(path) for path in outputs]
+        command = [str(part) for part in argv]
+        command_sha256 = hashlib.sha256(
+            json.dumps(command, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         for output in resolved_outputs:
             self.record_artifact(stage, output, input_hashes)
         self.manifest["stages"][stage] = {
             "status": "completed",
             "outputs": [str(path) for path in resolved_outputs],
             "input_hashes": dict(input_hashes or {}),
+            "argv": command,
+            "argv_sha256": command_sha256,
         }
         write_json_atomic(self.manifest_path, self.manifest)
 
@@ -551,6 +558,7 @@ class RunContext:
         stage: str,
         outputs: Iterable[Path],
         input_hashes: Mapping[str, str] | None = None,
+        argv: Iterable[str] = (),
     ) -> bool:
         stage_record = self.manifest["stages"].get(stage)
         if not stage_record or stage_record.get("status") != "completed":
@@ -558,6 +566,15 @@ class RunContext:
         expected_outputs = [str(self.require_internal_artifact(path)) for path in outputs]
         if stage_record.get("outputs") != expected_outputs:
             raise ReproducibilityError(f"stage output mismatch: {stage}")
+        expected_argv = [str(part) for part in argv]
+        expected_argv_sha256 = hashlib.sha256(
+            json.dumps(expected_argv, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if (
+            stage_record.get("argv") != expected_argv
+            or stage_record.get("argv_sha256") != expected_argv_sha256
+        ):
+            raise ReproducibilityError(f"stage command mismatch: {stage}")
         expected_input_hashes = dict(input_hashes or {})
         if stage_record.get("input_hashes", {}) != expected_input_hashes:
             raise ReproducibilityError(
