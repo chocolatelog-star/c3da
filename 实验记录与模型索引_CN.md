@@ -133,7 +133,7 @@ J:\nlp\CD-C3DA\runs\reproducible\rest14_to_laptop14_target_aspect_discovery_diag
 
 分层后验分析只用于归因，不允许直接据此选择下一版目标域阈值：2/3/4路序列支持的精确率分别为45.61%/61.97%/65.38%；支持度至少3的123条候选精确率为63.41%，其中106条为逐行新增候选、精确率63.21%。生成器损失1.5到2.0区间精确率64.06%，损失大于2.3时降至46.15%。正面/负面/中性候选精确率为57.95%/42.50%/0%，说明主要噪声来自2路支持、较高生成器损失和负面候选，中性候选仍未恢复。
 
-该结果证明“扩大候选来源”有效，但当前强过滤仍不够强。下一版必须在源域开发集上独立校准支持度和生成器损失联合门禁，再把冻结阈值应用到目标域，不能把上述目标隐藏金标分层结果直接用作选择阈值。当前237条候选及模型全部保留为诊断证据，不作为新训练输入。
+该结果证明“扩大候选来源”有效，但当前强过滤仍不够强。下一版必须在源域开发集上独立校准支持度和生成器损失联合门禁，再把冻结阈值应用到目标域，不能把上述目标隐藏金标分层结果直接用作选择阈值。当前237条候选及全部诊断证据不作为新训练输入。2026-08-13经用户许可，已永久删除该运行约11.64 GB的模型与训练检查点；候选文件、分析结果、清单、命令、日志和哈希继续保留。
 
 运行结束后的 `KeyError: evaluate`（评估阶段键不存在）只发生在汇总函数：诊断配方按设计停在第5阶段，但旧汇总器仍假设存在第10阶段。提交 `e4aff0c` 增加短流程汇总，提交 `408b1fb` 复用阶段清单中的大模型哈希并避免重复读取权重；67项相关回归测试通过。原训练与诊断提交仍为 `506b36b`，五个阶段未重跑。缺失的 `observed_outputs.json` 和 `RUN_RECORD_CN.md` 已补齐并登记，前者 SHA256 为 `8831AF0B16CC4FB85C3F7EC60987D815F6E5947548B316103D2A2ACDDDDB486D`。
 
@@ -202,7 +202,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\source-calibrated-aspect-discovery
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\multi-candidate-decoding-v1\configs\recipes\experiments\rest15_to_laptop14_multi_candidate_decoding_v1.json -RunId rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
-预测 SHA256 为 `0AC9456ABC7CFA85BBD8A24D29BFE4BBF1A24867170C20FF919551D898FEB9E7`，多候选分析 SHA256 为 `86ABE0533E954978E4A7F9C33B8FB2DAE7B230EA427D4AA5EB3BA4F80A282EEE`。模型目录清理前共17.47 GiB（吉比字节）；2026-08-10经用户许可，已永久删除6个 `checkpoint-*`（训练检查点）目录并释放约14.97 GiB（吉比字节），抽取器、生成器和最终模型的3个 `best`（最佳）目录共约2.50 GiB（吉比字节）仍完整保留，供后续受控单层复用。指标、预测、候选分析、清单、日志和首次命令行失败证据也全部保留。由于检查点已经删除，该运行不能再从训练中间步恢复；如需重新训练，必须建立新 `RunId`（运行标识）并按复现规则运行。
+预测 SHA256 为 `0AC9456ABC7CFA85BBD8A24D29BFE4BBF1A24867170C20FF919551D898FEB9E7`，多候选分析 SHA256 为 `86ABE0533E954978E4A7F9C33B8FB2DAE7B230EA427D4AA5EB3BA4F80A282EEE`。模型目录清理前共17.47 GiB（吉比字节）；2026-08-10先删除6个训练检查点，2026-08-13又经用户许可删除剩余3个最佳模型。指标、预测、候选分析、清单、日志和首次命令行失败证据全部保留。该运行不能再恢复训练或直接重新评估已删除模型；如需重做，必须建立新 `RunId`（运行标识）并从合法输入运行。
 
 ### 2.6 `laptop14 -> rest15` 最终训练转化诊断 v1（权重0.75完整验收通过）
 
@@ -363,7 +363,7 @@ cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostic
 cmd /c "J: && cd /d J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1 && conda activate c3da && powershell -NoProfile -ExecutionPolicy Bypass -File run_recipe_reproducible_pipeline.ps1 -Recipe J:\nlp\CD-C3DA\.worktrees\final-training-conflict-diagnostics-v1\configs\recipes\experiments\rest16_to_laptop14_final_conversion_pw065_same_upstream_v1.json -RunId rest16-laptop14-final-conversion-pw065-same-upstream-seed1000-v1 -OutputRoot J:\nlp\CD-C3DA\runs\reproducible -Cuda 0"
 ```
 
-本次运行及模型、检查点、指标、日志和清单暂时全部保留，标记为“建议删除失败模型，等待用户许可”；在完成或放弃上述0.65严格对照前，不执行清理。
+上述0.75/0.65改造分支对照的失败最终模型和训练检查点已按许可清理；必要的上游审计最佳模型、指标、预测、日志、命令、清单、梯度诊断和复用来源记录继续保留。另一次使用48.93黄金上游、只把伪标签有效权重调为0.75的手动严格对照取得 raw/fixed F1（原始/修正F1）46.33/48.46，相对48.93下降2.59，进一步证明0.75不能跨方向通用；该手动运行的全部模型已于2026-08-13删除，指标与审计文本保留。
 
 完整运行与断点恢复命令归档如下；实验已完成，不需要再次执行：
 
@@ -434,8 +434,8 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 | 历史边界从头精确复现 | 上游 `9e78904` + 恢复兼容 `a7e7778`；下游 `8c7f6b4` + 命令兼容 `a7d1473` | `historical_best_two_stage_v1` | **48.93** | **50.21** | 全部模型、伪标签、增强和最终训练重新产生；当前正式基准 | 全部保留 |
 | `rest14 -> laptop14` 观点软过滤250条 | `feature/opinion-soft-filter-v1` / `d09fdca` | `rest14-laptop14-softop-seed1000-v1` | 51.04 | 52.70 | 通过率和配额达标，但编辑目标未保持、正面膨胀、多三元组下降；不合并 | 全部保留，作为失败归因证据 |
 | `rest14 -> laptop14` 观点契约供给150条 | `feature/opinion-constrained-edit-quota-v1` / `1269759` | `rest14-laptop14-opinion-supply150-seed1000-v1` | 51.94 | 54.45 | 供给与编辑正确性达标，但观点77条挤占方面候选，正负召回与多三元组下降；250条取消 | 模型和检查点约17.47 GB已按用户许可删除；约0.022 GB指标、清单、日志和数据保留 |
-| `rest14 -> laptop14` 动态比例与质量分层 | `feature/opinion-constrained-edit-quota-v1` / `e49bfb6`；运行身份 `1e942fc` | `rest14-laptop14-dynamic-ratio-tiered-seed1000-v1` | 50.25 | 53.82 | 伪标签与对照相同；增强从150增至336且有效权重超过两倍，自洽过滤未拦住不自然文本，FP和多三元组误检上升；不扩展 | 约17.47 GB模型和检查点建议删除，等待用户许可；约0.035 GB证据应保留 |
-| `rest15 -> laptop14` 保守多候选最终解码 | `feature/multi-candidate-decoding-v1`；功能 `b1c3705`，入口修复 `f1581f7` | `rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1` | 45.59 | 47.58 | 相对同次基础F1提升0.45且多三元组F1提升1.07，但低于BGCA 45.69约0.10；不合并、不扩展 | 已按用户许可永久删除6个 `checkpoint-*`（训练检查点）目录并释放约14.97 GiB（吉比字节）；3个 `best`（最佳）模型约2.50 GiB（吉比字节）及其余证据保留 |
+| `rest14 -> laptop14` 动态比例与质量分层 | `feature/opinion-constrained-edit-quota-v1` / `e49bfb6`；运行身份 `1e942fc` | `rest14-laptop14-dynamic-ratio-tiered-seed1000-v1` | 50.25 | 53.82 | 伪标签与对照相同；增强从150增至336且有效权重超过两倍，自洽过滤未拦住不自然文本，FP和多三元组误检上升；不扩展 | 2026-08-13已按许可永久删除约17.47 GB模型和检查点；约0.035 GB指标、清单、日志和数据证据保留 |
+| `rest15 -> laptop14` 保守多候选最终解码 | `feature/multi-candidate-decoding-v1`；功能 `b1c3705`，入口修复 `f1581f7` | `rest15-laptop14-multicandidate-mc6-s3-add1-seed1000-v1` | 45.59 | 47.58 | 相对同次基础F1提升0.45且多三元组F1提升1.07，但低于BGCA 45.69约0.10；不合并、不扩展 | 2026-08-10先删除6个训练检查点，2026-08-13又按许可删除剩余3个最佳模型；指标、预测、候选分析、清单和日志保留 |
 | `laptop14 -> rest15` 伪标签权重0.75完整验收 | `feature/final-training-conflict-diagnostics-v1` / `e2adc73` | `laptop14-rest15-final-conversion-pw075-full-seed1000-v1` | **54.01** | **55.53** | 完整从头、复用深度0；驱动崩溃后同运行标识恢复，八类产物哈希和指标与快速消融完全一致；比锚点提高2.81，仍低于BGCA 4.94 | 全部保留，作为该方向后续增强研究的正式训练基线 |
 | `rest16 -> laptop14` 伪标签权重0.75跨方向迁移 | `feature/final-training-conflict-diagnostics-v1` / `606e2ec` | `rest16-laptop14-final-conversion-pw075-full-seed1000-v1` | 45.90 | 48.72 | 改造分支完整从头、复用深度0，不是主分支最佳复现；相对48.93下降3.03且低于BGCA 1.38；同上游对照证明0.75优于0.65，但上游轨迹仍是未恢复48.93的主要问题 | 已按许可删除6个训练检查点和失败最终最佳模型；指标、预测、清单、日志、梯度诊断及必要上游审计模型保留 |
 | `rest16 -> laptop14` 同上游伪标签权重0.65严格对照 | `feature/final-training-conflict-diagnostics-v1` / `ef96011` | `rest16-laptop14-final-conversion-pw065-same-upstream-seed1000-v1` | 43.22 | 45.51 | 唯一父运行是上一行0.75完整运行；第1–8阶段哈希完全相同，只重跑第9–10阶段；比0.75低2.68，证明0.75对这批上游有益，但两者均不晋级 | 已按许可删除2个训练检查点和失败最终最佳模型；指标、预测、清单、日志、梯度诊断与复用来源记录保留 |
@@ -458,6 +458,12 @@ J:\nlp\CD-C3DA-native-best-rc-v1\runs\reproducible\rest16_to_laptop14_best_v1\na
 | 25 轮 last 生成器 | `68bc0d0` / `11ca672` / `5057ef2` | `bgca_generator25_last_v1` | 47.30 | 50.37 | 训练更久本身不优于 8 轮 best | 保留指标 |
 
 任何“建议删除”项目在用户明确许可前都不执行删除。
+
+### 5.1 2026-08-13集中清理结果
+
+用户确认继续清理后，本轮仅删除已经判定失败、已被正式完整验收替代，或规则明确禁止作为新实验输入的模型与训练检查点；运行目录中的指标、预测、候选分析、配方快照、清单、命令、日志和哈希证据均保留。两轮单生成器轮次扫描、动态比例与质量分层、第一版目标方面发现诊断、旧51.21最终训练锚点、权重0.75快速消融、DANN=0、权重0.80和保守多候选解码共删除27个 `models`（模型）目录，释放约183.89 GiB（吉比字节）。加上同日较早清理的手动0.75对照、目标锚定第一/二步失败最终模型和相关训练检查点，仓库 `runs`（运行产物）降至约67.16 GiB（吉比字节）。
+
+目标锚定第三步取得 raw/fixed F1（原始/修正F1）53.94/54.61，完整模型继续保留；第一步和第二步分别为52.38/53.29与52.29/53.38，只保留其必要上游最佳模型或受控复用审计快照。当前48.93正式复现、54.01正式训练基线、第三步完整候选、历史两阶段48.93审计现场和独立验收现场均未触碰。已删除模型无法恢复；重新训练必须使用新运行标识并遵守完整从头或受控单层复用门禁。
 
 ## 6. 待改进
 
