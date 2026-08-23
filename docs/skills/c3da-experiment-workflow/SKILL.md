@@ -2,7 +2,7 @@
 name: c3da-experiment-workflow
 description: Use for all work in J:\nlp\CD-C3DA and for BGCA baseline reproduction used by CD-C3DA, including code changes, experiment design, stage reuse, commands, result analysis, documentation, cleanup, and best-vs-BGCA comparison.
 metadata:
-  updated: "2026-08-23 23:40（北京时间）"
+  updated: "2026-08-23 23:55（北京时间）"
 ---
 
 # C3DA 实验工作流
@@ -92,6 +92,8 @@ metadata:
 - `03_CD-C3DA下一阶段改进计划_CN.md`
 
 工作流或 GPT 交接内容变化时，按需整体更新 `02/07`；详细改进设计始终维护在 `03`。所有维护文档开头写北京时间更新时间，不在末尾无限追加重复叙述。
+
+文档实行双目录同步：用户日常打开的 `J:\nlp\CD-C3DA` 是正式阅读入口，当前实际开发工作树是实验分支事实源。每次修改实验索引、`02`、`03`、`07` 或项目 Skill 后，必须在同一回合把相同文本同步到正式入口与当前开发工作树；提交前逐文件做规范化文本一致性检查，并分别提交对应分支。不得只更新工作树后把任务报告为文档已维护。若某一目录没有对应文件、存在未提交的用户改动或无法安全同步，必须明确报告，不得覆盖或猜测。
 
 索引首屏必须显示六方向正式最佳、BGCA、差距和比较口径。历史只记录有研究或复现价值的大改动：日期、改动、Git 提交、运行身份、raw/fixed 指标、成功/失败和简短分析。小修复不改变实验语义时可合并记录。
 
