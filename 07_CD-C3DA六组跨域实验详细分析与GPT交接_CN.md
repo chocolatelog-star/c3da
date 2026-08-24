@@ -158,6 +158,6 @@ M6 `DANN–ASTE Gradient Interaction Entry Audit`（领域对抗—任务梯度�
 
 M4、M3-V2与M2最后入口审计已经闭合V2：M4继续保留exact；M3-V2因安全监督供给不足关闭；M2虽然整体共享节点率64.50%且解释M3共享元素失败297/297，但formal pseudo原始/控制后共享率39.71/38.92%，严格低于40%，输出`CLOSE_M2_RELATION_TOPOLOGY_LINE`。V2最终为`NO_TRAINING_ROUTE`。
 
-V3唯一候选机制是canonical bipartite graph plan serialization（规范二部图计划序列化）：shared aspect/opinion（共享方面/观点）各表示一次，三元组成为带polarity（情感极性）的关系边；只改变label-to-text generator的multi计划输入。监督来源审计已通过，独立接口dry-run也通过，但ChatGPT指出后者尚未覆盖正式调用点，因此只批准pipeline integration（流水线接入），不能直接训练。
+V3候选机制曾是canonical bipartite graph plan serialization（规范二部图计划序列化）：shared aspect/opinion（共享方面/观点）各表示一次，三元组成为带polarity（情感极性）的关系边，只改变label-to-text generator的multi计划输入。监督来源和独立接口审计均通过，随后完成正式训练/推理调用点接入；但该路线最终因固定128-token边界关闭，从未进入训练。
 
-Codex现已接入两个正式调用点：`t5_aste_augment.build_generator_training_rows`负责904条源域生成器训练输入，`paired_text_realization_audit`负责451条目标伪标签的计划锚句推理输入，两者调用同一`v3_graph_plan_interface`；single保持旧输入，extractor/pseudo/final ASTE仍为flat格式。接入提交为`48a401b`，训练/推理数据流分离修正为`05ee4b0`。唯一下一动作是由用户运行第二次零更新dry-run。通过后才允许一次固定快速消融；无金标门槛为source-dev下降不超过0.5、actual-multi full/new/retention至少70/78/83%、unplanned不超过7%、anchor-disjoint full提高至少15个百分点且bootstrap下界大于0、element-absent下降至少15个百分点、two/3+方向一致、single full下降不超过2且retention不下降。只有这些全部通过，才一次性读取目标测试并要求raw F1至少54.51、multi recall至少43.27%、multi F1至少50.21、single F1至少57.54、precision至少56.48%。
+Codex接入的两个正式调用点分别处理904条源域生成器训练输入和451条目标伪标签锚句推理输入，两者共享`v3_graph_plan_interface`；single和下游flat格式均保持不变。verbose V1空跑的15项门槛中仅长度失败：5条pseudo multi超过128，最长159。ChatGPT将其判定为有界接口失败，并只允许一次统一compact V2；V2的8项单元测试通过，但全量CPU tokenizer长度预检仍有ID 572/600两条pseudo two达到137/135 token。根据预注册规则立即输出`CLOSE_V3_GRAPH_PLAN_ROUTE`，不再运行GPU空跑、不做第三版格式、逐行回退或提高长度。可保留共享序列化、独立往返解析、真实调用点追踪和分组长度门控代码，但不能将V3作为训练配方。正式最佳仍为54.01，后续必须重新批准一个与V3无关的单变量研究入口。
