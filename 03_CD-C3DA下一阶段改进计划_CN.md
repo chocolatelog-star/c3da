@@ -1,10 +1,10 @@
 # CD-C3DA 下一阶段改进计划
 
-> 更新时间：2026-08-24 18:44（北京时间）
+> 更新时间：2026-08-24 18:54（北京时间）
 > 终极目标：六个跨域方向分别超过 BGCA（双向生成跨域方法）。
 > 当前正式研究基线：`laptop14 -> rest15` raw P/R/F1 = 56.98/51.34/54.01，fixed F1 = 55.53。
 > 当前保护基线：`rest16 -> laptop14` raw F1 = 48.93，fixed F1 = 50.21；不在保护现场继续试验。
-> 当前执行位置：V3图计划已经永久关闭。当前只批准正式54.01 flat生成器的AG-CDSA式FGSM嵌入扰动零更新入口审计；首次GPU尝试发生驱动级崩溃，运行修复`43f56f5`已完成并待复跑。尚未批准FGSM训练，也不得同时改变任何数据、生成或最终ASTE配置。
+> 当前执行位置：V3图计划已经永久关闭。正式54.01 flat生成器的AG-CDSA式FGSM嵌入扰动零更新入口审计25项门控全部通过；现只批准一次固定`epsilon=0.01`、0.5/0.5损失的生成器FGSM快速消融，不批准参数搜索，也不得同时改变任何数据、生成或最终ASTE配置。
 
 ## 1. 当前项目情况
 
@@ -218,4 +218,6 @@ E1符号容量通过后已执行。类型：`DIAGNOSTIC`；只生成和验证候
 
 V3的正式调用点空跑与最后一次compact V2长度预检已经结束。V1有5条pseudo multi超限、最长159；V2仍有2条超限、最长137，因此输出`CLOSE_V3_GRAPH_PLAN_ROUTE`，不再消耗GPU做完整V2空跑。保留图构造、独立parser、调用追踪和长度审计作为只读基础设施，但不得把V3用于训练。
 
-唯一下一步是复跑`Generator Embedding FGSM Zero-Update Entry Audit`（生成器嵌入FGSM零更新入口审计）。首次运行已完成904条正式dataset/collator覆盖，但在前向0/3处发生`nvcuda64.dll`的`0xc0000409`原生崩溃；旧审计使用fp32且未启用正式训练的梯度检查点，因此没有产生有效诊断结论。运行修复`43f56f5`只对齐fp16、非重入梯度检查点和显存路径，并增加每批原子断点、活动阶段与峰值显存记录，不改变`epsilon=0.01`、6条分层样本、批次2或`0.5*(clean_loss+adversarial_loss)`。optimizer、scheduler和参数更新仍为0，不读取目标测试；flat格式、候选、prompt、beam、`k=1`、M4、MILP、增强预算、pseudo weight、DANN=0.03和最终ASTE全部冻结。全部门槛通过才允许一次固定FGSM快速消融；任一研究门槛失败即关闭该入口，不做epsilon网格。
+唯一下一步是实现并运行一次固定`Generator Embedding FGSM Quick Ablation`（生成器嵌入FGSM快速消融）。唯一变量是把正式904条flat生成器训练的clean loss替换为`0.5*(clean_loss+adversarial_loss)`，其中`epsilon=0.01`；生成器必须从同一T5-base完整重训，随后候选生成、NLI/exact、选择、最终训练、无金标uptake和一次目标测试全部重跑。prepare、extractor、正式目标伪标签及904条manifest可从唯一完整54.01父运行受控复用，复用边界止于generator之前。必须冻结seed、fp16、非重入梯度检查点、epoch/batch/优化器/调度器/选模、tokenizer、prompt、长度、beam、`k=1`、预算、配额、M4、MILP、pseudo weight、增强质量30、DANN=0.03和最终ASTE配置；不得加入V3、EOS、ECAL或其他损失。
+
+无金标晋级要求：固定计划上的multi exact相对control提高至少15个百分点且锚聚类bootstrap下界大于0；3+不反转；multi full/new各提高至少5个百分点，retention下降不超过2个百分点、unplanned-row上升不超过2个百分点；single full/retention下降均不超过2个百分点；source-dev raw F1下降不超过0.5个百分点；300预算、`k=1`和契约守恒全部通过。任一项失败输出`NO_FGSM_GENERATOR_ROUTE`并关闭FGSM参数搜索。最终测试只报告一次；正式晋级还须raw F1≥54.51、multi recall≥43.27%、multi F1≥50.21、single F1≥57.54、precision≥56.48%、fixed F1≥55.53。
