@@ -4,7 +4,7 @@
 > 终极目标：六个跨域方向分别超过 BGCA（双向生成跨域方法）。
 > 当前正式研究基线：`laptop14 -> rest15` raw P/R/F1 = 56.98/51.34/54.01，fixed F1 = 55.53。
 > 当前保护基线：`rest16 -> laptop14` raw F1 = 48.93，fixed F1 = 50.21；不在保护现场继续试验。
-> 当前执行位置：V2六模块没有合法训练变量；V3规范二部图计划的verbose V1和最后一次compact V2均违反固定128-token边界，已输出`CLOSE_V3_GRAPH_PLAN_ROUTE`。V3从未进入训练，当前没有已批准的新训练变量。
+> 当前执行位置：V3图计划已经永久关闭。当前只批准正式54.01 flat生成器的AG-CDSA式FGSM嵌入扰动零更新入口审计；尚未批准FGSM训练，也不得同时改变任何数据、生成或最终ASTE配置。
 
 ## 1. 当前项目情况
 
@@ -216,4 +216,6 @@ E1符号容量通过后已执行。类型：`DIAGNOSTIC`；只生成和验证候
 
 正式最佳仍是54.01。V2的M1–M6均已完成判定：M1冻结为有界辅助，M2/M3没有形成合法文本监督，M4硬验证保留，M5仅保留联合配额MILP基础设施，M6的DANN=0.03只按历史配置冻结。不得恢复旧路线、降低门槛或做参数网格。
 
-V3的正式调用点空跑与最后一次compact V2长度预检已经结束。V1仅`graph_input_truncation_zero`失败：5条pseudo multi超限、最长159；V2仍有2条超限、最长137，因此确定输出`CLOSE_V3_GRAPH_PLAN_ROUTE`，无需再消耗GPU做完整空跑。保留共享序列化器、独立parser、训练/推理调用追踪和分组长度审计作为基础设施，但不得把V3代码用于正式训练。正式最佳仍是54.01；下一研究变量必须重新立项并保持单变量、无目标金标和先入口审计后训练的纪律。
+V3的正式调用点空跑与最后一次compact V2长度预检已经结束。V1有5条pseudo multi超限、最长159；V2仍有2条超限、最长137，因此输出`CLOSE_V3_GRAPH_PLAN_ROUTE`，不再消耗GPU做完整V2空跑。保留图构造、独立parser、调用追踪和长度审计作为只读基础设施，但不得把V3用于训练。
+
+唯一下一步是运行`Generator Embedding FGSM Zero-Update Entry Audit`（生成器嵌入FGSM零更新入口审计）。它回到正式54.01的904条flat生成器训练清单，只增加固定`epsilon=0.01`的输入嵌入符号扰动，并以`0.5*(clean_loss+adversarial_loss)`保持损失尺度。审计覆盖全部正式dataset/collator调用，对single/two/3+各2条做正常与扰动前向；optimizer、scheduler和参数更新均为0，不读取目标测试。flat格式、候选、prompt、beam、`k=1`、M4、MILP、增强预算、pseudo weight、DANN=0.03和最终ASTE全部冻结。全部门槛通过才允许一次固定FGSM快速消融；任一失败即关闭该入口，不做epsilon网格。

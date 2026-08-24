@@ -160,4 +160,6 @@ M4、M3-V2与M2最后入口审计已经闭合V2：M4继续保留exact；M3-V2因
 
 V3候选机制曾是canonical bipartite graph plan serialization（规范二部图计划序列化）：shared aspect/opinion（共享方面/观点）各表示一次，三元组成为带polarity（情感极性）的关系边，只改变label-to-text generator的multi计划输入。监督来源和独立接口审计均通过，随后完成正式训练/推理调用点接入；但该路线最终因固定128-token边界关闭，从未进入训练。
 
-Codex接入的两个正式调用点分别处理904条源域生成器训练输入和451条目标伪标签锚句推理输入，两者共享`v3_graph_plan_interface`；single和下游flat格式均保持不变。verbose V1空跑的15项门槛中仅长度失败：5条pseudo multi超过128，最长159。ChatGPT将其判定为有界接口失败，并只允许一次统一compact V2；V2的8项单元测试通过，但全量CPU tokenizer长度预检仍有ID 572/600两条pseudo two达到137/135 token。根据预注册规则立即输出`CLOSE_V3_GRAPH_PLAN_ROUTE`，不再运行GPU空跑、不做第三版格式、逐行回退或提高长度。可保留共享序列化、独立往返解析、真实调用点追踪和分组长度门控代码，但不能将V3作为训练配方。正式最佳仍为54.01，后续必须重新批准一个与V3无关的单变量研究入口。
+Codex接入的两个正式调用点分别处理904条源域生成器训练输入和451条目标伪标签锚句推理输入，两者共享`v3_graph_plan_interface`；single和下游flat格式均保持不变。verbose V1空跑的15项门槛中仅长度失败：5条pseudo multi超过128，最长159。ChatGPT将其判定为有界接口失败，并只允许一次统一compact V2；V2的8项单元测试通过，但全量CPU tokenizer长度预检仍有ID 572/600两条pseudo two达到137/135 token。根据预注册规则输出`CLOSE_V3_GRAPH_PLAN_ROUTE`，不做第三版格式、逐行回退或提高长度；图基础设施只保留为审计和解释工具。
+
+ChatGPT确认无需为已确定的V2长度失败再运行GPU，且给出唯一新入口：在正式54.01 flat label-to-text generator（平面标签到文本生成器）上审计AG-CDSA式FGSM输入嵌入扰动。该路线与DANN不同：只考察生成器对输入和伪标签噪声的局部鲁棒性，不声称直接解决3+完整召回。Codex已实现零更新审计：正式904条数据/整理调用全覆盖，single/two/3+各2条前向，固定`epsilon=0.01`与二分平均损失；检查扰动范数、padding、梯度、损失、重复性、批次及模型哈希、参数梯度和零更新。当前尚未运行正式GPU审计，不能批准训练或推断F1收益。
