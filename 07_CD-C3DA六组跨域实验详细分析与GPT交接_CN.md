@@ -1,6 +1,6 @@
 # CD-C3DA 六组跨域实验分析与 GPT 交接
 
-> 更新时间：2026-08-23 23:40（北京时间）
+> 更新时间：2026-08-24 17:10（北京时间）
 > 用途：让外部GPT（生成式预训练模型）快速掌握项目事实、核心证据、关闭路线和唯一下一步。详细门槛以`03_CD-C3DA下一阶段改进计划_CN.md`为准，完整运行历史以`实验记录与模型索引_CN.md`为准。
 
 ## 0. ChatGPT—Codex协作边界
@@ -21,7 +21,7 @@
 2. 抽取目标无标签语料的伪标签；
 3. 用标签到文本生成器构造目标增强候选；
 4. 经过局部契约、双向NLI（自然语言推断）、extractor exact（抽取器精确回抽）和冲突拒绝；
-5. gap-aware（缺口感知）联合选择器在`k=1`和预算内选样本；
+5. joint-quota MILP selector（联合配额混合整数线性规划选择器）在`k=1`和预算内选样本；该部件作为固定基础设施保留，不再宣称独立gap收益；
 6. 联合source、pseudo和augmentation训练最终模型，并使用DANN（领域对抗网络）和轻量情感对比约束；
 7. source-dev（源域开发集）选模，目标金标只做最终评价。
 
@@ -106,11 +106,11 @@ RSDA式“元素完整multi标签组合计划”已经完成符号层审计；�
 | 模块 | 职责 | 状态 |
 |---|---|---|
 | M1 目标知识获取 | 伪标签、元素库存、领域适配 | `KEEP_FROZEN_BOUNDED_AUXILIARY`；同分布可吸收，但无稳定外部增益或系统性梯度冲突证据 |
-| M2 结构增强规划 | 决定保留/新增哪些完整三元组 | `SYMBOLIC_CAPACITY_ACCEPTED`，冻结计划与谱系 |
-| M3 目标域文本实现 | 把完整计划写入真实目标句 | `CURRENT_INTERFACE_LINE_CLOSED`，四类接口证据均未形成可训练供给，不进入可编辑骨架 |
+| M2 结构增强规划 | 决定保留/新增哪些完整三元组 | V2关系拓扑线已关闭；保留“共享节点不可忽略”的解释证据 |
+| M3 目标域文本实现 | 把完整计划写入真实目标句 | V2接口全部关闭；V3只批准规范图计划接口的正式调用点dry-run |
 | M4 一致性验证 | 符号、NLI、exact和冲突拒绝 | `KEEP_CORE`，硬门槛 |
-| M5 选择与预算 | `k=1`、覆盖和MILP预算 | `ACTIVE_ENTRY_AUDIT`；只比较同一已验证候选池上gap-aware目标项开/关 |
-| M6 训练吸收与解码 | 联合训练和结构生成 | `DEFER`，暂停新增损失 |
+| M5 选择与预算 | `k=1`、联合配额MILP和预算 | `CLOSE_M5_GAP_SELECTION_LINE`；gap/coverage/novelty路线关闭，仅保留选择基础设施 |
+| M6 训练吸收与解码 | 联合训练、DANN和结构生成 | `NO_M6_DANN_INTERACTION_ROUTE`；0.03仅作为正式历史配置冻结 |
 
 依赖关系：M2决定有没有完整结构，M3决定能否实现到文本，M4决定是否可信，M5只能从合格池选择，M6只能学习已经存在的数据。项目不再在M2/M3不合格时继续给M6叠加小损失。
 
@@ -142,9 +142,9 @@ E1–E3通过后才允许`full_from_scratch`（完整从头运行）、`reuse_de
 
 ## 8. 当前关闭与保留边界
 
-关闭：`k=2`、双生成器、教师—学生、中性强加权、普通质量/结构权重、3+对two重分配、回放、复杂双呈现、NLL选择/加权、EOS与删除排序损失、ECAL全部变体、当前Step8组合软提示、FP-LCR全部变体、语义兼容筛选/换供体、受控局部插入全部参数变体、候选比例网格，以及供给不变时新增pairing/计数/结构损失。
+关闭：`k=2`、双生成器、教师—学生、中性强加权、普通质量/结构权重、3+对two重分配、回放、复杂双呈现、NLL选择/加权、EOS与删除排序损失、ECAL全部变体、当前Step8组合软提示、FP-LCR全部变体、语义兼容筛选/换供体、受控局部插入全部参数变体、候选比例网格、M5的gap/coverage/novelty次目标与质量折中，以及供给不变时新增pairing/计数/结构损失。
 
-保留：单生成器、`k=1`、目标真实句锚定、硬契约、双向NLI、extractor exact、冲突拒绝、冻结gap-aware选择、增强总质量30、伪标签权重0.75、DANN=0.03、source-dev选模、multi/3+无金标门控和中性辅助。
+保留：单生成器、`k=1`、目标真实句锚定、硬契约、双向NLI、extractor exact、冲突拒绝、冻结联合配额MILP、增强总质量30、伪标签权重0.75、DANN=0.03、source-dev选模、multi/3+无金标门控和中性辅助。DANN=0.03当前只是正式基线固定项，尚未获得独立收益或冲突定位。
 
 ## 9. 给ChatGPT的当前结论与唯一研究问题
 
@@ -152,4 +152,12 @@ M1成对快速消融已经完成。treatment相对control使固定100条伪标�
 
 随后完成只读M1源域—伪标签任务梯度冲突审计：single/two各30对、token预算严格匹配，只计算共享T5参数的ASTE任务梯度。初始source–pseudo相对source–source负余弦率差1.67个百分点，最终为0；bootstrap均未达到门槛，single/two方向不一致，输出`NO_M1_GRADIENT_CONFLICT_ROUTE`。因此M1最终定位为`KEEP_FROZEN_BOUNDED_AUXILIARY`：正式451条、0.75/0.28846有效权重和DANN=0.03保留不变，但关闭伪标签调权、扩范围、梯度筛选、梯度补偿和额外112条混入。
 
-ChatGPT与Codex当前一致的唯一下一问题是M5 `Gap-Aware Selection Marginal Entry Audit`：在同一validated candidate pool、相同NLI/exact结果、300预算、`k=1`、组成配额和全部MILP硬约束下，只比较gap-aware目标项关闭/开启。它必须是不生成、不训练、不读取目标测试的干净反事实；无法恢复真实gap-blind目标时入口即停。通过条件为总替换至少30、multi替换至少15、multi/3+不同锚不下降、冻结结构缺口元素覆盖至少提高15个百分点且bootstrap下界大于0、控制后仍至少提高10个百分点。失败后不搜索gap-aware系数或配额。
+M5已经完成两级只读审计。第一项入口审计确认历史`gap_aware=true/false`同时改变贪心/联合MILP、方面/观点/中性配额和multi下限，且MILP目标仅为质量顺序平方，不存在可独立开关的gap项；同一1021条池中的98条替换只能作为联合硬约束改变候选构成的机制证据，输出`STOP_M5_ENTRY_NO_CLEAN_COUNTERFACTUAL`。第二项使用真正可分离的两阶段词典序MILP：Control精确复现Step2历史300个ID，Treatment保持相同硬约束和质量主目标42,527,978，再最大化551条目标伪标签的661个方面/观点元素覆盖。9项入口全部通过，但两臂仍为同一300个ID，替换0、multi替换0、加权覆盖均54.3478%，输出`CLOSE_M5_GAP_SELECTION_LINE`。这不是gap系数太小，而是同质量最优解没有覆盖自由度；M5永久降级为固定选择基础设施。
+
+M6 `DANN–ASTE Gradient Interaction Entry Audit`（领域对抗—任务梯度交互入口审计）已完成。正式54.01模型、tokenizer、DANN头、final-train manifest和60对匹配样本全部通过入口校验，重复余弦误差为0。总体ASTE–DANN负余弦率50.00%，ASTE–ASTE控制33.33%，超额16.67个百分点且bootstrap 95%区间为[1.67,31.67]；但总体中位余弦退化仅0.052、逐对退化0.036，two组超额仅10个百分点且区间跨0。预注册强度和结构门槛失败，输出`NO_M6_DANN_INTERACTION_ROUTE`。这支持“存在轻度总体冲突倾向”，不支持“DANN是当前多三元组主瓶颈”，也不批准DANN=0.03对0、系数搜索或梯度修正训练。0.03仅按正式54.01历史配置冻结。
+
+M4、M3-V2与M2最后入口审计已经闭合V2：M4继续保留exact；M3-V2因安全监督供给不足关闭；M2虽然整体共享节点率64.50%且解释M3共享元素失败297/297，但formal pseudo原始/控制后共享率39.71/38.92%，严格低于40%，输出`CLOSE_M2_RELATION_TOPOLOGY_LINE`。V2最终为`NO_TRAINING_ROUTE`。
+
+V3唯一候选机制是canonical bipartite graph plan serialization（规范二部图计划序列化）：shared aspect/opinion（共享方面/观点）各表示一次，三元组成为带polarity（情感极性）的关系边；只改变label-to-text generator的multi计划输入。监督来源审计已通过，独立接口dry-run也通过，但ChatGPT指出后者尚未覆盖正式调用点，因此只批准pipeline integration（流水线接入），不能直接训练。
+
+Codex现已接入两个正式调用点：`t5_aste_augment.build_generator_training_rows`负责训练输入，`paired_text_realization_audit`负责计划锚句生成输入，两者调用同一`v3_graph_plan_interface`；single保持旧输入，extractor/pseudo/final ASTE仍为flat格式。唯一下一动作是由用户运行第二次零更新dry-run。通过后才允许一次固定快速消融；无金标门槛为source-dev下降不超过0.5、actual-multi full/new/retention至少70/78/83%、unplanned不超过7%、anchor-disjoint full提高至少15个百分点且bootstrap下界大于0、element-absent下降至少15个百分点、two/3+方向一致、single full下降不超过2且retention不下降。只有这些全部通过，才一次性读取目标测试并要求raw F1至少54.51、multi recall至少43.27%、multi F1至少50.21、single F1至少57.54、precision至少56.48%。
