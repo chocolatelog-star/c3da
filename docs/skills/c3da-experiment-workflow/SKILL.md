@@ -2,7 +2,7 @@
 name: c3da-experiment-workflow
 description: Use for all work in J:\nlp\CD-C3DA and for BGCA baseline reproduction used by CD-C3DA, including code changes, experiment design, stage reuse, commands, result analysis, documentation, cleanup, and best-vs-BGCA comparison.
 metadata:
-  updated: "2026-08-25 13:18（北京时间）"
+  updated: "2026-08-25 20:28（北京时间）"
 ---
 
 # C3DA 实验工作流
@@ -23,7 +23,7 @@ metadata:
 - 保护 `rest16 -> laptop14` 的48.93，不在独立验收现场上做新实验。
 - `laptop14 -> rest15` 当前研究基线为54.01，DANN（领域对抗网络）0.03、目标伪标签高层权重0.75。
 - V2六模块和V3图计划均已完成判定且没有可训练路线：M1冻结为有界辅助，M2/M3没有形成合格文本监督，M4硬验证保留，M5只保留联合配额MILP（混合整数线性规划）基础设施，M6的DANN（领域对抗网络）0.03按历史配置冻结。不得把历史E0–E5阶段表重新解释为当前待执行路线。
-- 当前唯一候选变量是一次固定Generator Embedding FGSM Quick Ablation（生成器嵌入快速梯度符号法快速消融）：`epsilon=0.01`，损失固定为`0.5*(clean_loss+adversarial_loss)`。正式零更新GPU（图形处理器）入口审计25项已通过，但代码实施和实验启动仍须用户明确批准；不得搜索epsilon、损失比例或作用范围。实时状态和完整门槛以`03`为准。
+- 固定Generator Embedding FGSM Quick Ablation（生成器嵌入快速梯度符号法快速消融）已经完成并输出`NO_FGSM_GENERATOR_ROUTE`：raw/fixed F1为53.76/54.65，multi F1/召回及负面F1退化。永久关闭epsilon、损失比例、作用范围与结构定向搜索；实现、CUDA（统一计算设备架构）修复和零更新入口审计只作负结果基础设施保留。当前没有新的训练变量获准；实时状态以`03`为准。
 - 中性类别只作为辅助改善目标。暂停教师—学生、双生成器、`k=2`、损失强增权、结构/质量权重、回放、NLL/EOS/ECAL训练、强制固定总量及未经上游供给证据批准的复杂配对/覆盖损失。
 
 ## 修改与确认
