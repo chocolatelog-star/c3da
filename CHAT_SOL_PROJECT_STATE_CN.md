@@ -1,10 +1,17 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-26 21:53（北京时间）
+> 更新时间：2026-08-26 22:34（北京时间）
 
 ## 当前任务状态
 
-`M1_SYNTACTIC_RGAT_PSEUDO_INTERFACE_V1`（laptop14 -> rest15，seed 1000）已完成 Stanza English EWT（Stanza 英语 EWT）模型、CUDA、单句依存解析和六个文件 SHA256（哈希）核验，代码实现入口与审计入口工程修复已完成，当前状态为 `RUNNING`（等待 Codex Sol 验收和用户代跑授权）；正式训练、GPU zero-update（零更新）审计和新伪标签仍未批准。本轮已新增句法图缓存、字符偏移对齐、固定 RGAT（关系图注意力）适配器、目标无标签 DANN 域损失路径、四个真实调用点、逐行恢复、15 项门控和机器可读报告；未启动训练、未生成伪标签、未读取目标测试金标。
+`M1_SYNTACTIC_RGAT_PSEUDO_INTERFACE_V1`（laptop14 -> rest15，seed 1000）已完成 Stanza English EWT（Stanza 英语 EWT）模型、CUDA、单句依存解析和六个文件 SHA256（哈希）核验。Codex Sol 上轮复审指出四项工程缺口；本轮仅修复审计报告组装崩溃、图训练直达硬拦截、四个正式调用点和实际身份哈希审计，未改变图结构参数、DANN 系数或研究方案。当前状态为 `RUNNING`（等待 Codex Sol 再次只读验收和用户代跑授权）；正式训练、GPU zero-update（零更新）审计和新伪标签仍未批准。未读取目标测试金标。
+
+## 本轮工程修复证据
+
+- `run_audit` 报告组装已从 `model_measurements["measurements"]` 读取梯度检查点状态，并新增 CPU 组装回归测试；图适配器直接训练入口在解析参数后硬停，普通无图流程不变。
+- 审计四个调用点现在分别经过 `WeightedSeq2SeqTrainer.compute_loss`、`WeightedSeq2SeqTrainer.prediction_step`、正式混合批次 `compute_loss` 和 `t5_aste_pipeline.generate_texts`；审计不调用训练、优化器、调度器或模型保存。
+- 机器可读报告实际重算并比较 Git 提交/工作区、配方、T5 配置/权重/分词器、三份输入、三类图缓存/关系词表/manifest、Stanza 六文件和控制组/处理组参数前后哈希；任一身份不一致会使对应门控失败。
+- CPU 新增与相关回归验证通过；未启动 GPU zero-update（零更新）审计、正式训练、伪标签生成或目标测试读取。
 
 ## 当前目标
 
