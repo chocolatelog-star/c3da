@@ -30,6 +30,14 @@ from t5_aste_data import (
     parse_triplet_text_list,
     triplet_count_diagnostics,
 )
+from syntactic_graph import (
+    CompositeGraphCache,
+    GraphCacheError,
+    build_parser_identity,
+    build_tokenizer_identity,
+    load_graph_cache_directory,
+)
+from syntactic_graph_adapter import load_seq2seq_model
 
 
 def reproducibility_training_args(seed: int, mode: str) -> dict:
@@ -96,6 +104,33 @@ TAG_INIT_WORDS = {
     "<aspect>": "aspect",
 }
 SENTIMENT_LABEL_IDS = {"pos": 0, "neg": 1, "neu": 2}
+
+
+def build_target_unlabeled_domain_rows(
+    rows: list[dict],
+    use_task_prefix: bool = True,
+) -> list[dict]:
+    """Build target rows which contribute only to the existing DANN loss."""
+    domain_rows = []
+    for row in rows:
+        text = str(row.get("text", ""))
+        if not text:
+            raise ValueError(f"target-unlabeled row has empty text: {row.get('id')}")
+        input_text = f"extract aste: {text}" if use_task_prefix else text
+        domain_rows.append(
+            {
+                "id": row["id"],
+                "text": text,
+                "input": input_text,
+                "target": "",
+                "augmentation": "target_unlabeled",
+                "sample_weight": 0.0,
+                "domain_weight": 0.0,
+                "structure_weight": 0.0,
+                "domain_label": 1,
+            }
+        )
+    return domain_rows
 
 
 def decode_keep_aste_task_tokens(tokenizer, token_ids) -> str:
@@ -225,6 +260,7 @@ class JsonlSeq2SeqDataset(Dataset):
         sentiment_contrastive_min_weight: float = 0.65,
         sentiment_contrastive_exclude_augment: bool = False,
         sentiment_contrastive_source_only: bool = False,
+        graph_cache=None,
     ):
         self.rows = rows
         self.tokenizer = tokenizer
@@ -251,6 +287,7 @@ class JsonlSeq2SeqDataset(Dataset):
         self.sentiment_contrastive_min_weight = sentiment_contrastive_min_weight
         self.sentiment_contrastive_exclude_augment = sentiment_contrastive_exclude_augment
         self.sentiment_contrastive_source_only = sentiment_contrastive_source_only
+        self.graph_cache = graph_cache
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -267,6 +304,8 @@ class JsonlSeq2SeqDataset(Dataset):
             max_length=self.max_target_length,
             truncation=True,
         )
+        if row.get("augmentation") == "target_unlabeled":
+            labels["input_ids"] = [-100] * len(labels["input_ids"])
         model_inputs["labels"] = labels["input_ids"]
         sample_weight = self.sample_weight(row)
         model_inputs["sample_weight"] = sample_weight
@@ -276,9 +315,13 @@ class JsonlSeq2SeqDataset(Dataset):
         model_inputs["consistency_group"] = self.consistency_group(row, idx)
         model_inputs.update(self.pairing_features(row, model_inputs["input_ids"], sample_weight))
         model_inputs.update(self.sentiment_contrastive_features(row, model_inputs["input_ids"], sample_weight))
+        if self.graph_cache is not None:
+            model_inputs.update(self.graph_cache.get(row))
         return model_inputs
 
     def sample_weight(self, row: dict) -> float:
+        if row.get("augmentation") == "target_unlabeled":
+            return 0.0
         if "sample_weight" in row and not self.force_domain_weights:
             return float(row["sample_weight"])
         augmentation = row.get("augmentation")
@@ -290,6 +333,8 @@ class JsonlSeq2SeqDataset(Dataset):
 
     def domain_label(self, row: dict) -> int:
         augmentation = row.get("augmentation")
+        if augmentation == "target_unlabeled":
+            return 1
         if self.domain_adv_exclude_augment and augmentation in CSA_AUGMENT_CHANNELS:
             return -100
         if augmentation == "target_pseudo" or augmentation in CSA_AUGMENT_CHANNELS:
@@ -459,6 +504,20 @@ class DataCollatorForSeq2SeqWithPairing:
         self.base_collator = base_collator
 
     def __call__(self, features: list[dict]) -> dict:
+        graph_keys = (
+            "word_to_subword",
+            "word_mask",
+            "edge_src",
+            "edge_dst",
+            "relation_id",
+            "dependency_relation_id",
+            "pos_pair_id",
+            "edge_mask",
+        )
+        graph_present = [key in feature for feature in features for key in graph_keys]
+        if any(graph_present) and not all(graph_present):
+            raise ValueError("graph fields must be present for every feature or for none of them")
+        graph_values = {key: [feature.pop(key, None) for feature in features] for key in graph_keys}
         pairing_aspect_spans = [feature.pop("pairing_aspect_spans", []) for feature in features]
         pairing_opinion_spans = [feature.pop("pairing_opinion_spans", []) for feature in features]
         pairing_masks = [feature.pop("pairing_mask", []) for feature in features]
@@ -506,6 +565,50 @@ class DataCollatorForSeq2SeqWithPairing:
         batch["sentiment_contrastive_labels"] = sentiment_label_tensor
         batch["sentiment_contrastive_mask"] = sentiment_mask_tensor
         batch["sentiment_contrastive_weights"] = sentiment_weight_tensor
+        if any(graph_present):
+            max_words = max(len(value) for value in graph_values["word_to_subword"])
+            max_subwords = max(
+                max((len(indices) for indices in value), default=0)
+                for value in graph_values["word_to_subword"]
+            )
+            max_edges = max(len(value) for value in graph_values["edge_src"])
+            word_to_subword = torch.full(
+                (len(features), max_words, max(1, max_subwords)),
+                -1,
+                dtype=torch.long,
+            )
+            word_mask = torch.zeros((len(features), max_words), dtype=torch.bool)
+            edge_tensors = {
+                key: torch.zeros((len(features), max_edges), dtype=torch.long)
+                for key in (
+                    "edge_src",
+                    "edge_dst",
+                    "relation_id",
+                    "dependency_relation_id",
+                    "pos_pair_id",
+                )
+            }
+            edge_mask = torch.zeros((len(features), max_edges), dtype=torch.bool)
+            for row_index, values in enumerate(zip(*graph_values.values())):
+                row_word_to_subword, row_word_mask, row_src, row_dst, row_relation, row_dependency, row_pos, row_edge_mask = values
+                word_mask[row_index, : len(row_word_mask)] = torch.tensor(row_word_mask, dtype=torch.bool)
+                for word_index, indices in enumerate(row_word_to_subword):
+                    word_to_subword[row_index, word_index, : len(indices)] = torch.tensor(indices, dtype=torch.long)
+                edge_count = len(row_src)
+                edge_mask[row_index, :edge_count] = torch.tensor(row_edge_mask, dtype=torch.bool)
+                edge_tensors["edge_src"][row_index, :edge_count] = torch.tensor(row_src, dtype=torch.long)
+                edge_tensors["edge_dst"][row_index, :edge_count] = torch.tensor(row_dst, dtype=torch.long)
+                edge_tensors["relation_id"][row_index, :edge_count] = torch.tensor(row_relation, dtype=torch.long)
+                edge_tensors["dependency_relation_id"][row_index, :edge_count] = torch.tensor(row_dependency, dtype=torch.long)
+                edge_tensors["pos_pair_id"][row_index, :edge_count] = torch.tensor(row_pos, dtype=torch.long)
+            batch["graph_word_to_subword"] = word_to_subword
+            batch["graph_word_mask"] = word_mask
+            batch["graph_edge_src"] = edge_tensors["edge_src"]
+            batch["graph_edge_dst"] = edge_tensors["edge_dst"]
+            batch["graph_relation_id"] = edge_tensors["relation_id"]
+            batch["graph_dependency_relation_id"] = edge_tensors["dependency_relation_id"]
+            batch["graph_pos_pair_id"] = edge_tensors["pos_pair_id"]
+            batch["graph_edge_mask"] = edge_mask
         return batch
 
 
@@ -640,6 +743,24 @@ def mean_pool_encoder_hidden(hidden: torch.Tensor, attention_mask: torch.Tensor 
     return (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
 
 
+def compute_domain_adversarial_loss(
+    encoder_hidden: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    domain_labels: torch.Tensor,
+    domain_adversarial_head: nn.Module,
+    grl_lambda: float = 1.0,
+) -> torch.Tensor | None:
+    """Compute the existing DANN loss on post-graph encoder states."""
+    pooled_hidden = mean_pool_encoder_hidden(encoder_hidden, attention_mask)
+    reversed_hidden = gradient_reverse(pooled_hidden, grl_lambda)
+    domain_logits = domain_adversarial_head(reversed_hidden)
+    domain_targets = domain_labels.to(domain_logits.device, dtype=torch.long).view(-1)
+    domain_valid_mask = domain_targets.ne(-100)
+    if not domain_valid_mask.any():
+        return None
+    return F.cross_entropy(domain_logits[domain_valid_mask], domain_targets[domain_valid_mask])
+
+
 class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
     _generation_only_input_keys = {
         "sample_weight",
@@ -654,6 +775,16 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         "sentiment_contrastive_labels",
         "sentiment_contrastive_mask",
         "sentiment_contrastive_weights",
+    }
+    _graph_input_keys = {
+        "graph_word_to_subword",
+        "graph_word_mask",
+        "graph_edge_src",
+        "graph_edge_dst",
+        "graph_relation_id",
+        "graph_dependency_relation_id",
+        "graph_pos_pair_id",
+        "graph_edge_mask",
     }
 
     def __init__(
@@ -685,10 +816,13 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self._component_reductions: dict[str, str] = {}
 
     @classmethod
-    def _strip_generation_only_inputs(cls, inputs: dict) -> dict:
+    def _strip_generation_only_inputs(cls, inputs: dict, keep_graph: bool = False) -> dict:
         cleaned = dict(inputs)
         for key in cls._generation_only_input_keys:
             cleaned.pop(key, None)
+        if not keep_graph:
+            for key in cls._graph_input_keys:
+                cleaned.pop(key, None)
         return cleaned
 
     def _track_component(self, name: str, value: torch.Tensor | float, reduction: str = "mean") -> None:
@@ -710,7 +844,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         super().log(logs, *args, **kwargs)
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None, **kwargs):
-        cleaned_inputs = self._strip_generation_only_inputs(inputs)
+        cleaned_inputs = self._strip_generation_only_inputs(
+            inputs,
+            keep_graph=bool(getattr(model, "use_syntactic_graph_adapter", False)),
+        )
         return super().prediction_step(
             model,
             cleaned_inputs,
@@ -732,6 +869,15 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         sentiment_contrastive_labels = inputs.pop("sentiment_contrastive_labels", None)
         sentiment_contrastive_mask = inputs.pop("sentiment_contrastive_mask", None)
         sentiment_contrastive_weights = inputs.pop("sentiment_contrastive_weights", None)
+        graph_inputs = {
+            key: inputs.pop(key, None)
+            for key in self._graph_input_keys
+        }
+        if getattr(model, "use_syntactic_graph_adapter", False):
+            if any(value is None for value in graph_inputs.values()):
+                missing = [key for key, value in graph_inputs.items() if value is None]
+                raise ValueError(f"syntactic graph model received incomplete graph batch: {missing}")
+            inputs.update(graph_inputs)
         attention_mask = inputs.get("attention_mask")
         labels = inputs.get("labels")
         outputs = model(**inputs, return_dict=True, output_hidden_states=False)
@@ -816,13 +962,14 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             and hasattr(model, "domain_adversarial_head")
             and outputs.encoder_last_hidden_state is not None
         ):
-            pooled_hidden = mean_pool_encoder_hidden(outputs.encoder_last_hidden_state, attention_mask)
-            reversed_hidden = gradient_reverse(pooled_hidden, self.domain_adv_grl_lambda)
-            domain_logits = model.domain_adversarial_head(reversed_hidden)
-            domain_targets = domain_label.to(domain_logits.device, dtype=torch.long).view(-1)
-            domain_valid_mask = domain_targets.ne(-100)
-            if domain_valid_mask.any():
-                domain_adv_loss = F.cross_entropy(domain_logits[domain_valid_mask], domain_targets[domain_valid_mask])
+            domain_adv_loss = compute_domain_adversarial_loss(
+                outputs.encoder_last_hidden_state,
+                attention_mask,
+                domain_label,
+                model.domain_adversarial_head,
+                grl_lambda=self.domain_adv_grl_lambda,
+            )
+            if domain_adv_loss is not None:
                 loss = loss + self.lambda_domain_adv * domain_adv_loss
                 self._track_component("domain_adv_loss", domain_adv_loss)
         if model.training:
@@ -1071,11 +1218,14 @@ def summarize_sample_weights(
     augment_weight: float,
     force_domain_weights: bool = False,
 ) -> dict:
-    counts = {"source_gold": 0, "target_pseudo": 0, "c3da_augment": 0}
+    counts = {"source_gold": 0, "target_pseudo": 0, "c3da_augment": 0, "target_unlabeled": 0}
     weights = []
     for row in rows:
         augmentation = row.get("augmentation")
-        if augmentation == "target_pseudo":
+        if augmentation == "target_unlabeled":
+            counts["target_unlabeled"] += 1
+            fallback_weight = 0.0
+        elif augmentation == "target_pseudo":
             counts["target_pseudo"] += 1
             fallback_weight = pseudo_weight
         elif augmentation in CSA_AUGMENT_CHANNELS:
@@ -1087,7 +1237,7 @@ def summarize_sample_weights(
         weights.append(float(fallback_weight if force_domain_weights else row.get("sample_weight", fallback_weight)))
     by_source = {}
     for name, predicate, fallback_weight in [
-        ("source_gold", lambda row: row.get("augmentation") not in {"target_pseudo", *CSA_AUGMENT_CHANNELS}, source_weight),
+        ("source_gold", lambda row: row.get("augmentation") not in {"target_pseudo", "target_unlabeled", *CSA_AUGMENT_CHANNELS}, source_weight),
         ("target_pseudo", lambda row: row.get("augmentation") == "target_pseudo", pseudo_weight),
         ("c3da_augment", lambda row: row.get("augmentation") in CSA_AUGMENT_CHANNELS, augment_weight),
     ]:
@@ -1117,6 +1267,8 @@ def summarize_generation_weights(dataset: JsonlSeq2SeqDataset) -> dict:
     neutral_weights = []
     non_neutral_weights = []
     for row in dataset.rows:
+        if row.get("augmentation") == "target_unlabeled":
+            continue
         domain_weight = dataset.sample_weight(row)
         effective_weight = dataset.generation_weight(row, domain_weight)
         triplets = parse_triplet_text_list(row.get("target", ""))
@@ -1222,6 +1374,10 @@ def main() -> None:
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    parser.add_argument("--syntactic_graph_cache_dir", default="")
+    parser.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
+    parser.add_argument("--target_unlabeled_file", default="")
     parser.add_argument("--source_weight", type=float, default=1.0)
     parser.add_argument("--pseudo_weight", type=float, default=0.5)
     parser.add_argument("--augment_weight", type=float, default=0.2)
@@ -1270,10 +1426,69 @@ def main() -> None:
     checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
     resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-    model = AutoModelForSeq2SeqLM.from_pretrained(args.model_path)
+    if args.use_syntactic_graph_adapter:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     train_rows = read_jsonl(args.train_file)
     dev_rows = read_jsonl(args.dev_file)
+    train_graph_cache = None
+    dev_graph_cache = None
+    target_domain_rows = []
+    graph_relation_vocab_size = 1
+    if args.use_syntactic_graph_adapter:
+        if not args.syntactic_graph_cache_dir:
+            raise GraphCacheError("--syntactic_graph_cache_dir is required when graph adapter is enabled")
+        if not args.target_unlabeled_file:
+            raise GraphCacheError("--target_unlabeled_file is required when graph adapter is enabled")
+        tokenizer_identity = build_tokenizer_identity(args.model_path, tokenizer)
+        parser_identity = build_parser_identity(args.syntactic_graph_parser_dir)
+        train_graph_cache = load_graph_cache_directory(
+            args.syntactic_graph_cache_dir,
+            "source_train",
+            train_rows,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+        )
+        dev_graph_cache = load_graph_cache_directory(
+            args.syntactic_graph_cache_dir,
+            "source_dev",
+            dev_rows,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+        )
+        target_rows = read_jsonl(args.target_unlabeled_file)
+        target_graph_cache = load_graph_cache_directory(
+            args.syntactic_graph_cache_dir,
+            "target_unlabeled",
+            target_rows,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+        )
+        if train_graph_cache.relation_vocab != dev_graph_cache.relation_vocab or train_graph_cache.relation_vocab != target_graph_cache.relation_vocab:
+            raise GraphCacheError("graph relation vocabulary mismatch across required cache splits")
+        graph_relation_vocab_size = train_graph_cache.relation_vocab_size
+        if args.lambda_domain_adv > 0:
+            target_domain_rows = build_target_unlabeled_domain_rows(
+                target_rows,
+                use_task_prefix=train_graph_cache.use_task_prefix,
+            )
+            train_rows = train_rows + target_domain_rows
+            train_graph_cache = CompositeGraphCache(
+                {
+                    "source_train": train_graph_cache,
+                    "target_unlabeled": target_graph_cache,
+                }
+            )
+    elif args.target_unlabeled_file and args.lambda_domain_adv > 0:
+        target_rows = read_jsonl(args.target_unlabeled_file)
+        target_domain_rows = build_target_unlabeled_domain_rows(target_rows, use_task_prefix=False)
+        train_rows = train_rows + target_domain_rows
+    model = load_seq2seq_model(
+        args.model_path,
+        use_syntactic_graph_adapter=args.use_syntactic_graph_adapter,
+        relation_vocab_size=graph_relation_vocab_size,
+    )
     add_task_special_tokens(tokenizer, model, train_rows + dev_rows)
     if args.lambda_domain_adv > 0:
         hidden_size = int(getattr(model.config, "d_model", model.get_input_embeddings().embedding_dim))
@@ -1340,6 +1555,13 @@ def main() -> None:
             "max_effective_weight": args.max_effective_weight,
             "neutral_generation_loss_gain": args.neutral_generation_loss_gain,
             "neutral_generation_max_effective_weight": args.neutral_generation_max_effective_weight,
+            "use_syntactic_graph_adapter": args.use_syntactic_graph_adapter,
+            "syntactic_graph_cache_dir": args.syntactic_graph_cache_dir,
+            "syntactic_graph_parser_dir": args.syntactic_graph_parser_dir,
+            "graph_layers": 1 if args.use_syntactic_graph_adapter else 0,
+            "graph_hidden_size": 256 if args.use_syntactic_graph_adapter else 0,
+            "graph_attention_heads": 4 if args.use_syntactic_graph_adapter else 0,
+            "graph_head_size": 64 if args.use_syntactic_graph_adapter else 0,
         },
     )
     if args.lambda_sentiment_contrastive > 0:
@@ -1379,6 +1601,7 @@ def main() -> None:
         sentiment_contrastive_min_weight=args.sentiment_contrastive_min_weight,
         sentiment_contrastive_exclude_augment=args.sentiment_contrastive_exclude_augment,
         sentiment_contrastive_source_only=args.sentiment_contrastive_source_only,
+        graph_cache=train_graph_cache,
     )
     print("effective generation weights:", summarize_generation_weights(train_data))
     dev_data = JsonlSeq2SeqDataset(
@@ -1393,6 +1616,7 @@ def main() -> None:
         min_pairing_triplets=args.min_pairing_triplets,
         min_pairing_sample_weight=args.min_pairing_sample_weight,
         pairing_source_only=args.pairing_source_only,
+        graph_cache=dev_graph_cache,
     )
 
     checkpoint_selection_config = build_checkpoint_selection_config(args.checkpoint_selection)

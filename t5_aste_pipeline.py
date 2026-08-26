@@ -33,6 +33,14 @@ from t5_aste_data import (
     write_jsonl,
 )
 from t5_aste_postprocess import evaluate_raw_and_fixed, fix_pred_triplets
+from syntactic_graph import (
+    GraphCacheError,
+    build_graph_cache,
+    build_parser_identity,
+    build_tokenizer_identity,
+    load_graph_cache_directory,
+)
+from syntactic_graph_adapter import load_seq2seq_model
 
 
 DATA_ROOT = Path(r"J:\nlp\BGCA-master\data\aste\cross_domain")
@@ -96,35 +104,106 @@ def generate_texts(
     cuda: str,
     constrained: bool = False,
     length_penalty: float = 1.0,
+    use_syntactic_graph_adapter: bool = False,
+    graph_cache_dir: str | Path = "",
+    graph_rows: list[dict] | None = None,
+    graph_parser_dir: str | Path = r"J:\nlp\models\stanza_resources",
+    graph_split: str = "target_unlabeled",
 ) -> list[str]:
     import torch
-    from torch.utils.data import DataLoader
     from tqdm import tqdm
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
     os.environ["CUDA_VISIBLE_DEVICES"] = cuda
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(device)
+    graph_cache = None
+    if use_syntactic_graph_adapter:
+        if not graph_cache_dir or graph_rows is None:
+            raise GraphCacheError("graph cache and graph rows are required for graph-aware generation")
+        tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+        tokenizer_identity = build_tokenizer_identity(model_path, tokenizer)
+        parser_identity = build_parser_identity(graph_parser_dir)
+        if len(graph_rows) != len(inputs):
+            raise GraphCacheError("graph rows and generation inputs must have identical lengths")
+        graph_cache = load_graph_cache_directory(
+            graph_cache_dir,
+            graph_split,
+            graph_rows,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+        )
+        model = load_seq2seq_model(
+            str(model_path),
+            use_syntactic_graph_adapter=True,
+            relation_vocab_size=graph_cache.relation_vocab_size,
+        ).to(device)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(device)
     model.eval()
-    loader = DataLoader(inputs, batch_size=batch_size, shuffle=False)
     outputs: list[str] = []
     with torch.inference_mode():
-        for batch in tqdm(loader, desc=f"generate:{Path(model_path).name}"):
+        for start in tqdm(range(0, len(inputs), batch_size), desc=f"generate:{Path(model_path).name}"):
+            batch = inputs[start : start + batch_size]
             encoded = tokenizer(list(batch), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
             generate_kwargs = {}
             if constrained:
                 prefix_allowed = PrefixAllowedTokens(tokenizer, encoded["input_ids"], TASK_TOKENS)
                 generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed
+            graph_kwargs = {}
+            if graph_cache is not None:
+                graph_kwargs = _collate_graph_cache_rows(
+                    [graph_cache.get(row) for row in graph_rows[start : start + len(batch)]]
+                )
+                graph_kwargs = {key: value.to(device) for key, value in graph_kwargs.items()}
             generated = model.generate(
                 **encoded,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
                 length_penalty=length_penalty,
+                **graph_kwargs,
                 **generate_kwargs,
             )
             outputs.extend(decode_keep_task_tokens(tokenizer, ids) for ids in generated)
     return outputs
+
+
+def _collate_graph_cache_rows(rows: list[dict]) -> dict[str, "torch.Tensor"]:
+    import torch
+
+    if not rows:
+        raise GraphCacheError("cannot collate an empty graph batch")
+    max_words = max(len(row["word_to_subword"]) for row in rows)
+    max_subwords = max(
+        max((len(indices) for indices in row["word_to_subword"]), default=0)
+        for row in rows
+    )
+    max_edges = max(len(row["edge_src"]) for row in rows)
+    word_to_subword = torch.full((len(rows), max_words, max(1, max_subwords)), -1, dtype=torch.long)
+    word_mask = torch.zeros((len(rows), max_words), dtype=torch.bool)
+    edge_tensors = {
+        key: torch.zeros((len(rows), max_edges), dtype=torch.long)
+        for key in ("edge_src", "edge_dst", "relation_id", "dependency_relation_id", "pos_pair_id")
+    }
+    edge_mask = torch.zeros((len(rows), max_edges), dtype=torch.bool)
+    for row_index, row in enumerate(rows):
+        word_mask[row_index, : len(row["word_mask"])] = torch.tensor(row["word_mask"], dtype=torch.bool)
+        for word_index, indices in enumerate(row["word_to_subword"]):
+            word_to_subword[row_index, word_index, : len(indices)] = torch.tensor(indices, dtype=torch.long)
+        edge_count = len(row["edge_src"])
+        edge_mask[row_index, :edge_count] = torch.tensor(row["edge_mask"], dtype=torch.bool)
+        for key in edge_tensors:
+            edge_tensors[key][row_index, :edge_count] = torch.tensor(row[key], dtype=torch.long)
+    return {
+        "graph_word_to_subword": word_to_subword,
+        "graph_word_mask": word_mask,
+        "graph_edge_src": edge_tensors["edge_src"],
+        "graph_edge_dst": edge_tensors["edge_dst"],
+        "graph_relation_id": edge_tensors["relation_id"],
+        "graph_dependency_relation_id": edge_tensors["dependency_relation_id"],
+        "graph_pos_pair_id": edge_tensors["pos_pair_id"],
+        "graph_edge_mask": edge_mask,
+    }
 
 
 def encode_text_embeddings(
@@ -2501,6 +2580,19 @@ def prepare(args: argparse.Namespace) -> None:
         "domain_prefix_style": args.domain_prefix_style,
         "generator_domain_name": args.source_dataset if args.domain_prefix_style != "none" else "",
         "generator_output_tag": generator_tag,
+        "use_syntactic_graph_adapter": bool(getattr(args, "use_syntactic_graph_adapter", False)),
+        "syntactic_graph_cache_dir": str(getattr(args, "syntactic_graph_cache_dir", "")),
+        "syntactic_graph_parser_dir": str(getattr(args, "syntactic_graph_parser_dir", r"J:\nlp\models\stanza_resources")),
+        "graph_layers": 1 if getattr(args, "use_syntactic_graph_adapter", False) else 0,
+        "graph_hidden_size": 256 if getattr(args, "use_syntactic_graph_adapter", False) else 0,
+        "graph_attention_heads": 4 if getattr(args, "use_syntactic_graph_adapter", False) else 0,
+        "graph_head_size": 64 if getattr(args, "use_syntactic_graph_adapter", False) else 0,
+        "graph_use_dependency": bool(getattr(args, "use_syntactic_graph_adapter", False)),
+        "graph_use_reverse_dependency": bool(getattr(args, "use_syntactic_graph_adapter", False)),
+        "graph_use_pos_neighbor": bool(getattr(args, "use_syntactic_graph_adapter", False)),
+        "graph_use_self_loop": bool(getattr(args, "use_syntactic_graph_adapter", False)),
+        "graph_external_word_embeddings": False,
+        "graph_sentiment_embedding": False,
     }
     dump_json(run_dir / "manifest.json", manifest)
     print(f"prepared {run_dir}")
@@ -2539,6 +2631,10 @@ def pseudo(args: argparse.Namespace) -> None:
         cuda=args.cuda,
         constrained=not args.no_constrained_decoding,
         length_penalty=args.length_penalty,
+        use_syntactic_graph_adapter=bool(getattr(args, "use_syntactic_graph_adapter", False)),
+        graph_cache_dir=getattr(args, "syntactic_graph_cache_dir", ""),
+        graph_rows=target_rows if getattr(args, "use_syntactic_graph_adapter", False) else None,
+        graph_parser_dir=getattr(args, "syntactic_graph_parser_dir", r"J:\nlp\models\stanza_resources"),
     )
     pseudo_rows = []
     for row, pred in zip(target_rows, preds):
@@ -3404,6 +3500,11 @@ def evaluate(args: argparse.Namespace) -> None:
         cuda=args.cuda,
         constrained=not args.no_constrained_decoding,
         length_penalty=args.length_penalty,
+        use_syntactic_graph_adapter=bool(getattr(args, "use_syntactic_graph_adapter", False)),
+        graph_cache_dir=getattr(args, "syntactic_graph_cache_dir", ""),
+        graph_rows=rows if getattr(args, "use_syntactic_graph_adapter", False) else None,
+        graph_parser_dir=getattr(args, "syntactic_graph_parser_dir", r"J:\nlp\models\stanza_resources"),
+        graph_split=getattr(args, "syntactic_graph_split", "source_dev"),
     )
     preds = [canonicalize_triplet_text(pred) for pred in preds]
     golds = [canonicalize_triplet_text(row["label"]) for row in rows]
@@ -3527,6 +3628,9 @@ def main() -> None:
     p.add_argument("--domain_prefix_style", choices=["none", "text", "bracket"], default="none")
     p.add_argument("--generator_output_tag", default="")
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    p.add_argument("--syntactic_graph_cache_dir", default="")
+    p.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
     p.add_argument("--dynamic_multitriplet", action="store_true")
     p.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
     p.add_argument("--source_count2_weight", type=positive_finite_float, default=1.15)
@@ -3552,6 +3656,9 @@ def main() -> None:
     p.add_argument("--fixed_changed_min_score", type=float, default=0.65)
     p.add_argument("--fixed_changed_weight", type=float, default=0.35)
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    p.add_argument("--syntactic_graph_cache_dir", default="")
+    p.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
     p.set_defaults(func=pseudo)
 
     p = sub.add_parser("memory")
@@ -3661,6 +3768,10 @@ def main() -> None:
     p.add_argument("--cuda", default="0")
     p.add_argument("--no_constrained_decoding", action="store_true")
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    p.add_argument("--syntactic_graph_cache_dir", default="")
+    p.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
+    p.add_argument("--syntactic_graph_split", choices=["source_dev", "target_unlabeled"], default="source_dev")
     p.add_argument("--output_tag", default="")
     p.add_argument("--eval_file", default="")
     p.set_defaults(func=evaluate)

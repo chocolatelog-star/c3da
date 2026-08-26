@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "recipe_id": "laptop14_to_rest15_syntactic_graph_v1",
+  "task_id": "M1_SYNTACTIC_RGAT_PSEUDO_INTERFACE_V1",
+  "source_dataset": "laptop14",
+  "target_dataset": "rest15",
+  "seed": 1000,
+  "research_status": "APPROVED_FOR_IMPLEMENTATION_ENTRY",
+  "training_status": "NOT_APPROVED",
+  "models": {
+    "t5_base": "J:\\nlp\\models\\t5-base-py"
+  },
+  "external_inputs": {
+    "laptop14_train": {
+      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\train.txt",
+      "sha256": "512EA143794332967B346D76791BBA10E0C10C5D20D8E1FA8F6534C2069F9B7C"
+    },
+    "laptop14_dev": {
+      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\dev.txt",
+      "sha256": "0ADBF20FC75284D5D49523F56EC368D94A9DA305E87411E0C627D12CD4510BC0"
+    },
+    "rest15_train_unlabeled_input": {
+      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\rest15\\train.txt",
+      "sha256": "11C5ABE1DE8AD284A8D06596A8BE45674E0EC153BEB161B8378F88F61BF2B5DB"
+    },
+    "t5_config": {
+      "path": "J:\\nlp\\models\\t5-base-py\\config.json",
+      "sha256": "46DD7CB62D29C81FB551E0EF1EA274C24A46BA441EEB948897706252933DF033"
+    },
+    "t5_weights": {
+      "path": "J:\\nlp\\models\\t5-base-py\\pytorch_model.bin",
+      "sha256": "AB97165968EDC4AACD30554D18D7BECA7F18B3A83E1A47ABBAD29792D984651F"
+    },
+    "t5_tokenizer": {
+      "path": "J:\\nlp\\models\\t5-base-py\\spiece.model",
+      "sha256": "D60ACB128CF7B7F2536E8F38A5B18A05535C9E14C7A355904270E15B0945EA86"
+    }
+  },
+  "training": {
+    "extractor_train_batch_size": 1,
+    "extractor_eval_batch_size": 2,
+    "gradient_accumulation_steps": 16,
+    "learning_rate": 0.0003,
+    "fp16": true,
+    "gradient_checkpointing": true,
+    "lambda_domain_adv": 0.03
+  },
+  "variants": {
+    "control": {
+      "use_syntactic_graph_adapter": false
+    },
+    "treatment": {
+      "use_syntactic_graph_adapter": true,
+      "graph_layers": 1,
+      "graph_hidden_size": 256,
+      "graph_attention_heads": 4,
+      "graph_head_size": 64,
+      "graph_use_dependency": true,
+      "graph_use_reverse_dependency": true,
+      "graph_use_pos_neighbor": true,
+      "graph_use_self_loop": true,
+      "graph_external_word_embeddings": false,
+      "graph_sentiment_embedding": false,
+      "parser": {
+        "language": "en",
+        "processors": "tokenize,mwt,pos,lemma,depparse",
+        "packages": {
+          "tokenize": "ewt",
+          "mwt": "ewt",
+          "pos": "ewt_charlm",
+          "lemma": "combined_nocharlm",
+          "depparse": "ewt_charlm"
+        },
+        "resource_dir": "J:\\nlp\\models\\stanza_resources",
+        "stanza_version": "1.14.0",
+        "sha256": {
+          "resources.json": "4e41c1df152146fa26ed0c006a08feea7a60bb3414bb6d57dbda24ad2e3cb99c",
+          "en/tokenize/ewt.pt": "fc2fed0cd74dbaef1620bd3e776141ae76c4e28eb5aeff369b2715c31cc73cba",
+          "en/mwt/ewt.pt": "73411a30da7638bbda2ebd9490e017d78feb4e029e90c9f5c9f37e5433292eb0",
+          "en/pos/ewt_charlm.pt": "f89696d286c29aff173061fbd4b581c73525257ce38015804be047a5e40f9614",
+          "en/lemma/combined_nocharlm.pt": "e3cb21e3c97a514d102fcc95e78fbc2ab838bc7b306a48029022f35caba1aa2c",
+          "en/depparse/ewt_charlm.pt": "7386666c2054363f6c4eae702f84ef7d4a11aa4708c2907b82b105e56925d897"
+        }
+      }
+    }
+  },
+  "data_boundary": {
+    "graph_cache_splits": ["source_train", "source_dev", "target_unlabeled"],
+    "target_test_graph_cache": false,
+    "target_test_access": false,
+    "pseudo_selection": false,
+    "generator": false,
+    "augmentation": false,
+    "nli": false,
+    "final_aste": false
+  }
+}

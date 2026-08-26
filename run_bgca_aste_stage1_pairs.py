@@ -282,9 +282,62 @@ def metric_value(data: dict, *keys: str):
     return current
 
 
+def run_syntactic_graph_entry_audit(args: argparse.Namespace, source: str, target: str) -> dict:
+    run_dir = pair_run_dir(Path(args.output_root), source, target)
+    audit_dir = run_dir / "m1_entry_audit"
+    py = sys.executable
+    run_command(
+        [
+            py,
+            "m1_syntactic_graph_entry_audit.py",
+            "--source_dataset",
+            source,
+            "--target_dataset",
+            target,
+            "--output_dir",
+            str(audit_dir),
+            "--model_path",
+            args.extractor_model_path,
+            "--parser_dir",
+            args.syntactic_graph_parser_dir,
+            "--recipe_path",
+            args.syntactic_graph_recipe_path,
+            "--cuda",
+            args.cuda,
+            "--seed",
+            str(args.seed),
+            "--fp16",
+            "--gradient_checkpointing",
+            "--lambda_domain_adv",
+            "0.03",
+        ],
+        args.dry_run,
+    )
+    return {
+        "source": source,
+        "target": target,
+        "status": "AUDIT_ONLY",
+        "audit_dir": str(audit_dir),
+    }
+
+
 def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     run_dir = pair_run_dir(Path(args.output_root), source, target)
+    use_syntactic_graph_adapter = bool(getattr(args, "use_syntactic_graph_adapter", False))
+    entry_audit_only = bool(getattr(args, "syntactic_graph_entry_audit_only", False))
+    if use_syntactic_graph_adapter and not entry_audit_only:
+        raise RuntimeError(
+            "M1 syntactic graph is audit-only until formal training approval; "
+            "pass --syntactic_graph_entry_audit_only to run the dedicated audit"
+        )
+    if entry_audit_only and not use_syntactic_graph_adapter:
+        raise RuntimeError("--syntactic_graph_entry_audit_only requires --use_syntactic_graph_adapter")
+    if entry_audit_only:
+        return run_syntactic_graph_entry_audit(args, source, target)
+    syntactic_graph_cache_dir = run_dir / "syntactic_graph_cache"
     upstream_run_dir = Path(args.reuse_upstream_run_dir) if args.reuse_upstream_run_dir else None
+    if use_syntactic_graph_adapter and upstream_run_dir is not None:
+        raise RuntimeError("syntactic graph extractor cannot reuse a historical upstream run")
     dynamic_multitriplet = getattr(args, "dynamic_multitriplet", False) or getattr(
         args,
         "dynamic_multitriplet_strict",
@@ -410,6 +463,17 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--no_task_prefix",
                 *(
                     [
+                        "--use_syntactic_graph_adapter",
+                        "--syntactic_graph_cache_dir",
+                        str(syntactic_graph_cache_dir),
+                        "--syntactic_graph_parser_dir",
+                        args.syntactic_graph_parser_dir,
+                    ]
+                    if use_syntactic_graph_adapter
+                    else []
+                ),
+                *(
+                    [
                         "--dynamic_multitriplet",
                         "--source_count1_weight",
                         str(source_weights[0]),
@@ -428,6 +492,46 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         )
         if not args.dry_run:
             mark_done(status_path, status, prepare_stage)
+
+    graph_cache_stage = "build_syntactic_graph_cache"
+    graph_cache_outputs = [
+        syntactic_graph_cache_dir / "manifest.json",
+        syntactic_graph_cache_dir / "relation_vocab.json",
+        syntactic_graph_cache_dir / "source_train.jsonl",
+        syntactic_graph_cache_dir / "source_dev.jsonl",
+        syntactic_graph_cache_dir / "target_unlabeled.jsonl",
+    ]
+    if use_syntactic_graph_adapter and not stage_done(
+        status,
+        graph_cache_stage,
+        graph_cache_outputs,
+        args.rerun,
+    ):
+        run_command(
+            [
+                py,
+                "syntactic_graph.py",
+                "build-cache",
+                "--source_train_file",
+                str(run_dir / "source_train.jsonl"),
+                "--source_dev_file",
+                str(run_dir / "source_dev.jsonl"),
+                "--target_unlabeled_file",
+                str(run_dir / "target_unlabeled.jsonl"),
+                "--output_dir",
+                str(syntactic_graph_cache_dir),
+                "--model_path",
+                args.extractor_model_path,
+                "--parser_dir",
+                args.syntactic_graph_parser_dir,
+                "--max_length",
+                "128",
+                "--no_task_prefix",
+            ],
+            args.dry_run,
+        )
+        if not args.dry_run:
+            mark_done(status_path, status, graph_cache_stage)
 
     if upstream_run_dir is None and not stage_done(
         status,
@@ -472,6 +576,21 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "auto",
                 "--lambda_sentiment_contrastive",
                 str(args.extractor_lambda_sentiment_contrastive),
+                *(
+                    [
+                        "--use_syntactic_graph_adapter",
+                        "--syntactic_graph_cache_dir",
+                        str(syntactic_graph_cache_dir),
+                        "--syntactic_graph_parser_dir",
+                        args.syntactic_graph_parser_dir,
+                        "--target_unlabeled_file",
+                        str(run_dir / "target_unlabeled.jsonl"),
+                        "--lambda_domain_adv",
+                        "0.03",
+                    ]
+                    if use_syntactic_graph_adapter
+                    else []
+                ),
                 *(["--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced"] if args.extractor_lambda_sentiment_contrastive > 0 else []),
                 *(["--sentiment_prototype_initialize_from_context", "--sentiment_prototype_init_batch_size", str(args.sentiment_prototype_init_batch_size)] if args.extractor_lambda_sentiment_contrastive > 0 and args.sentiment_prototype_initialize_from_context else []),
                 *common_train,
@@ -511,6 +630,19 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--no_constrained_decoding",
                 "--output_tag",
                 source_dev_eval_tag,
+                *(
+                    [
+                        "--use_syntactic_graph_adapter",
+                        "--syntactic_graph_cache_dir",
+                        str(syntactic_graph_cache_dir),
+                        "--syntactic_graph_parser_dir",
+                        args.syntactic_graph_parser_dir,
+                        "--syntactic_graph_split",
+                        "source_dev",
+                    ]
+                    if use_syntactic_graph_adapter
+                    else []
+                ),
             ],
             args.dry_run,
         )
@@ -559,6 +691,17 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "last",
                 "--pseudo_source_tag",
                 extractor_tag,
+                *(
+                    [
+                        "--use_syntactic_graph_adapter",
+                        "--syntactic_graph_cache_dir",
+                        str(syntactic_graph_cache_dir),
+                        "--syntactic_graph_parser_dir",
+                        args.syntactic_graph_parser_dir,
+                    ]
+                    if use_syntactic_graph_adapter
+                    else []
+                ),
                 "--high_precision_max_triplets",
                 "1",
                 "--high_precision_max_token_distance",
@@ -1564,6 +1707,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--seed", type=int, default=1000)
+    parser.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    parser.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
+    parser.add_argument(
+        "--syntactic_graph_recipe_path",
+        default=r"configs\recipes\laptop14_to_rest15_syntactic_graph_v1.json",
+    )
+    parser.add_argument("--syntactic_graph_entry_audit_only", action="store_true")
     reproducibility_group = parser.add_mutually_exclusive_group()
     reproducibility_group.add_argument("--deterministic", action="store_true")
     reproducibility_group.add_argument("--legacy_stochastic", action="store_true")
