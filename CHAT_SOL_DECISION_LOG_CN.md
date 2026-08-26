@@ -1,6 +1,13 @@
 # 协作决策日志
 
-> 更新时间：2026-08-26 22:34（北京时间）
+> 更新时间：2026-08-26 22:59（北京时间）
+
+## 2026-08-26 22:59：补齐审计配方参数硬校验与显式批次协议，等待最终验收
+
+- 审计启动先读取 recipe 并逐项比较实际参数、协议预期和 recipe 值；source_dataset、target_dataset、seed、lambda_domain_adv、fp16、gradient_checkpointing、全部批次参数以及 max_source_length/max_target_length 任一不匹配都会在数据、模型和 CUDA 之前抛出 `AuditConfigurationError`，主入口输出 BLOCKED JSON。
+- 固定协议为 seed=1000、lambda_domain_adv=0.03、fp16=true、gradient_checkpointing=true、extractor train batch=1、source-dev eval batch=2、DANN source/target batch=1/1、target pseudo batch=1、max source/target length=128/96；DANN JSON 额外记录 source、target 和 total 组成。
+- 新增错误 seed、错误批次、错误长度及“拒绝数据/CUDA 前继续”的 CPU 测试；当前 11 项审计测试、AST 解析和 `git diff --check` 通过。pytest 未安装，不安装依赖。
+- 本轮不运行 GPU 审计、不启动正式训练、不生成伪标签、不读取目标测试；图结构参数和 DANN 系数保持冻结。下一步等待 Codex Sol 最后一次只读验收。
 
 ## 2026-08-26 22:34：按 Codex Sol 复审意见完成四项入口修复，等待再次验收
 

@@ -1,17 +1,18 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-26 22:34（北京时间）
+> 更新时间：2026-08-26 22:59（北京时间）
 
 ## 当前任务状态
 
-`M1_SYNTACTIC_RGAT_PSEUDO_INTERFACE_V1`（laptop14 -> rest15，seed 1000）已完成 Stanza English EWT（Stanza 英语 EWT）模型、CUDA、单句依存解析和六个文件 SHA256（哈希）核验。Codex Sol 上轮复审指出四项工程缺口；本轮仅修复审计报告组装崩溃、图训练直达硬拦截、四个正式调用点和实际身份哈希审计，未改变图结构参数、DANN 系数或研究方案。当前状态为 `RUNNING`（等待 Codex Sol 再次只读验收和用户代跑授权）；正式训练、GPU zero-update（零更新）审计和新伪标签仍未批准。未读取目标测试金标。
+`M1_SYNTACTIC_RGAT_PSEUDO_INTERFACE_V1`（laptop14 -> rest15，seed 1000）已完成 Stanza English EWT（Stanza 英语 EWT）模型、CUDA、单句依存解析和六个文件 SHA256（哈希）核验。上一轮四项工程缺口已通过 Codex Sol 复验；本轮只补齐审计配方参数硬校验、显式批次组成和长度约束，未改变图结构参数、DANN 系数或研究方案。当前状态为 `RUNNING`（等待 Codex Sol 最后一次只读验收）；正式训练、GPU zero-update（零更新）审计和新伪标签仍未批准。未读取目标测试金标。
 
-## 本轮工程修复证据
+## 本轮参数协议修复证据
 
-- `run_audit` 报告组装已从 `model_measurements["measurements"]` 读取梯度检查点状态，并新增 CPU 组装回归测试；图适配器直接训练入口在解析参数后硬停，普通无图流程不变。
-- 审计四个调用点现在分别经过 `WeightedSeq2SeqTrainer.compute_loss`、`WeightedSeq2SeqTrainer.prediction_step`、正式混合批次 `compute_loss` 和 `t5_aste_pipeline.generate_texts`；审计不调用训练、优化器、调度器或模型保存。
-- 机器可读报告实际重算并比较 Git 提交/工作区、配方、T5 配置/权重/分词器、三份输入、三类图缓存/关系词表/manifest、Stanza 六文件和控制组/处理组参数前后哈希；任一身份不一致会使对应门控失败。
-- CPU 新增与相关回归验证通过；未启动 GPU zero-update（零更新）审计、正式训练、伪标签生成或目标测试读取。
+- 审计启动在读取数据、加载模型和探测 CUDA 前硬校验配方与命令行：source/target 数据集、seed=1000、lambda_domain_adv=0.03、fp16、gradient_checkpointing、训练/评估/DANN/伪推理批次以及 max_source_length=128、max_target_length=96；错误项立即生成 BLOCKED（阻塞）报告。
+- 源域抽取训练固定使用 train batch=1，source-dev 评估固定使用 eval batch=2；target-unlabeled DANN 明确记录 source_batch_size=1、target_batch_size=1 和 total_batch_size，不再使用含义模糊的统一 batch_size。
+- JSON（结构化）报告记录 actual、expected、recipe 和逐项 matches；配方 SHA256 已按新内容更新为 `e7c27b2a918eff11ae62bbb2ebc6042d80b457dfaaa21907ae9a0408115dece7`。
+- 上一轮已通过复验的报告组装、图训练直达硬拦截、四个正式调用点和实际身份哈希审计保持不变；图结构、DANN 系数和研究方案未改动。
+- CPU 新增 11 项直接测试、AST（抽象语法树）解析和 `git diff --check` 通过；pytest（Python 测试框架）未安装，未启动 GPU zero-update（零更新）审计、正式训练、伪标签生成或目标测试读取。
 
 ## 当前目标
 
