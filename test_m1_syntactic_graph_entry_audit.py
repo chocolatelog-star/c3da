@@ -1,18 +1,23 @@
 import hashlib
+import json
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 import torch
 
 from m1_syntactic_graph_entry_audit import (
+    AuditConfigurationError,
     ENTRY_GATE_NAMES,
     EXPECTED_PARSER_SHA256,
     FORMAL_CALLPOINT_PATHS,
     _file_identity,
     assemble_audit_report,
     build_entry_report,
+    ensure_audit_recipe,
     parameter_state_sha256,
+    validate_audit_recipe,
 )
 
 
@@ -151,3 +156,127 @@ def test_identity_recomputes_file_sha256_and_rejects_a_mismatch():
     assert identity["actual_sha256"] == hashlib.sha256(b"actual").hexdigest()
     assert identity["expected_sha256"] == "0" * 64
     assert identity["matches"] is False
+
+
+def _valid_audit_parameters():
+    args = SimpleNamespace(
+        source_dataset="laptop14",
+        target_dataset="rest15",
+        seed=1000,
+        lambda_domain_adv=0.03,
+        fp16=True,
+        gradient_checkpointing=True,
+        extractor_train_batch_size=1,
+        extractor_eval_batch_size=2,
+        dann_source_batch_size=1,
+        dann_target_batch_size=1,
+        target_pseudo_batch_size=1,
+        max_source_length=128,
+        max_target_length=96,
+    )
+    recipe = {
+        "source_dataset": "laptop14",
+        "target_dataset": "rest15",
+        "seed": 1000,
+        "training": {
+            "extractor_train_batch_size": 1,
+            "extractor_eval_batch_size": 2,
+            "target_unlabeled_dann": {
+                "source_batch_size": 1,
+                "target_batch_size": 1,
+            },
+            "target_pseudo_batch_size": 1,
+            "max_source_length": 128,
+            "max_target_length": 96,
+            "fp16": True,
+            "gradient_checkpointing": True,
+            "lambda_domain_adv": 0.03,
+        },
+    }
+    return args, recipe
+
+
+def test_audit_recipe_rejects_wrong_seed_on_cpu():
+    args, recipe = _valid_audit_parameters()
+    args.seed = 999
+
+    try:
+        ensure_audit_recipe(args, recipe)
+    except AuditConfigurationError as exc:
+        assert exc.validation["matches"]["seed"] is False
+        assert exc.validation["all_matches"] is False
+    else:
+        raise AssertionError("wrong seed must be rejected before GPU/data work")
+
+
+def test_audit_recipe_rejects_wrong_batch_parameters_on_cpu():
+    args, recipe = _valid_audit_parameters()
+    args.extractor_train_batch_size = 2
+    args.extractor_eval_batch_size = 1
+    args.dann_source_batch_size = 2
+    args.dann_target_batch_size = 2
+    args.target_pseudo_batch_size = 2
+
+    try:
+        ensure_audit_recipe(args, recipe)
+    except AuditConfigurationError as exc:
+        for field in (
+            "extractor_train_batch_size",
+            "extractor_eval_batch_size",
+            "dann_source_batch_size",
+            "dann_target_batch_size",
+            "target_pseudo_batch_size",
+        ):
+            assert exc.validation["matches"][field] is False
+    else:
+        raise AssertionError("wrong batch parameters must be rejected")
+
+
+def test_audit_recipe_rejects_wrong_lengths_on_cpu():
+    args, recipe = _valid_audit_parameters()
+    args.max_source_length = 127
+    args.max_target_length = 95
+
+    try:
+        ensure_audit_recipe(args, recipe)
+    except AuditConfigurationError as exc:
+        assert exc.validation["matches"]["max_source_length"] is False
+        assert exc.validation["matches"]["max_target_length"] is False
+    else:
+        raise AssertionError("wrong sequence lengths must be rejected")
+
+
+def test_audit_recipe_report_records_actual_expected_and_matches():
+    args, recipe = _valid_audit_parameters()
+
+    validation = validate_audit_recipe(args, recipe)
+
+    assert validation["all_matches"] is True
+    assert validation["actual"]["seed"] == 1000
+    assert validation["expected"]["seed"] == 1000
+    assert validation["matches"]["dann_source_batch_size"] is True
+
+
+def test_run_audit_wrong_seed_blocks_before_data_or_cuda_on_cpu():
+    from m1_syntactic_graph_entry_audit import run_audit
+
+    args, recipe = _valid_audit_parameters()
+    args.seed = 999
+    args.recipe_path = None
+    with tempfile.TemporaryDirectory() as temporary:
+        recipe_path = Path(temporary) / "recipe.json"
+        recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
+        args.recipe_path = str(recipe_path)
+        with patch(
+            "m1_syntactic_graph_entry_audit._prepare_rows",
+            side_effect=AssertionError("data preparation must not run"),
+        ), patch(
+            "m1_syntactic_graph_entry_audit.torch.cuda.is_available",
+            side_effect=AssertionError("CUDA probing must not run"),
+        ):
+            try:
+                run_audit(args)
+            except AuditConfigurationError as exc:
+                assert exc.validation["matches"]["seed"] is False
+            else:
+                raise AssertionError("wrong seed must block audit startup")

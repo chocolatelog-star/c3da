@@ -79,9 +79,118 @@ FORMAL_CALLPOINT_PATHS = {
     "target_pseudo_inference": "t5_aste_pipeline.generate_texts",
 }
 EXPECTED_LAMBDA_DOMAIN_ADV = 0.03
+EXPECTED_SEED = 1000
+EXPECTED_FP16 = True
+EXPECTED_GRADIENT_CHECKPOINTING = True
+EXPECTED_EXTRACTOR_TRAIN_BATCH_SIZE = 1
+EXPECTED_EXTRACTOR_EVAL_BATCH_SIZE = 2
+EXPECTED_DANN_SOURCE_BATCH_SIZE = 1
+EXPECTED_DANN_TARGET_BATCH_SIZE = 1
+EXPECTED_TARGET_PSEUDO_BATCH_SIZE = 1
+EXPECTED_MAX_SOURCE_LENGTH = 128
+EXPECTED_MAX_TARGET_LENGTH = 96
 EXPECTED_STANZA_VERSION = "1.14.0"
 VRAM_LIMIT_BYTES = int(7.5 * 1024**3)
-EXPECTED_RECIPE_SHA256 = "63877a2a60aa2b97834e3fa6e1979aebaf61e6b02e088c0063fed6b3cd3c2442"
+EXPECTED_RECIPE_SHA256 = "e7c27b2a918eff11ae62bbb2ebc6042d80b457dfaaa21907ae9a0408115dece7"
+
+
+class AuditConfigurationError(ValueError):
+    """Raised when the zero-update audit recipe does not match the protocol."""
+
+    def __init__(self, message: str, validation: dict):
+        super().__init__(message)
+        self.validation = validation
+
+
+def _parameter_equal(actual, expected) -> bool:
+    if isinstance(expected, bool):
+        return isinstance(actual, bool) and actual is expected
+    if isinstance(expected, float):
+        try:
+            return math.isclose(float(actual), expected, rel_tol=0.0, abs_tol=1e-12)
+        except (TypeError, ValueError):
+            return False
+    return actual == expected
+
+
+def _audit_parameter_values(args, recipe: dict) -> tuple[dict, dict, dict]:
+    training = recipe.get("training", {})
+    dann = training.get("target_unlabeled_dann", {})
+    recipe_values = {
+        "source_dataset": recipe.get("source_dataset"),
+        "target_dataset": recipe.get("target_dataset"),
+        "seed": recipe.get("seed"),
+        "lambda_domain_adv": training.get("lambda_domain_adv"),
+        "fp16": training.get("fp16"),
+        "gradient_checkpointing": training.get("gradient_checkpointing"),
+        "extractor_train_batch_size": training.get("extractor_train_batch_size"),
+        "extractor_eval_batch_size": training.get("extractor_eval_batch_size"),
+        "dann_source_batch_size": dann.get("source_batch_size"),
+        "dann_target_batch_size": dann.get("target_batch_size"),
+        "target_pseudo_batch_size": training.get("target_pseudo_batch_size"),
+        "max_source_length": training.get("max_source_length"),
+        "max_target_length": training.get("max_target_length"),
+    }
+    actual = {
+        "source_dataset": getattr(args, "source_dataset", None),
+        "target_dataset": getattr(args, "target_dataset", None),
+        "seed": getattr(args, "seed", None),
+        "lambda_domain_adv": getattr(args, "lambda_domain_adv", None),
+        "fp16": getattr(args, "fp16", None),
+        "gradient_checkpointing": getattr(args, "gradient_checkpointing", None),
+        "extractor_train_batch_size": getattr(args, "extractor_train_batch_size", None),
+        "extractor_eval_batch_size": getattr(args, "extractor_eval_batch_size", None),
+        "dann_source_batch_size": getattr(args, "dann_source_batch_size", None),
+        "dann_target_batch_size": getattr(args, "dann_target_batch_size", None),
+        "target_pseudo_batch_size": getattr(args, "target_pseudo_batch_size", None),
+        "max_source_length": getattr(args, "max_source_length", None),
+        "max_target_length": getattr(args, "max_target_length", None),
+    }
+    expected = {
+        "source_dataset": recipe_values["source_dataset"],
+        "target_dataset": recipe_values["target_dataset"],
+        "seed": EXPECTED_SEED,
+        "lambda_domain_adv": EXPECTED_LAMBDA_DOMAIN_ADV,
+        "fp16": EXPECTED_FP16,
+        "gradient_checkpointing": EXPECTED_GRADIENT_CHECKPOINTING,
+        "extractor_train_batch_size": EXPECTED_EXTRACTOR_TRAIN_BATCH_SIZE,
+        "extractor_eval_batch_size": EXPECTED_EXTRACTOR_EVAL_BATCH_SIZE,
+        "dann_source_batch_size": EXPECTED_DANN_SOURCE_BATCH_SIZE,
+        "dann_target_batch_size": EXPECTED_DANN_TARGET_BATCH_SIZE,
+        "target_pseudo_batch_size": EXPECTED_TARGET_PSEUDO_BATCH_SIZE,
+        "max_source_length": EXPECTED_MAX_SOURCE_LENGTH,
+        "max_target_length": EXPECTED_MAX_TARGET_LENGTH,
+    }
+    return recipe_values, actual, expected
+
+
+def validate_audit_recipe(args, recipe: dict) -> dict:
+    """Return an auditable comparison of CLI values, recipe values, and protocol values."""
+    recipe_values, actual, expected = _audit_parameter_values(args, recipe)
+    matches = {
+        name: _parameter_equal(actual[name], expected[name])
+        and _parameter_equal(recipe_values[name], expected[name])
+        for name in expected
+    }
+    return {
+        "actual": actual,
+        "expected": expected,
+        "recipe": recipe_values,
+        "matches": matches,
+        "all_matches": all(matches.values()),
+    }
+
+
+def ensure_audit_recipe(args, recipe: dict) -> dict:
+    """Hard-stop before data/model/GPU work when any audit parameter is wrong."""
+    validation = validate_audit_recipe(args, recipe)
+    if not validation["all_matches"]:
+        mismatches = [name for name, matched in validation["matches"].items() if not matched]
+        raise AuditConfigurationError(
+            "M1 audit recipe mismatch; blocked fields: " + ", ".join(mismatches),
+            validation,
+        )
+    return validation
 
 
 def parameter_state_sha256(model) -> str:
@@ -589,11 +698,13 @@ def _build_audit_trainer(
     device: torch.device,
     lambda_domain_adv: float,
     output_dir: Path,
+    train_batch_size: int,
+    eval_batch_size: int,
 ):
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
+        per_device_train_batch_size=int(train_batch_size),
+        per_device_eval_batch_size=int(eval_batch_size),
         use_cpu=device.type != "cuda",
         fp16=False,
         report_to=[],
@@ -623,10 +734,11 @@ def _run_model_audit(
     device: torch.device,
 ) -> tuple[dict, dict]:
     target_domain_rows = build_target_unlabeled_domain_rows(target_rows, use_task_prefix=False)
-    source_sample = source_train_rows[: max(1, min(args.batch_size, len(source_train_rows)))]
-    dev_sample = source_dev_rows[: max(1, min(args.batch_size, len(source_dev_rows)))]
-    target_sample = target_domain_rows[: max(1, min(args.batch_size, len(target_domain_rows)))]
-    mixed_rows = source_sample + target_sample
+    source_sample = source_train_rows[: max(1, min(args.extractor_train_batch_size, len(source_train_rows)))]
+    dev_sample = source_dev_rows[: max(1, min(args.extractor_eval_batch_size, len(source_dev_rows)))]
+    dann_source_sample = source_train_rows[: max(1, min(args.dann_source_batch_size, len(source_train_rows)))]
+    target_sample = target_domain_rows[: max(1, min(args.dann_target_batch_size, len(target_domain_rows)))]
+    mixed_rows = dann_source_sample + target_sample
 
     control = load_seq2seq_model(args.model_path, use_syntactic_graph_adapter=False)
     treatment = load_seq2seq_model(
@@ -660,8 +772,12 @@ def _run_model_audit(
     source_dataset = _build_dataset(source_sample, tokenizer, train_cache, args.max_source_length, args.max_target_length)
     dev_dataset = _build_dataset(dev_sample, tokenizer, dev_cache, args.max_source_length, args.max_target_length)
     mixed_dataset = _build_dataset(mixed_rows, tokenizer, mixed_graph_cache, args.max_source_length, args.max_target_length)
-    source_batch = _move_batch(_collate_rows(source_dataset, treatment, tokenizer, args.batch_size), device)
-    dev_batch = _move_batch(_collate_rows(dev_dataset, treatment, tokenizer, args.batch_size), device)
+    source_batch = _move_batch(
+        _collate_rows(source_dataset, treatment, tokenizer, args.extractor_train_batch_size), device
+    )
+    dev_batch = _move_batch(
+        _collate_rows(dev_dataset, treatment, tokenizer, args.extractor_eval_batch_size), device
+    )
     mixed_batch = _move_batch(_collate_rows(mixed_dataset, treatment, tokenizer, len(mixed_rows)), device)
 
     control_input = _model_inputs(source_batch, use_graph=False)
@@ -691,6 +807,8 @@ def _run_model_audit(
         device,
         float(args.lambda_domain_adv),
         audit_output_dir,
+        args.extractor_train_batch_size,
+        args.extractor_eval_batch_size,
     )
     treatment.train()
     treatment.zero_grad(set_to_none=True)
@@ -729,6 +847,8 @@ def _run_model_audit(
         device,
         float(args.lambda_domain_adv),
         audit_output_dir,
+        len(mixed_rows),
+        args.extractor_eval_batch_size,
     )
     with _amp_context(device, args.fp16):
         mixed_dann_loss, _ = dann_trainer.compute_loss(
@@ -753,7 +873,7 @@ def _run_model_audit(
         generated = generate_texts(
             model_path=args.model_path,
             inputs=[row["text"] for row in target_sample],
-            batch_size=args.batch_size,
+            batch_size=args.target_pseudo_batch_size,
             max_new_tokens=8,
             num_beams=1,
             cuda=args.cuda,
@@ -769,7 +889,15 @@ def _run_model_audit(
 
     treatment.train()
     treatment.zero_grad(set_to_none=True)
-    aste_trainer = _build_audit_trainer(treatment, tokenizer, device, 0.0, audit_output_dir)
+    aste_trainer = _build_audit_trainer(
+        treatment,
+        tokenizer,
+        device,
+        0.0,
+        audit_output_dir,
+        args.extractor_train_batch_size,
+        args.extractor_eval_batch_size,
+    )
     with _amp_context(device, args.fp16):
         aste_loss, _ = aste_trainer.compute_loss(
             treatment,
@@ -781,7 +909,7 @@ def _run_model_audit(
     aste_gradient_norm = float(aste_projection_grad.detach().float().norm().cpu()) if aste_projection_grad is not None else 0.0
     treatment.zero_grad(set_to_none=True)
 
-    target_labels = mixed_batch["labels"][len(source_sample) :]
+    target_labels = mixed_batch["labels"][len(dann_source_sample) :]
     target_labels_are_masked = bool(target_labels.eq(-100).all().item())
     measurements = {
         "control_loss": float(control_output.loss.detach().float().cpu()),
@@ -796,8 +924,16 @@ def _run_model_audit(
         "aste_gradient_norm": aste_gradient_norm,
         "dann_gradient_norm": dann_gradient_norm,
         "target_labels_are_all_ignore_index": target_labels_are_masked,
-        "source_rows_in_dann_batch": len(source_sample),
+        "source_rows_in_dann_batch": len(dann_source_sample),
         "target_rows_in_dann_batch": len(target_sample),
+        "dann_batch_composition": {
+            "source_batch_size": len(dann_source_sample),
+            "target_batch_size": len(target_sample),
+            "total_batch_size": len(mixed_rows),
+        },
+        "source_train_batch_size": len(source_sample),
+        "source_dev_batch_size": len(dev_sample),
+        "target_pseudo_batch_size": int(args.target_pseudo_batch_size),
         "gradient_checkpointing_enabled": bool(getattr(treatment, "is_gradient_checkpointing", False)),
         "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
         "gpu_total_memory_bytes": int(torch.cuda.get_device_properties(device).total_memory) if device.type == "cuda" else 0,
@@ -873,6 +1009,10 @@ def assemble_audit_report(
 ) -> dict:
     """Assemble the report from completed measurements without touching the model."""
     model_values = model_measurements["measurements"]
+    parameter_validation = model_measurements.get(
+        "recipe_parameter_validation",
+        {"actual": {}, "expected": {}, "recipe": {}, "matches": {}, "all_matches": True},
+    )
     identity = identity_measurements or {}
     inspect = cache_measurements["inspect"]
     before_hash = model_measurements.get("parameter_hash_before")
@@ -908,6 +1048,7 @@ def assemble_audit_report(
         "control_parameter_hash_after": control_after_hash,
         "artifact_identity": identity,
         "formal_callpoint_paths": dict(FORMAL_CALLPOINT_PATHS),
+        "recipe_parameter_validation": parameter_validation,
     }
     max_diff = measurements["control_treatment_max_abs_logit_diff"]
     repeat_diff = measurements["repeat_max_abs_logit_diff"]
@@ -970,7 +1111,9 @@ def assemble_audit_report(
             and input_identity_matches
             and recipe_identity_matches
         ),
-        "machine_readable_report": identity_all_matches and git_clean,
+        "machine_readable_report": identity_all_matches
+        and git_clean
+        and bool(parameter_validation.get("all_matches", False)),
     }
     gate_details = {
         "parser_identity": f"stanza={parser_identity.get('stanza_version')}; actual_vs_expected={parser_identity_matches}",
@@ -987,11 +1130,15 @@ def assemble_audit_report(
         "vram_8gb": f"peak_reserved={measurements['gpu_peak_reserved_bytes']} bytes; limit={VRAM_LIMIT_BYTES} bytes",
         "zero_update": f"optimizer_updates=0; scheduler_steps=0; parameter_hashes_match={parameter_hashes_match}",
         "boundary_no_leakage": "target test, generator, augmentation, NLI and final ASTE are not invoked",
-        "machine_readable_report": f"identity_all_matches={identity_all_matches}; git_clean={git_clean}",
+        "machine_readable_report": (
+            f"identity_all_matches={identity_all_matches}; git_clean={git_clean}; "
+            f"recipe_parameter_matches={parameter_validation.get('all_matches', False)}"
+        ),
     }
     report_metadata = dict(metadata or {})
     report_metadata.setdefault("target_test_access", False)
     report_metadata["artifact_identity"] = identity
+    report_metadata["recipe_parameter_validation"] = parameter_validation
     return build_entry_report(
         gate_values,
         measurements,
@@ -1002,11 +1149,8 @@ def assemble_audit_report(
 
 
 def run_audit(args) -> dict:
-    if float(args.lambda_domain_adv) != EXPECTED_LAMBDA_DOMAIN_ADV:
-        raise ValueError("M1 audit requires lambda_domain_adv=0.03")
-    if not args.fp16 or not args.gradient_checkpointing:
-        raise ValueError("M1 audit requires --fp16 and --gradient_checkpointing")
     recipe = json.loads(Path(args.recipe_path).read_text(encoding="utf-8"))
+    parameter_validation = ensure_audit_recipe(args, recipe)
     source_train_rows, source_dev_rows, target_rows = _prepare_rows(args.source_dataset, args.target_dataset)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1066,6 +1210,7 @@ def run_audit(args) -> dict:
         cache_dir,
         device,
     )
+    model_measurements["recipe_parameter_validation"] = parameter_validation
     identity_measurements = _collect_identity_measurements(
         args=args,
         recipe=recipe,
@@ -1117,7 +1262,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--domain_adv_hidden_size", type=int, default=256)
     parser.add_argument("--max_source_length", type=int, default=128)
     parser.add_argument("--max_target_length", type=int, default=96)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--extractor_train_batch_size", type=int, default=EXPECTED_EXTRACTOR_TRAIN_BATCH_SIZE)
+    parser.add_argument("--extractor_eval_batch_size", type=int, default=EXPECTED_EXTRACTOR_EVAL_BATCH_SIZE)
+    parser.add_argument("--dann_source_batch_size", type=int, default=EXPECTED_DANN_SOURCE_BATCH_SIZE)
+    parser.add_argument("--dann_target_batch_size", type=int, default=EXPECTED_DANN_TARGET_BATCH_SIZE)
+    parser.add_argument("--target_pseudo_batch_size", type=int, default=EXPECTED_TARGET_PSEUDO_BATCH_SIZE)
     return parser
 
 
@@ -1127,7 +1276,10 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "m1_syntactic_graph_entry_audit.json"
     markdown_path = output_dir / "m1_syntactic_graph_entry_audit_CN.md"
+    parameter_validation = None
     try:
+        recipe = json.loads(Path(args.recipe_path).read_text(encoding="utf-8"))
+        parameter_validation = validate_audit_recipe(args, recipe)
         report = run_audit(args)
     except Exception as exc:  # The JSON failure artifact is part of the audit contract.
         report = build_entry_report(
@@ -1137,6 +1289,14 @@ def main() -> None:
                 "optimizer_steps": 0,
                 "scheduler_steps": 0,
                 "parameter_updates": 0,
+                "recipe_parameter_validation": parameter_validation
+                or {
+                    "actual": {},
+                    "expected": {},
+                    "recipe": {},
+                    "matches": {},
+                    "all_matches": False,
+                },
             },
             callpoints={},
             metadata={
@@ -1144,6 +1304,7 @@ def main() -> None:
                 "target_dataset": args.target_dataset,
                 "target_test_access": False,
                 "formal_training_started": False,
+                "recipe_parameter_validation": parameter_validation,
             },
             errors=[f"{type(exc).__name__}: {exc}"],
         )
