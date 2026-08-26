@@ -1,6 +1,14 @@
 # 协作决策日志
 
-> 更新时间：2026-08-26 21:53（北京时间）
+> 更新时间：2026-08-26 22:34（北京时间）
+
+## 2026-08-26 22:34：按 Codex Sol 复审意见完成四项入口修复，等待再次验收
+
+- 修复 `run_audit` 报告组装阶段的局部变量引用错误；报告现在从 `model_measurements["measurements"]` 读取梯度检查点状态，并由 CPU 测试覆盖该组装函数。
+- `t5_absa_train.py` 的图训练入口在参数解析后硬停，只有专用 `m1_syntactic_graph_entry_audit.py` 可进入图零更新审计；无图流程不受影响。
+- 审计四个调用点改走正式 `WeightedSeq2SeqTrainer.compute_loss`、`prediction_step`、混合批次 `compute_loss` 和 `t5_aste_pipeline.generate_texts`；不调用 `train`、优化器/调度器更新或模型保存。
+- 审计实际重算并比较 Git、配方、T5 配置/权重/分词器、source train/dev 与 target unlabeled 输入、三类图缓存/关系词表/manifest、Stanza 六文件及控制组/处理组参数前后哈希，并将实际值写入 JSON；身份不一致按对应门控失败。
+- CPU 新增测试、正式训练器烟测和相关旧回归通过；未启动 GPU zero-update（零更新）审计、正式训练、伪标签生成或目标测试读取。当前状态仍为 `RUNNING`，等待 Codex Sol 再次只读验收。
 
 ## 2026-08-26 21:53：M1句法图工程修复完成，等待 Codex Sol 验收
 

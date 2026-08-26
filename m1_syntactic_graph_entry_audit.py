@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 from contextlib import nullcontext
 from datetime import datetime
@@ -12,16 +13,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import torch
-from transformers import AutoTokenizer, DataCollatorForSeq2Seq
+from transformers import AutoTokenizer, DataCollatorForSeq2Seq, Seq2SeqTrainingArguments
 
 from syntactic_graph import (
     CompositeGraphCache,
     EXPECTED_PARSER_SHA256,
     GraphCacheError,
     build_graph_cache_records,
-    build_parser_identity,
     build_stanza_pipeline,
-    build_tokenizer_identity,
     load_graph_cache_directory,
     sha256_file,
 )
@@ -30,9 +29,9 @@ from t5_absa_train import (
     DataCollatorForSeq2SeqWithPairing,
     DomainAdversarialHead,
     JsonlSeq2SeqDataset,
+    WeightedSeq2SeqTrainer,
     add_task_special_tokens,
     build_target_unlabeled_domain_rows,
-    compute_domain_adversarial_loss,
 )
 from t5_aste_data import to_extract_rows
 from t5_aste_pipeline import DATASETS, load_split
@@ -73,8 +72,16 @@ MODEL_KEYS = {
     "decoder_attention_mask",
     "labels",
 }
+FORMAL_CALLPOINT_PATHS = {
+    "source_extractor_training": "t5_absa_train.WeightedSeq2SeqTrainer.compute_loss",
+    "source_dev_evaluation": "t5_absa_train.WeightedSeq2SeqTrainer.prediction_step",
+    "target_unlabeled_dann": "t5_absa_train.WeightedSeq2SeqTrainer.compute_loss",
+    "target_pseudo_inference": "t5_aste_pipeline.generate_texts",
+}
 EXPECTED_LAMBDA_DOMAIN_ADV = 0.03
+EXPECTED_STANZA_VERSION = "1.14.0"
 VRAM_LIMIT_BYTES = int(7.5 * 1024**3)
+EXPECTED_RECIPE_SHA256 = "63877a2a60aa2b97834e3fa6e1979aebaf61e6b02e088c0063fed6b3cd3c2442"
 
 
 def parameter_state_sha256(model) -> str:
@@ -383,6 +390,226 @@ def _build_or_resume_caches(
     return cache_dir, manifest, cache_measurements
 
 
+def _file_identity(path: Path, expected_sha256: str | None) -> dict:
+    exists = path.is_file()
+    actual_sha256 = sha256_file(path) if exists else None
+    matches = bool(
+        exists
+        and expected_sha256
+        and actual_sha256
+        and actual_sha256.lower() == str(expected_sha256).lower()
+    )
+    return {
+        "path": str(path),
+        "exists": exists,
+        "actual_sha256": actual_sha256,
+        "expected_sha256": expected_sha256,
+        "matches": matches,
+    }
+
+
+def _build_parser_identity_for_audit(parser_dir: str | Path) -> dict:
+    parser_dir = Path(parser_dir)
+    actual_hashes = {}
+    for relative in EXPECTED_PARSER_SHA256:
+        path = parser_dir / relative
+        actual_hashes[relative] = sha256_file(path) if path.is_file() else None
+    try:
+        import stanza
+
+        stanza_version = str(getattr(stanza, "__version__", "unknown"))
+    except ImportError:
+        stanza_version = "unavailable"
+    return {
+        "language": "en",
+        "processors": "tokenize,mwt,pos,lemma,depparse",
+        "packages": {
+            "tokenize": "ewt",
+            "mwt": "ewt",
+            "pos": "ewt_charlm",
+            "lemma": "combined_nocharlm",
+            "depparse": "ewt_charlm",
+        },
+        "resource_dir": str(parser_dir),
+        "stanza_version": stanza_version,
+        "sha256": actual_hashes,
+    }
+
+
+def _build_tokenizer_identity_for_audit(model_path: str | Path, tokenizer) -> dict:
+    model_path = Path(model_path)
+    files = {
+        name: sha256_file(model_path / name) if (model_path / name).is_file() else None
+        for name in ("spiece.model", "tokenizer.json")
+    }
+    return {
+        "class": type(tokenizer).__name__,
+        "is_fast": bool(getattr(tokenizer, "is_fast", False)),
+        "vocab_size": int(getattr(tokenizer, "vocab_size", 0)),
+        "files_sha256": files,
+    }
+
+
+def _git_identity(repo_root: Path) -> dict:
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return {
+            "commit": None,
+            "status_porcelain": f"git_error:{type(exc).__name__}:{exc}",
+            "clean": False,
+        }
+    return {
+        "commit": commit,
+        "status_porcelain": status,
+        "clean": status == "",
+    }
+
+
+def _collect_identity_measurements(
+    args,
+    recipe: dict,
+    recipe_path: Path,
+    tokenizer_identity: dict,
+    parser_identity: dict,
+    cache_dir: Path,
+    cache_measurements: dict,
+    model_measurements: dict,
+) -> dict:
+    external = recipe.get("external_inputs", {})
+    recipe_identity = _file_identity(recipe_path, EXPECTED_RECIPE_SHA256)
+    model_specs = {
+        "config.json": external.get("t5_config", {}),
+        "pytorch_model.bin": external.get("t5_weights", {}),
+        "spiece.model": external.get("t5_tokenizer", {}),
+        "tokenizer.json": external.get("t5_tokenizer_json", {}),
+    }
+    model_files = {
+        name: _file_identity(Path(args.model_path) / name, spec.get("sha256"))
+        for name, spec in model_specs.items()
+    }
+    input_specs = {
+        "source_train": external.get(f"{args.source_dataset}_train", {}),
+        "source_dev": external.get(f"{args.source_dataset}_dev", {}),
+        "target_unlabeled": external.get(f"{args.target_dataset}_train_unlabeled_input", {})
+        or external.get(f"{args.target_dataset}_train", {}),
+    }
+    input_files = {
+        name: _file_identity(Path(spec.get("path", "")), spec.get("sha256"))
+        for name, spec in input_specs.items()
+    }
+    actual_cache_hashes = _cache_bytes(cache_dir)
+    repeated_cache_hashes = cache_measurements.get("repeat_cache_sha256", {})
+    cache_files = {
+        name: {
+            "path": str(cache_dir / name),
+            "actual_sha256": actual_cache_hashes.get(name),
+            "repeat_sha256": repeated_cache_hashes.get(name),
+            "matches_repeat": actual_cache_hashes.get(name) == repeated_cache_hashes.get(name),
+        }
+        for name in sorted(actual_cache_hashes)
+    }
+    cache_manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+    cache_manifest_matches = (
+        cache_manifest.get("relation_vocab_sha256") == actual_cache_hashes.get("relation_vocab.json")
+        and cache_manifest.get("target_test_access") is False
+    )
+    parser_matches = parser_identity.get("stanza_version") == EXPECTED_STANZA_VERSION and all(
+        str(parser_identity.get("sha256", {}).get(relative, "")).lower() == expected.lower()
+        for relative, expected in EXPECTED_PARSER_SHA256.items()
+    )
+    model_artifact_matches = all(item["matches"] for item in model_files.values())
+    input_identity_matches = all(item["matches"] for item in input_files.values()) and (
+        args.source_dataset == recipe.get("source_dataset")
+        and args.target_dataset == recipe.get("target_dataset")
+    )
+    graph_cache_identity_matches = cache_manifest_matches and all(
+        item["matches_repeat"] for item in cache_files.values()
+    )
+    parameter_hashes_match = (
+        model_measurements.get("control_parameter_hash_before")
+        == model_measurements.get("control_parameter_hash_after")
+        and model_measurements.get("parameter_hash_before")
+        == model_measurements.get("parameter_hash_after")
+    )
+    git = _git_identity(Path(__file__).resolve().parent)
+    identity = {
+        "git": git,
+        "recipe": recipe_identity,
+        "model_files": model_files,
+        "input_files": input_files,
+        "graph_cache_files": cache_files,
+        "graph_cache_manifest_matches": cache_manifest_matches,
+        "parser": {
+            "actual_sha256": parser_identity.get("sha256", {}),
+            "expected_sha256": EXPECTED_PARSER_SHA256,
+            "matches": parser_matches,
+        },
+        "tokenizer_identity": tokenizer_identity,
+        "control_parameter_hash_before": model_measurements.get("control_parameter_hash_before"),
+        "control_parameter_hash_after": model_measurements.get("control_parameter_hash_after"),
+        "treatment_parameter_hash_before": model_measurements.get("parameter_hash_before"),
+        "treatment_parameter_hash_after": model_measurements.get("parameter_hash_after"),
+        "parameter_hashes_match": parameter_hashes_match,
+        "recipe_identity_matches": recipe_identity["matches"],
+        "model_artifact_identity_matches": model_artifact_matches,
+        "input_identity_matches": input_identity_matches,
+        "graph_cache_identity_matches": graph_cache_identity_matches,
+        "parser_identity_matches": parser_matches,
+        "git_clean": git["clean"],
+    }
+    identity["all_matches"] = all(
+        (
+            identity["recipe_identity_matches"],
+            identity["model_artifact_identity_matches"],
+            identity["input_identity_matches"],
+            identity["graph_cache_identity_matches"],
+            identity["parser_identity_matches"],
+            identity["parameter_hashes_match"],
+            identity["git_clean"],
+        )
+    )
+    return identity
+
+
+def _build_audit_trainer(
+    model,
+    tokenizer,
+    device: torch.device,
+    lambda_domain_adv: float,
+    output_dir: Path,
+):
+    training_args = Seq2SeqTrainingArguments(
+        output_dir=str(output_dir),
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        use_cpu=device.type != "cuda",
+        fp16=False,
+        report_to=[],
+        remove_unused_columns=False,
+        predict_with_generate=False,
+    )
+    return WeightedSeq2SeqTrainer(
+        model=model,
+        args=training_args,
+        tokenizer=tokenizer,
+        data_collator=None,
+        lambda_domain_adv=lambda_domain_adv,
+        domain_adv_grl_lambda=1.0,
+    )
+
+
 def _run_model_audit(
     args,
     tokenizer,
@@ -392,6 +619,7 @@ def _run_model_audit(
     train_cache,
     dev_cache,
     target_cache,
+    cache_dir: Path,
     device: torch.device,
 ) -> tuple[dict, dict]:
     target_domain_rows = build_target_unlabeled_domain_rows(target_rows, use_task_prefix=False)
@@ -421,6 +649,7 @@ def _run_model_audit(
     treatment.to(device)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
+    control_parameter_hash_before = parameter_state_sha256(control)
     parameter_hash_before = parameter_state_sha256(treatment)
     control.eval()
     treatment.eval()
@@ -434,8 +663,6 @@ def _run_model_audit(
     source_batch = _move_batch(_collate_rows(source_dataset, treatment, tokenizer, args.batch_size), device)
     dev_batch = _move_batch(_collate_rows(dev_dataset, treatment, tokenizer, args.batch_size), device)
     mixed_batch = _move_batch(_collate_rows(mixed_dataset, treatment, tokenizer, len(mixed_rows)), device)
-    target_dataset = _build_dataset(target_sample, tokenizer, mixed_graph_cache, args.max_source_length, args.max_target_length)
-    target_batch = _move_batch(_collate_rows(target_dataset, treatment, tokenizer, args.batch_size), device)
 
     control_input = _model_inputs(source_batch, use_graph=False)
     treatment_input = _model_inputs(source_batch, use_graph=True)
@@ -452,16 +679,27 @@ def _run_model_audit(
     }
     losses = {
         "source_training_loss": None,
-        "source_dev_loss": treatment_output.loss,
+        "source_dev_loss": None,
         "target_dann_loss": None,
         "lambda_domain_adv": float(args.lambda_domain_adv),
     }
 
+    audit_output_dir = Path(args.output_dir)
+    training_trainer = _build_audit_trainer(
+        treatment,
+        tokenizer,
+        device,
+        float(args.lambda_domain_adv),
+        audit_output_dir,
+    )
     treatment.train()
     treatment.zero_grad(set_to_none=True)
     with _amp_context(device, args.fp16):
-        source_training_output = treatment(**_model_inputs(source_batch, use_graph=True), return_dict=True)
-    source_training_loss = source_training_output.loss
+        source_training_loss, _ = training_trainer.compute_loss(
+            treatment,
+            dict(source_batch),
+            return_outputs=True,
+        )
     source_training_loss.backward()
     callpoints["source_extractor_training"] = _finite(source_training_loss)
     losses["source_training_loss"] = float(source_training_loss.detach().float().cpu())
@@ -469,49 +707,75 @@ def _run_model_audit(
 
     treatment.eval()
     with torch.no_grad(), _amp_context(device, args.fp16):
-        dev_output = treatment(**_model_inputs(dev_batch, use_graph=True), return_dict=True)
-    callpoints["source_dev_evaluation"] = _finite(dev_output.loss)
-    losses["source_dev_loss"] = float(dev_output.loss.detach().float().cpu())
+        dev_prediction = training_trainer.prediction_step(
+            treatment,
+            dict(dev_batch),
+            prediction_loss_only=True,
+        )
+    dev_loss = dev_prediction[0]
+    callpoints["source_dev_evaluation"] = _finite(dev_loss)
+    losses["source_dev_loss"] = float(dev_loss.detach().float().cpu())
 
     treatment.train()
     treatment.zero_grad(set_to_none=True)
+    dann_batch = dict(mixed_batch)
+    for key in ("sample_weight", "domain_weight", "structure_weight"):
+        value = dann_batch.get(key)
+        if torch.is_tensor(value):
+            dann_batch[key] = torch.zeros_like(value)
+    dann_trainer = _build_audit_trainer(
+        treatment,
+        tokenizer,
+        device,
+        float(args.lambda_domain_adv),
+        audit_output_dir,
+    )
     with _amp_context(device, args.fp16):
-        mixed_output = treatment(**_model_inputs(mixed_batch, use_graph=True), return_dict=True)
-        target_domain_loss = compute_domain_adversarial_loss(
-            mixed_output.encoder_last_hidden_state,
-            mixed_batch.get("attention_mask"),
-            mixed_batch["domain_label"],
-            treatment.domain_adversarial_head,
-            grl_lambda=1.0,
+        mixed_dann_loss, _ = dann_trainer.compute_loss(
+            treatment,
+            dann_batch,
+            return_outputs=True,
         )
-        if target_domain_loss is None:
-            raise GraphCacheError("target-unlabeled DANN batch produced no valid domain labels")
-        weighted_domain_loss = float(args.lambda_domain_adv) * target_domain_loss
-    weighted_domain_loss.backward()
-    callpoints["target_unlabeled_dann"] = _finite(target_domain_loss) and _finite(weighted_domain_loss)
-    losses["target_dann_loss"] = float(target_domain_loss.detach().float().cpu())
+    domain_component = dann_trainer._component_sums.get("domain_adv_loss")
+    if domain_component is None:
+        raise GraphCacheError("target-unlabeled DANN batch produced no valid domain labels")
+    mixed_dann_loss.backward()
+    callpoints["target_unlabeled_dann"] = _finite(domain_component) and _finite(mixed_dann_loss)
+    losses["target_dann_loss"] = float(domain_component)
     dann_projection_grad = treatment.syntactic_graph_adapter.output_projection.weight.grad
     dann_gradient_norm = float(dann_projection_grad.detach().float().norm().cpu()) if dann_projection_grad is not None else 0.0
     treatment.zero_grad(set_to_none=True)
 
     treatment.eval()
-    generation_input = _model_inputs(target_batch, use_graph=True)
-    generation_kwargs = {key: value for key, value in generation_input.items() if key in GRAPH_KEYS}
-    with torch.no_grad(), _amp_context(device, args.fp16):
-        treatment.generate(
-            inputs=generation_input["input_ids"],
-            attention_mask=generation_input["attention_mask"],
+    try:
+        from t5_aste_pipeline import generate_texts
+
+        generated = generate_texts(
+            model_path=args.model_path,
+            inputs=[row["text"] for row in target_sample],
+            batch_size=args.batch_size,
             max_new_tokens=8,
             num_beams=1,
-            **generation_kwargs,
+            cuda=args.cuda,
+            use_syntactic_graph_adapter=True,
+            graph_cache_dir=cache_dir,
+            graph_rows=target_sample,
+            graph_parser_dir=args.parser_dir,
+            graph_split="target_unlabeled",
         )
-    callpoints["target_pseudo_inference"] = True
+        callpoints["target_pseudo_inference"] = len(generated) == len(target_sample)
+    except Exception:
+        callpoints["target_pseudo_inference"] = False
 
     treatment.train()
     treatment.zero_grad(set_to_none=True)
+    aste_trainer = _build_audit_trainer(treatment, tokenizer, device, 0.0, audit_output_dir)
     with _amp_context(device, args.fp16):
-        aste_output = treatment(**_model_inputs(source_batch, use_graph=True), return_dict=True)
-    aste_loss = aste_output.loss
+        aste_loss, _ = aste_trainer.compute_loss(
+            treatment,
+            dict(source_batch),
+            return_outputs=True,
+        )
     aste_loss.backward()
     aste_projection_grad = treatment.syntactic_graph_adapter.output_projection.weight.grad
     aste_gradient_norm = float(aste_projection_grad.detach().float().norm().cpu()) if aste_projection_grad is not None else 0.0
@@ -535,14 +799,22 @@ def _run_model_audit(
         "source_rows_in_dann_batch": len(source_sample),
         "target_rows_in_dann_batch": len(target_sample),
         "gradient_checkpointing_enabled": bool(getattr(treatment, "is_gradient_checkpointing", False)),
+        "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
+        "gpu_total_memory_bytes": int(torch.cuda.get_device_properties(device).total_memory) if device.type == "cuda" else 0,
+        "gpu_peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0,
+        "gpu_peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else 0,
     }
     parameter_hash_after = parameter_state_sha256(treatment)
-    del control, treatment
+    control.eval()
+    control_parameter_hash_after = parameter_state_sha256(control)
+    del control, treatment, training_trainer, dann_trainer, aste_trainer
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return callpoints, {
         "losses": losses,
         "measurements": measurements,
+        "control_parameter_hash_before": control_parameter_hash_before,
+        "control_parameter_hash_after": control_parameter_hash_after,
         "parameter_hash_before": parameter_hash_before,
         "parameter_hash_after": parameter_hash_after,
     }
@@ -587,6 +859,148 @@ def _write_markdown(path: Path, report: dict) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def assemble_audit_report(
+    args,
+    recipe: dict,
+    manifest: dict,
+    cache_measurements: dict,
+    parser_identity: dict,
+    callpoints: dict,
+    model_measurements: dict,
+    device: torch.device,
+    identity_measurements: dict,
+    metadata: dict | None = None,
+) -> dict:
+    """Assemble the report from completed measurements without touching the model."""
+    model_values = model_measurements["measurements"]
+    identity = identity_measurements or {}
+    inspect = cache_measurements["inspect"]
+    before_hash = model_measurements.get("parameter_hash_before")
+    after_hash = model_measurements.get("parameter_hash_after")
+    control_before_hash = model_measurements.get("control_parameter_hash_before")
+    control_after_hash = model_measurements.get("control_parameter_hash_after")
+    parameter_hashes_match = bool(identity.get("parameter_hashes_match", True))
+    if before_hash is not None and after_hash is not None:
+        parameter_hashes_match = parameter_hashes_match and before_hash == after_hash
+    if control_before_hash is not None and control_after_hash is not None:
+        parameter_hashes_match = parameter_hashes_match and control_before_hash == control_after_hash
+
+    measurements = {
+        "cache": cache_measurements,
+        "losses": model_measurements.get("losses", {}),
+        **model_values,
+        "optimizer_updates": 0,
+        "optimizer_steps": 0,
+        "scheduler_steps": 0,
+        "parameter_updates": 0,
+        "lambda_domain_adv": float(args.lambda_domain_adv),
+        "fp16_requested": bool(args.fp16),
+        "gradient_checkpointing_requested": bool(args.gradient_checkpointing),
+        "gradient_checkpointing_enabled": bool(model_measurements["measurements"]["gradient_checkpointing_enabled"]),
+        "device": str(device),
+        "gpu_name": model_values.get("gpu_name", "cpu" if device.type == "cpu" else "unknown"),
+        "gpu_total_memory_bytes": int(model_values.get("gpu_total_memory_bytes", 0)),
+        "gpu_peak_allocated_bytes": int(model_values.get("gpu_peak_allocated_bytes", 0)),
+        "gpu_peak_reserved_bytes": int(model_values.get("gpu_peak_reserved_bytes", 0)),
+        "parameter_hash_before": before_hash,
+        "parameter_hash_after": after_hash,
+        "control_parameter_hash_before": control_before_hash,
+        "control_parameter_hash_after": control_after_hash,
+        "artifact_identity": identity,
+        "formal_callpoint_paths": dict(FORMAL_CALLPOINT_PATHS),
+    }
+    max_diff = measurements["control_treatment_max_abs_logit_diff"]
+    repeat_diff = measurements["repeat_max_abs_logit_diff"]
+    parser_identity_matches = bool(
+        identity.get("parser_identity_matches", parser_identity.get("sha256") == EXPECTED_PARSER_SHA256)
+    )
+    input_identity_matches = bool(identity.get("input_identity_matches", True))
+    graph_cache_identity_matches = bool(identity.get("graph_cache_identity_matches", True))
+    model_artifact_identity_matches = bool(identity.get("model_artifact_identity_matches", True))
+    recipe_identity_matches = bool(identity.get("recipe_identity_matches", True))
+    git_clean = bool(identity.get("git_clean", True))
+    identity_all_matches = bool(identity.get("all_matches", True))
+    gate_values = {
+        "parser_identity": parser_identity_matches,
+        "parse_alignment": inspect["coverage_ok"] and input_identity_matches,
+        "edge_legality": inspect["edge_legality_ok"] and graph_cache_identity_matches,
+        "reverse_selfloop": inspect["reverse_selfloop_ok"] and graph_cache_identity_matches,
+        "cache_resume_determinism": cache_measurements["interruption_observed"]
+        and cache_measurements["byte_identical_repeat"]
+        and graph_cache_identity_matches,
+        "four_callpoints": all(callpoints.values()),
+        "control_equivalence": max_diff <= 1e-4 and model_artifact_identity_matches,
+        "loss_finiteness": all(
+            _finite(measurements.get(name))
+            for name in (
+                "control_loss",
+                "treatment_loss",
+                "repeat_loss",
+                "aste_gradient_norm",
+                "dann_gradient_norm",
+            )
+        ),
+        "repeat_determinism": repeat_diff == 0.0,
+        "aste_dann_gradient_paths": measurements["aste_gradient_norm"] > 0.0
+        and measurements["dann_gradient_norm"] > 0.0,
+        "fp16_entry": (
+            args.fp16
+            and args.gradient_checkpointing
+            and measurements["gradient_checkpointing_enabled"]
+            and device.type == "cuda"
+            and measurements["gpu_total_memory_bytes"] <= 8 * 1024**3
+        ),
+        "vram_8gb": measurements["gpu_peak_reserved_bytes"] <= VRAM_LIMIT_BYTES,
+        "zero_update": (
+            measurements["optimizer_updates"] == 0
+            and measurements["optimizer_steps"] == 0
+            and measurements["scheduler_steps"] == 0
+            and measurements["parameter_updates"] == 0
+            and parameter_hashes_match
+        ),
+        "boundary_no_leakage": (
+            manifest.get("target_test_access") is False
+            and recipe.get("data_boundary", {}).get("target_test_access") is False
+            and recipe.get("data_boundary", {}).get("generator") is False
+            and recipe.get("data_boundary", {}).get("augmentation") is False
+            and recipe.get("data_boundary", {}).get("nli") is False
+            and recipe.get("data_boundary", {}).get("final_aste") is False
+            and measurements["target_labels_are_all_ignore_index"]
+            and not inspect["forbidden_graph_fields"]
+            and input_identity_matches
+            and recipe_identity_matches
+        ),
+        "machine_readable_report": identity_all_matches and git_clean,
+    }
+    gate_details = {
+        "parser_identity": f"stanza={parser_identity.get('stanza_version')}; actual_vs_expected={parser_identity_matches}",
+        "parse_alignment": f"coverage={inspect['coverage_ok']}; input_sha256={input_identity_matches}",
+        "edge_legality": f"nodes={inspect['node_count']}; edges={inspect['edge_count']}; cache_sha256={graph_cache_identity_matches}",
+        "reverse_selfloop": f"reverse_and_selfloop={inspect['reverse_selfloop_ok']}; cache_sha256={graph_cache_identity_matches}",
+        "cache_resume_determinism": f"interrupted={cache_measurements['interruption_observed']}; byte_identical={cache_measurements['byte_identical_repeat']}",
+        "four_callpoints": json.dumps(callpoints, ensure_ascii=False, sort_keys=True),
+        "control_equivalence": f"max_abs_logit_diff={max_diff:.8g}; model_artifacts={model_artifact_identity_matches}",
+        "loss_finiteness": "all measured losses and gradient norms are finite",
+        "repeat_determinism": f"max_abs_logit_diff={repeat_diff:.8g}",
+        "aste_dann_gradient_paths": f"aste_norm={measurements['aste_gradient_norm']:.8g}; dann_norm={measurements['dann_gradient_norm']:.8g}",
+        "fp16_entry": "CUDA autocast=float16; RTX 3070 class memory check",
+        "vram_8gb": f"peak_reserved={measurements['gpu_peak_reserved_bytes']} bytes; limit={VRAM_LIMIT_BYTES} bytes",
+        "zero_update": f"optimizer_updates=0; scheduler_steps=0; parameter_hashes_match={parameter_hashes_match}",
+        "boundary_no_leakage": "target test, generator, augmentation, NLI and final ASTE are not invoked",
+        "machine_readable_report": f"identity_all_matches={identity_all_matches}; git_clean={git_clean}",
+    }
+    report_metadata = dict(metadata or {})
+    report_metadata.setdefault("target_test_access", False)
+    report_metadata["artifact_identity"] = identity
+    return build_entry_report(
+        gate_values,
+        measurements,
+        callpoints,
+        report_metadata,
+        gate_details=gate_details,
+    )
+
+
 def run_audit(args) -> dict:
     if float(args.lambda_domain_adv) != EXPECTED_LAMBDA_DOMAIN_ADV:
         raise ValueError("M1 audit requires lambda_domain_adv=0.03")
@@ -603,8 +1017,8 @@ def run_audit(args) -> dict:
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True)
-    tokenizer_identity = build_tokenizer_identity(args.model_path, tokenizer)
-    parser_identity = build_parser_identity(args.parser_dir)
+    tokenizer_identity = _build_tokenizer_identity_for_audit(args.model_path, tokenizer)
+    parser_identity = _build_parser_identity_for_audit(args.parser_dir)
     parser = build_stanza_pipeline(args.parser_dir, use_gpu=True)
     cache_dir, manifest, cache_measurements = _build_or_resume_caches(
         source_train_rows,
@@ -649,96 +1063,30 @@ def run_audit(args) -> dict:
         source_cache,
         dev_cache,
         target_cache,
+        cache_dir,
         device,
     )
-    measurements = {
-        "cache": cache_measurements,
-        **model_measurements["measurements"],
-        "optimizer_updates": 0,
-        "optimizer_steps": 0,
-        "scheduler_steps": 0,
-        "parameter_updates": 0,
-        "lambda_domain_adv": float(args.lambda_domain_adv),
-        "fp16_requested": bool(args.fp16),
-        "gradient_checkpointing_requested": bool(args.gradient_checkpointing),
-        "gradient_checkpointing_enabled": bool(measurements["gradient_checkpointing_enabled"]),
-        "device": str(device),
-        "gpu_name": torch.cuda.get_device_name(device),
-        "gpu_total_memory_bytes": int(torch.cuda.get_device_properties(device).total_memory),
-        "gpu_peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
-        "gpu_peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
-    }
-    inspect = cache_measurements["inspect"]
-    max_diff = measurements["control_treatment_max_abs_logit_diff"]
-    repeat_diff = measurements["repeat_max_abs_logit_diff"]
-    gate_values = {
-        "parser_identity": parser_identity.get("sha256") == EXPECTED_PARSER_SHA256,
-        "parse_alignment": inspect["coverage_ok"],
-        "edge_legality": inspect["edge_legality_ok"],
-        "reverse_selfloop": inspect["reverse_selfloop_ok"],
-        "cache_resume_determinism": cache_measurements["interruption_observed"] and cache_measurements["byte_identical_repeat"],
-        "four_callpoints": all(callpoints.values()),
-        "control_equivalence": max_diff <= 1e-4,
-        "loss_finiteness": all(
-            _finite(measurements.get(name))
-            for name in ("control_loss", "treatment_loss", "repeat_loss", "aste_gradient_norm", "dann_gradient_norm")
-        ),
-        "repeat_determinism": repeat_diff == 0.0,
-        "aste_dann_gradient_paths": measurements["aste_gradient_norm"] > 0.0 and measurements["dann_gradient_norm"] > 0.0,
-        "fp16_entry": (
-            args.fp16
-            and args.gradient_checkpointing
-            and measurements["gradient_checkpointing_enabled"]
-            and device.type == "cuda"
-            and measurements["gpu_total_memory_bytes"] <= 8 * 1024**3
-        ),
-        "vram_8gb": measurements["gpu_peak_reserved_bytes"] <= VRAM_LIMIT_BYTES,
-        "zero_update": (
-            measurements["optimizer_updates"] == 0
-            and measurements["optimizer_steps"] == 0
-            and measurements["scheduler_steps"] == 0
-            and measurements["parameter_updates"] == 0
-        ),
-        "boundary_no_leakage": (
-            manifest.get("target_test_access") is False
-            and recipe.get("data_boundary", {}).get("target_test_access") is False
-            and recipe.get("data_boundary", {}).get("generator") is False
-            and recipe.get("data_boundary", {}).get("augmentation") is False
-            and recipe.get("data_boundary", {}).get("nli") is False
-            and recipe.get("data_boundary", {}).get("final_aste") is False
-            and measurements["target_labels_are_all_ignore_index"]
-            and not inspect["forbidden_graph_fields"]
-        ),
-        "machine_readable_report": True,
-    }
-    gate_details = {
-        "parser_identity": f"stanza={parser_identity.get('stanza_version')}; six_sha256=PASS",
-        "parse_alignment": f"coverage={inspect['coverage_ok']}",
-        "edge_legality": f"nodes={inspect['node_count']}; edges={inspect['edge_count']}",
-        "reverse_selfloop": f"reverse_and_selfloop={inspect['reverse_selfloop_ok']}",
-        "cache_resume_determinism": f"interrupted={cache_measurements['interruption_observed']}; byte_identical={cache_measurements['byte_identical_repeat']}",
-        "four_callpoints": json.dumps(callpoints, ensure_ascii=False, sort_keys=True),
-        "control_equivalence": f"max_abs_logit_diff={max_diff:.8g}",
-        "loss_finiteness": "all measured losses and gradient norms are finite",
-        "repeat_determinism": f"max_abs_logit_diff={repeat_diff:.8g}",
-        "aste_dann_gradient_paths": f"aste_norm={measurements['aste_gradient_norm']:.8g}; dann_norm={measurements['dann_gradient_norm']:.8g}",
-        "fp16_entry": "CUDA autocast=float16; RTX 3070 class memory check",
-        "vram_8gb": f"peak_reserved={measurements['gpu_peak_reserved_bytes']} bytes; limit={VRAM_LIMIT_BYTES} bytes",
-        "zero_update": "optimizer_updates=0; scheduler_steps=0; parameter_updates=0",
-        "boundary_no_leakage": "target test, generator, augmentation, NLI and final ASTE are not invoked",
-        "machine_readable_report": "JSON report schema emitted",
-    }
-    before_hash = model_measurements.get("parameter_hash_before")
-    after_hash = model_measurements.get("parameter_hash_after")
-    if before_hash is not None:
-        measurements["parameter_hash_before"] = before_hash
-        measurements["parameter_hash_after"] = after_hash
-        gate_values["zero_update"] = gate_values["zero_update"] and before_hash == after_hash
-    return build_entry_report(
-        gate_values,
-        measurements,
-        callpoints,
-        {
+    identity_measurements = _collect_identity_measurements(
+        args=args,
+        recipe=recipe,
+        recipe_path=Path(args.recipe_path),
+        tokenizer_identity=tokenizer_identity,
+        parser_identity=parser_identity,
+        cache_dir=cache_dir,
+        cache_measurements=cache_measurements,
+        model_measurements=model_measurements,
+    )
+    return assemble_audit_report(
+        args=args,
+        recipe=recipe,
+        manifest=manifest,
+        cache_measurements=cache_measurements,
+        parser_identity=parser_identity,
+        callpoints=callpoints,
+        model_measurements=model_measurements,
+        device=device,
+        identity_measurements=identity_measurements,
+        metadata={
             "source_dataset": args.source_dataset,
             "target_dataset": args.target_dataset,
             "target_test_access": False,
@@ -750,7 +1098,6 @@ def run_audit(args) -> dict:
             "recipe_path": str(Path(args.recipe_path)),
             "cache_dir": str(cache_dir),
         },
-        gate_details=gate_details,
     )
 
 

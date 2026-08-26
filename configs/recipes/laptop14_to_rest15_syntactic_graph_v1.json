@@ -34,6 +34,10 @@
     "t5_tokenizer": {
       "path": "J:\\nlp\\models\\t5-base-py\\spiece.model",
       "sha256": "D60ACB128CF7B7F2536E8F38A5B18A05535C9E14C7A355904270E15B0945EA86"
+    },
+    "t5_tokenizer_json": {
+      "path": "J:\\nlp\\models\\t5-base-py\\tokenizer.json",
+      "sha256": "D2ACDE0D8D71DD30A711834B07781B9C89FEAAC33FD332F60507699282740066"
     }
   },
   "training": {

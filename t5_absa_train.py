@@ -1351,6 +1351,15 @@ def add_task_special_tokens(tokenizer, model, rows: list[dict]) -> None:
         print(f"initialized {token} from {init_word}")
 
 
+def enforce_graph_training_boundary(use_syntactic_graph_adapter: bool) -> None:
+    """Keep the graph training entry closed until the approved audit passes."""
+    if use_syntactic_graph_adapter:
+        raise RuntimeError(
+            "syntactic graph training is not approved; run "
+            "m1_syntactic_graph_entry_audit.py for zero-update audit only"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", default=r"J:\nlp\models\t5-base-py")
@@ -1417,6 +1426,8 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    enforce_graph_training_boundary(args.use_syntactic_graph_adapter)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
     reproducibility_mode = "deterministic" if args.deterministic else "legacy"
