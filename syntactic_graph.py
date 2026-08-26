@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Iterable
 
 
-GRAPH_SCHEMA_VERSION = 1
+GRAPH_SCHEMA_VERSION = 2
+ALIGNMENT_POLICY_VERSION = "overlap-contiguous-sharing-v2"
 DEFAULT_PARSER_DIR = Path(r"J:\nlp\models\stanza_resources")
 PARSER_PROCESSORS = "tokenize,mwt,pos,lemma,depparse"
 PARSER_PACKAGES = {
@@ -175,28 +176,68 @@ def align_parser_words_to_subwords(
     offset_mapping: list[tuple[int, int]],
 ) -> list[list[int]]:
     graph_start = _find_graph_text_start(input_text, graph_text)
+    token_spans: dict[int, tuple[int, int]] = {}
+    for token_index, (token_start, token_end) in enumerate(offset_mapping):
+        relative_start = int(token_start) - graph_start
+        relative_end = int(token_end) - graph_start
+        if relative_end > relative_start:
+            token_spans[token_index] = (relative_start, relative_end)
+
     aligned: list[list[int]] = []
-    used_tokens: set[int] = set()
     for word in words:
         start = int(word["start"])
         end = int(word["end"])
-        token_indices = []
-        for token_index, (token_start, token_end) in enumerate(offset_mapping):
-            token_start = int(token_start) - graph_start
-            token_end = int(token_end) - graph_start
-            if token_end <= token_start:
-                continue
-            if token_start >= start and token_end <= end:
-                token_indices.append(token_index)
+        token_indices = [
+            token_index
+            for token_index, (token_start, token_end) in token_spans.items()
+            if token_start < end and token_end > start
+        ]
         if not token_indices:
             raise GraphCacheError(
                 f"parser word cannot be aligned to subwords: index={word['index']} text={word['text']!r}"
             )
-        overlap = used_tokens.intersection(token_indices)
-        if overlap:
-            raise GraphCacheError(f"subword token is assigned to multiple parser words: {sorted(overlap)}")
-        used_tokens.update(token_indices)
+        covered_until = start
+        for token_index in token_indices:
+            token_start, token_end = token_spans[token_index]
+            clipped_start = max(start, token_start)
+            clipped_end = min(end, token_end)
+            if clipped_start > covered_until:
+                raise GraphCacheError(
+                    f"parser word has an uncovered character gap: index={word['index']} text={word['text']!r}"
+                )
+            covered_until = max(covered_until, clipped_end)
+        if covered_until < end:
+            raise GraphCacheError(
+                f"parser word is only partially aligned: index={word['index']} text={word['text']!r}"
+            )
         aligned.append(token_indices)
+
+    token_to_word_positions: dict[int, list[int]] = {}
+    for word_position, token_indices in enumerate(aligned):
+        for token_index in token_indices:
+            token_to_word_positions.setdefault(token_index, []).append(word_position)
+    for token_index, word_positions in token_to_word_positions.items():
+        if len(word_positions) <= 1:
+            continue
+        first = word_positions[0]
+        last = word_positions[-1]
+        shared_words = words[first : last + 1]
+        token_start, token_end = token_spans[token_index]
+        positions_are_contiguous = word_positions == list(range(first, last + 1))
+        spans_are_contiguous = all(
+            int(left["end"]) == int(right["start"])
+            for left, right in zip(shared_words, shared_words[1:])
+        )
+        same_sentence = len({int(word.get("sentence_index", 0)) for word in shared_words}) == 1
+        exact_union = (
+            int(shared_words[0]["start"]) == token_start
+            and int(shared_words[-1]["end"]) == token_end
+        )
+        if not (positions_are_contiguous and spans_are_contiguous and same_sentence and exact_union):
+            raise GraphCacheError(
+                "shared subword spans non-contiguous parser words: "
+                f"token_index={token_index} word_indices={[word['index'] for word in shared_words]}"
+            )
     return aligned
 
 
@@ -252,6 +293,11 @@ def build_graph_record(
         raise GraphCacheError("tokenizer did not return offset_mapping")
     words = _parser_words_from_doc(parser(text))
     word_to_subword = align_parser_words_to_subwords(words, input_text, text, offsets)
+    subword_assignment_counts: dict[int, int] = {}
+    for token_indices in word_to_subword:
+        for token_index in token_indices:
+            subword_assignment_counts[token_index] = subword_assignment_counts.get(token_index, 0) + 1
+    shared_subword_count = sum(count > 1 for count in subword_assignment_counts.values())
     edges = build_typed_edges(words, relation_vocab=relation_vocab)
     return {
         "row_id": str(row_id),
@@ -264,10 +310,16 @@ def build_graph_record(
         "edges": edges,
         "parser_identity": parser_identity,
         "tokenizer_identity": tokenizer_identity,
+        "alignment_policy_version": ALIGNMENT_POLICY_VERSION,
         "alignment": {
             "valid_word_count": len(words),
             "unaligned_word_count": 0,
             "mapped_subword_count": sum(len(indices) for indices in word_to_subword),
+            "unique_mapped_subword_count": len(subword_assignment_counts),
+            "shared_subword_count": shared_subword_count,
+            "shared_subword_assignments": sum(
+                count - 1 for count in subword_assignment_counts.values() if count > 1
+            ),
         },
     }
 
@@ -417,6 +469,8 @@ def load_graph_cache_directory(
         raise GraphCacheError(f"unreadable graph cache metadata: {root}") from exc
     if manifest.get("schema_version") != GRAPH_SCHEMA_VERSION:
         raise GraphCacheError("graph cache schema version mismatch")
+    if manifest.get("alignment_policy_version") != ALIGNMENT_POLICY_VERSION:
+        raise GraphCacheError("graph cache alignment policy version mismatch")
     if manifest.get("target_test_access") is not False:
         raise GraphCacheError("graph cache manifest must explicitly forbid target test access")
     if manifest.get("relation_vocab_sha256") != sha256_file(vocab_path):
@@ -439,6 +493,8 @@ def load_graph_cache_directory(
             raise GraphCacheError(f"tokenizer identity mismatch: split={split} row_id={record['row_id']}")
         if parser_identity is not None and record.get("parser_identity") != parser_identity:
             raise GraphCacheError(f"parser identity mismatch: split={split} row_id={record['row_id']}")
+        if record.get("alignment_policy_version") != ALIGNMENT_POLICY_VERSION:
+            raise GraphCacheError(f"alignment policy mismatch: split={split} row_id={record['row_id']}")
         if record.get("normalized_text_sha256") != normalized_text_sha256(
             next(row["text"] for row in expected_rows if str(row.get("id")) == str(record["row_id"]))
         ):
@@ -560,6 +616,7 @@ def _load_resumable_records(
     input_identity = _split_input_identity(rows, use_task_prefix)
     state_identity = {
         "schema_version": GRAPH_SCHEMA_VERSION,
+        "alignment_policy_version": ALIGNMENT_POLICY_VERSION,
         "split": split,
         "row_count": len(rows),
         "input_sha256": input_identity,
@@ -701,6 +758,7 @@ def build_graph_cache_records(
     stats = _graph_cache_stats(records_by_split)
     manifest = {
         "schema_version": GRAPH_SCHEMA_VERSION,
+        "alignment_policy_version": ALIGNMENT_POLICY_VERSION,
         "splits": {split: len(rows) for split, rows in split_rows.items()},
         "input_sha256": {split: _split_input_identity(rows, use_task_prefix) for split, rows in split_rows.items()},
         "parser_identity": parser_identity,

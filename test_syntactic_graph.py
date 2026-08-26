@@ -2,7 +2,9 @@ import json
 from pathlib import Path
 
 from syntactic_graph import (
+    ALIGNMENT_POLICY_VERSION,
     GraphCacheError,
+    align_parser_words_to_subwords,
     build_graph_cache_records,
     build_graph_record,
     build_typed_edges,
@@ -99,6 +101,41 @@ def test_alignment_uses_offsets_and_supports_repeated_words_and_subwords():
     assert record["alignment"]["unaligned_word_count"] == 0
 
 
+def test_alignment_allows_one_subword_to_cover_adjacent_parser_fragments():
+    words = [
+        {"index": 0, "sentence_index": 0, "text": "i", "start": 19, "end": 20},
+        {"index": 1, "sentence_index": 0, "text": "Phone", "start": 20, "end": 25},
+    ]
+
+    aligned = align_parser_words_to_subwords(
+        words,
+        input_text="Pairing it with an iPhone",
+        graph_text="Pairing it with an iPhone",
+        offset_mapping=[(19, 25), (0, 0)],
+    )
+
+    assert aligned == [[0], [0]]
+
+
+def test_alignment_rejects_shared_subword_across_a_character_gap():
+    words = [
+        {"index": 0, "sentence_index": 0, "text": "a", "start": 0, "end": 1},
+        {"index": 1, "sentence_index": 0, "text": "b", "start": 2, "end": 3},
+    ]
+
+    try:
+        align_parser_words_to_subwords(
+            words,
+            input_text="a b",
+            graph_text="a b",
+            offset_mapping=[(0, 3), (0, 0)],
+        )
+    except GraphCacheError as exc:
+        assert "non-contiguous parser words" in str(exc)
+    else:
+        raise AssertionError("a shared subword must not bridge a character gap")
+
+
 def test_cache_row_serialization_is_canonical_and_rejects_identity_mismatch(tmp_path):
     row = {"row_id": "1", "text": "A sentence", "normalized_text_sha256": "abc", "edges": []}
     first = canonical_row_json(row)
@@ -173,3 +210,46 @@ def test_graph_cache_resume_is_rowwise_and_byte_identical(tmp_path):
         parser_identity=parser_identity,
     )
     assert loaded.relation_vocab_size > 0
+
+
+def test_graph_cache_resume_rejects_an_older_alignment_policy(tmp_path):
+    rows = {
+        "source_train": [{"id": "s1", "text": "staff"}],
+        "source_dev": [{"id": "d1", "text": "staff"}],
+        "target_unlabeled": [{"id": "t1", "text": "staff"}],
+    }
+    parser = FakeParser(FakeDoc([FakeSentence([FakeWord("staff", 0, 5, "NOUN", 0, "root")])]))
+    output_dir = Path(tmp_path) / "resume-policy"
+    try:
+        build_graph_cache_records(
+            rows,
+            output_dir,
+            FakeTokenizer(),
+            parser,
+            {"class": "fake", "files_sha256": {}},
+            {"name": "fake"},
+            use_task_prefix=False,
+            stop_after_rows=1,
+        )
+    except GraphCacheError:
+        pass
+    progress_path = output_dir / "source_train.progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert progress["alignment_policy_version"] == ALIGNMENT_POLICY_VERSION
+    progress["alignment_policy_version"] = "legacy-containment-v1"
+    progress_path.write_text(json.dumps(progress), encoding="utf-8")
+
+    try:
+        build_graph_cache_records(
+            rows,
+            output_dir,
+            FakeTokenizer(),
+            parser,
+            {"class": "fake", "files_sha256": {}},
+            {"name": "fake"},
+            use_task_prefix=False,
+        )
+    except GraphCacheError as exc:
+        assert "alignment_policy_version" in str(exc)
+    else:
+        raise AssertionError("a cache from another alignment policy must not resume")
