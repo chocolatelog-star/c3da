@@ -1,10 +1,20 @@
 # CD-C3DA 下一阶段改进计划
 
-> 更新时间：2026-08-25 20:28（北京时间）
+> 更新时间：2026-08-26 21:53（北京时间）
 > 终极目标：六个跨域方向分别超过 BGCA（双向生成跨域方法）。
 > 当前正式研究基线：`laptop14 -> rest15` raw P/R/F1 = 56.98/51.34/54.01，fixed F1 = 55.53。
 > 当前保护基线：`rest16 -> laptop14` raw F1 = 48.93，fixed F1 = 50.21；不在保护现场继续试验。
 > 当前执行位置：固定`epsilon=0.01`、0.5/0.5损失的生成器FGSM（快速梯度符号法）已经完成10/10完整运行，但raw/fixed F1为53.76/54.65，multi F1/召回和负面F1均明显退化，输出`NO_FGSM_GENERATOR_ROUTE`。正式最佳仍为54.01/55.53；FGSM实现与零更新审计只作负结果基础设施保留，不再搜索参数或补跑GPU（图形处理器）对照。当前没有新的训练变量获准。
+
+## 2026-08-26 21:53：M1句法图伪标签接口工程修复完成，等待验收
+
+用户已批准新的 M1 结构变量进入 implementation entry + zero-update audit（实现入口与零更新审计）：外部 Stanza English EWT（Stanza 英语 EWT）提供固定拓扑，T5 Encoder（T5 编码器）提供唯一节点语义，1 层 4 头关系图注意力通过 gated residual fusion（门控残差融合）回接抽取器；变量范围严格限制在 source extractor（源域抽取器）到 target pseudo label（目标伪标签）接口，正式训练仍未批准。
+
+实现入口和工程修复已完成：新增固定 parser（解析器）身份与 SHA256（哈希）硬校验、确定性字符偏移对齐、三类分域缓存、关系词表、RGAT（关系图注意力）适配器、T5 训练/推理接口、目标无标签 DANN 域损失路径和专用零更新审计脚本。目标无标签行只计算领域损失，ASTE 标签全为 `-100`，DANN 系数固定 `0.03`；Control（控制组）默认保持原路径。生成器、增强、NLI/exact（自然语言推断/严格匹配）、最终 ASTE（方面级情感三元组抽取）和目标测试未接入句法图。
+
+固定 EWT 资源的依赖、CUDA、单句依存解析和六个文件 SHA256（哈希）均已由用户 CMD 验证并记录，包映射为 `tokenize=ewt`、`mwt=ewt`、`pos=ewt_charlm`、`lemma=combined_nocharlm`、`depparse=ewt_charlm`。逐行可恢复缓存、四个真实调用点、15 项门控、参数哈希和目标测试隔离均已写入专用审计入口；M1 图/DANN/边界/恢复测试与旧回归直接调用 122 项通过，`git diff --check` 通过。尚未启动 GPU zero-update（零更新）审计。
+
+当前状态为 `RUNNING`：工程修复已完成，图开关未带 `--syntactic_graph_entry_audit_only` 时会拒绝进入训练，普通无图流程保持旧路径；未启动正式训练、GPU zero-update（零更新）审计、optimizer step（优化器更新）、新伪标签、下游阶段或目标测试金标读取。下一步先由 Codex Sol 只读验收，通过后等待用户明确“你来跑”再运行审计，正式训练仍需单独批准。
 
 ## 1. 当前项目情况
 
