@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 from pathlib import Path
+
+import torch
+from torch.utils.data import Dataset
+from transformers import T5Config, T5ForConditionalGeneration, Seq2SeqTrainingArguments
 
 from m1_syntactic_rgat_pseudo_quick_ablation import (
     PHASE_A_STOP_CODE,
@@ -13,8 +18,12 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     decide_phase_a,
     evaluate_phase_a_gates,
     load_or_initialize_stage_status,
+    build_stage_identity,
+    validate_stage_identity,
+    validate_stage_status_shape,
     validate_input_split,
 )
+from t5_absa_train import PairedDomainBatchSampler, WeightedSeq2SeqTrainer
 
 
 def _metrics():
@@ -119,9 +128,12 @@ def test_resume_identity_and_phase_b_boundary():
         status_path = Path(directory) / "stage_status.json"
         state = load_or_initialize_stage_status(status_path, identity, resume=False)
         assert state["completed_stages"] == []
-        status_path.write_text(json.dumps({"identity": identity, "completed_stages": ["control"]}), encoding="utf-8")
+        status_path.write_text(
+            json.dumps({"schema_version": 2, "identity": identity, "completed_stages": [], "stages": {}}),
+            encoding="utf-8",
+        )
         resumed = load_or_initialize_stage_status(status_path, identity, resume=True)
-        assert resumed["completed_stages"] == ["control"]
+        assert resumed["completed_stages"] == []
         assert load_or_initialize_stage_status(status_path, {"code": "changed", "recipe": "def"}, resume=True) is None
 
 
@@ -132,3 +144,225 @@ def test_target_test_is_rejected_before_execution():
         assert "target_test" in str(exc)
     else:
         raise AssertionError("target_test was not rejected")
+
+
+def test_dann_batch_sampler_emits_exact_source_and_target_pairs_with_shared_order():
+    control = PairedDomainBatchSampler(3, 3, source_batch_size=1, target_batch_size=1, seed=1000)
+    treatment = PairedDomainBatchSampler(3, 3, source_batch_size=1, target_batch_size=1, seed=1000)
+
+    control_batches = list(control)
+    treatment_batches = list(treatment)
+
+    assert control_batches == treatment_batches
+    assert all(len(batch) == 2 for batch in control_batches)
+    assert all(batch[0] < 3 and batch[1] >= 3 for batch in control_batches)
+    assert control.epoch_reports[0]["source_rows"] == 3
+    assert control.epoch_reports[0]["target_rows"] == 3
+    assert control.epoch_reports[0]["logical_batches"] == 3
+    assert control.epoch_reports[0]["incomplete_batches"] == 0
+
+
+def test_dann_batch_sampler_rejects_single_domain_batches():
+    try:
+        PairedDomainBatchSampler(1, 0, source_batch_size=1, target_batch_size=1, seed=1000)
+    except ValueError as exc:
+        assert "both source and target" in str(exc)
+    else:
+        raise AssertionError("a DANN sampler without a target domain must fail")
+
+
+def test_trainer_dataloader_preserves_the_complete_paired_domain_batch():
+    class PairDataset(Dataset):
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            return {
+                "input_ids": [index + 1, 2],
+                "labels": [1, 2],
+                "sample_weight": 1.0 if index == 0 else 0.0,
+                "domain_weight": 1.0 if index == 0 else 0.0,
+                "domain_label": 0 if index == 0 else 1,
+            }
+
+    class PairCollator:
+        def __call__(self, features):
+            return {
+                key: torch.tensor([feature[key] for feature in features])
+                for key in ("input_ids", "labels", "sample_weight", "domain_weight", "domain_label")
+            }
+
+    with tempfile.TemporaryDirectory() as directory:
+        model = T5ForConditionalGeneration(
+            T5Config(
+                vocab_size=8,
+                d_model=8,
+                d_kv=4,
+                d_ff=16,
+                num_layers=1,
+                num_decoder_layers=1,
+                num_heads=2,
+                dropout_rate=0.0,
+                pad_token_id=0,
+                eos_token_id=1,
+                decoder_start_token_id=0,
+            )
+        )
+        args = Seq2SeqTrainingArguments(
+            output_dir=directory,
+            per_device_train_batch_size=1,
+            report_to=[],
+            remove_unused_columns=True,
+        )
+        trainer = WeightedSeq2SeqTrainer(
+            model=model,
+            args=args,
+            train_dataset=PairDataset(),
+            data_collator=PairCollator(),
+            dann_batch_sampler=PairedDomainBatchSampler(
+                1,
+                1,
+                source_batch_size=1,
+                target_batch_size=1,
+                seed=1000,
+            ),
+        )
+        batch = next(iter(trainer.get_train_dataloader()))
+
+    assert tuple(batch["input_ids"].shape) == (2, 2)
+    assert batch["domain_label"].tolist() == [0, 1]
+    assert batch["domain_weight"].tolist() == [1.0, 0.0]
+
+
+def test_stage_identity_records_and_validates_artifact_hashes():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        artifact = root / "model.bin"
+        artifact.write_bytes(b"stable")
+        input_file = root / "source_train.jsonl"
+        input_file.write_text("source", encoding="utf-8")
+        recipe_file = root / "recipe.json"
+        recipe_file.write_text("recipe", encoding="utf-8")
+        record = build_stage_identity(
+            "treatment_training",
+            ["python", "train", "--seed", "1000"],
+            {"source_train": input_file},
+            hashlib.sha256(b"recipe").hexdigest(),
+            artifact,
+            artifact,
+            "commit-a",
+            recipe_path=recipe_file,
+        )
+
+        assert validate_stage_identity(record) is True
+        artifact.write_bytes(b"changed")
+        try:
+            validate_stage_identity(record)
+        except RuntimeError as exc:
+            assert "treatment_training" in str(exc)
+        else:
+            raise AssertionError("modified treatment artifact must hard-fail resume")
+
+
+def test_external_control_stage_identity_uses_resolved_model_path():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        external_model = root / "external-control" / "best"
+        external_model.mkdir(parents=True)
+        (external_model / "config.json").write_text("{}", encoding="utf-8")
+        input_file = root / "source_train.jsonl"
+        input_file.write_text("source", encoding="utf-8")
+        recipe_file = root / "recipe.json"
+        recipe_file.write_text("recipe", encoding="utf-8")
+        record = build_stage_identity(
+            "control_training",
+            ["reuse_external_control", str(external_model)],
+            {"source_train": input_file},
+            hashlib.sha256(b"recipe").hexdigest(),
+            external_model,
+            external_model,
+            "commit-a",
+            recipe_path=recipe_file,
+        )
+        assert record["resolved_model_path"] == str(external_model.resolve())
+        assert validate_stage_identity(record) is True
+        (external_model / "config.json").write_text("{\"changed\":true}", encoding="utf-8")
+        try:
+            validate_stage_identity(record)
+        except RuntimeError as exc:
+            assert "model_artifact_sha256" in str(exc)
+        else:
+            raise AssertionError("changed external Control model must hard-fail resume")
+
+
+def test_resume_hard_fails_when_prediction_or_pseudo_artifact_changes():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        recipe_file = root / "recipe.json"
+        recipe_file.write_text("recipe", encoding="utf-8")
+        input_file = root / "source_dev.jsonl"
+        input_file.write_text("source-dev", encoding="utf-8")
+        model_dir = root / "model" / "best"
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}", encoding="utf-8")
+        for stage in ("control_source_dev_evaluation", "treatment_source_dev_evaluation", "control_target_pseudo_inference", "treatment_target_pseudo_inference"):
+            artifact = root / f"{stage}.jsonl"
+            artifact.write_text(stage, encoding="utf-8")
+            record = build_stage_identity(
+                stage,
+                ["python", stage],
+                {"source": input_file},
+                hashlib.sha256(b"recipe").hexdigest(),
+                artifact,
+                model_dir,
+                "commit-a",
+                recipe_path=recipe_file,
+            )
+            artifact.write_text(stage + "-changed", encoding="utf-8")
+            try:
+                validate_stage_identity(record)
+            except RuntimeError as exc:
+                assert stage in str(exc)
+            else:
+                raise AssertionError(f"modified {stage} artifact must hard-fail resume")
+
+
+def test_legacy_stage_status_without_per_stage_identity_cannot_resume():
+    identity = {"code": "abc", "recipe": "def"}
+    with tempfile.TemporaryDirectory() as directory:
+        status_path = Path(directory) / "stage_status.json"
+        status_path.write_text(
+            json.dumps({"schema_version": 1, "identity": identity, "completed_stages": ["treatment_training"]}),
+            encoding="utf-8",
+        )
+        try:
+            load_or_initialize_stage_status(status_path, identity, resume=True)
+        except RuntimeError as exc:
+            assert "per-stage identity" in str(exc)
+        else:
+            raise AssertionError("legacy stage status must not be resumed")
+
+
+def test_stage_status_unknown_or_malformed_completed_stage_hard_fails():
+    stages = ("control_training", "treatment_training")
+    unknown_state = {
+        "completed_stages": ["unknown_stage"],
+        "stages": {},
+    }
+    try:
+        validate_stage_status_shape(unknown_state, stages)
+    except RuntimeError as exc:
+        assert "unknown completed stages" in str(exc)
+    else:
+        raise AssertionError("unknown completed stage must hard-fail")
+
+    malformed_state = {
+        "completed_stages": ["control_training"],
+        "stages": {"control_training": {"stage": "treatment_training"}},
+    }
+    try:
+        validate_stage_status_shape(malformed_state, stages)
+    except RuntimeError as exc:
+        assert "wrong stage name" in str(exc)
+    else:
+        raise AssertionError("malformed completed stage must hard-fail")

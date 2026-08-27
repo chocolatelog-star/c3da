@@ -1,6 +1,6 @@
 # 当前任务
 
-> 更新时间：2026-08-27 18:02（北京时间）
+> 更新时间：2026-08-27 19:30（北京时间）
 
 - 任务编号：M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1
 - 任务类型：QUICK ABLATION（快速消融）
@@ -30,12 +30,13 @@
 
 - 冻结 T5-base、seed=1000、optimizer（优化器）、LR（学习率）、epoch（轮数）、batch（批大小）、checkpoint selection（检查点选择）、pseudo decoding/filtering（伪标签解码/过滤）、pseudo weight=0.75、DANN=0.03、generator/augmentation 配方、k=1 和 final ASTE 架构；不做参数搜索。
 - Phase A 输出 `phase_a_summary.json`、`phase_a_result_CN.md`、`stage_status.json`、`control_identity_audit.json`、配置快照、Git 身份、父运行身份和文件哈希，并支持 `--resume` 与长阶段进度条。
-- 本轮只运行必要 CPU（中央处理器）测试和静态检查，不启动 GPU（图形处理器）、正式训练、正式伪标签实验或目标测试；正式实验命令由用户运行。
+- 本轮仅进行 DANN（领域对抗）成对批次和阶段身份恢复代码修复，运行 CPU（中央处理器）测试与静态检查；不启动 GPU（图形处理器）实验、正式训练、正式伪标签或目标测试。Phase A 的 Control/Treatment（对照组/实验组）抽取器训练、源域开发评估和目标无标签伪推理只允许由专用入口在用户运行实验时执行。
 
 ## 当前实现完成状态
 
 - Phase A 专用入口、固定配方、Control 身份审计、A1-A4 门控、断点恢复和硬停止已实现；实际 Phase A 运行尚未启动。
-- RED（失败先行）证据：入口测试在实现前因模块不存在而失败；GREEN（修复后）证据：新增 Phase A 测试 6 项通过，全部 M1 相关 CPU 测试共 85 项通过，AST（抽象语法树）检查和 `git diff --check`（差异格式检查）通过。
+- 本轮复审修复已补齐 Phase A 成对 DANN（领域对抗）批次：每个逻辑批次严格为 source=1/target=1，目标行标签为 `-100`、生成权重为 0，并记录逐 epoch（轮次）组成；同时为六个训练/评估/伪推理阶段写入可重算的命令、输入、配方、模型/输出、解析模型路径和 producer commit（产物提交）身份，外部 Control 路径与模型树哈希也纳入恢复校验。
+- RED（失败先行）证据：新增阶段身份测试在实现前因 API（接口）不存在而失败；GREEN（修复后）证据：本轮新增 Phase A/DANN/resume 测试 9 项通过，全部 M1 相关 CPU 测试共 94 项通过，AST（抽象语法树）检查和 `git diff --check`（差异格式检查）通过。
 - 当前仍未运行 GPU（图形处理器）、正式训练、正式伪标签实验或目标测试；Phase B 仍为 `NOT APPROVED`，M1 不得提前标记为最终通过，正式实验索引暂不更新。
 
 ## 前置核验状态
@@ -44,12 +45,13 @@
 - 用户 CMD（命令提示符）验证已确认 `resources.json`、EWT 模型文件和 Stanza English EWT（Stanza 英语 EWT）解析管线均可用，实际设备为 CUDA；
 - 固定包映射已确认：`tokenize=ewt`、`mwt=ewt`、`pos=ewt_charlm`、`lemma=combined_nocharlm`、`depparse=ewt_charlm`；单句输出为 1 个句子、5 个词，依存关系完整；
 - 任务协议要求的模型文件 SHA256（哈希）已由用户在 CMD 中记录：`resources.json=4e41c1df152146fa26ed0c006a08feea7a60bb3414bb6d57dbda24ad2e3cb99c`、`tokenize/ewt.pt=fc2fed0cd74dbaef1620bd3e776141ae76c4e28eb5aeff369b2715c31cc73cba`、`mwt/ewt.pt=73411a30da7638bbda2ebd9490e017d78feb4e029e90c9f5c9f37e5433292eb0`、`pos/ewt_charlm.pt=f89696d286c29aff173061fbd4b581c73525257ce38015804be047a5e40f9614`、`lemma/combined_nocharlm.pt=e3cb21e3c97a514d102fcc95e78fbc2ab838bc7b306a48029022f35caba1aa2c`、`depparse/ewt_charlm.pt=7386666c2054363f6c4eae702f84ef7d4a11aa4708c2907b82b105e56925d897`；
-- 固定 EWT 解析器前置核验完整通过，允许进入已批准的 Python 实现入口与 zero-update（零更新）审计；正式训练、优化器更新、新目标伪标签和下游实验仍未批准。
+- 固定 EWT 解析器前置核验完整通过；当前批准范围包括通过专用 Phase A 入口执行 Control/Treatment 抽取器训练、source-dev 评估和 target-unlabeled 目标无标签伪推理。本轮代码修复本身不启动这些运行。
 
-## 本任务禁止
+## 本任务边界
 
-- 正式 extractor（抽取器）训练、optimizer step（优化器更新）、参数更新和新 target pseudo labels（目标伪标签）；
-- generator（生成器）、augmentation（增强）、NLI/exact、final ASTE、target test（目标测试）及任何目标测试金标读取；
+- 不得从 `t5_absa_train.py` 直接绕过专用入口启动图训练；Phase A 允许的训练、评估和目标无标签伪推理必须保持成对 DANN 批次与逐阶段身份审计；
+- 本轮代码修复期间不启动 Phase A GPU（图形处理器）实验、正式训练或新 target pseudo labels（目标伪标签）；
+- generator（生成器）、augmentation（增强）、NLI/exact、final ASTE、Phase B（下游阶段）、target test（目标测试）及任何目标测试金标读取始终禁止；
 - 修改 parser（解析器）、图层数、attention heads（注意力头数）、graph hidden size（图隐藏维度）、DANN（领域对抗网络）、伪标签权重、筛选阈值或现有生成器；
 - fallback 到无图、删除失败行、参数网格、隐式改 tokenizer（分词器）或启动未经批准的 GPU（图形处理器）实验；不得绕过专用审计脚本进入图训练。
 

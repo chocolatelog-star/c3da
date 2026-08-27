@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import (
     AutoModelForSeq2SeqLM,
@@ -762,6 +762,109 @@ def compute_domain_adversarial_loss(
     return F.cross_entropy(domain_logits[domain_valid_mask], domain_targets[domain_valid_mask])
 
 
+class PairedDomainBatchSampler:
+    """Deterministically emit one source and one target row per DANN batch.
+
+    This sampler is opt-in for the approved Phase A entry.  Legacy training
+    paths which do not request paired batches keep Trainer's normal sampler.
+    The smaller domain is cycled so every logical batch is complete while the
+    order remains identical for Control and Treatment with the same seed.
+    """
+
+    def __init__(
+        self,
+        source_count: int,
+        target_count: int,
+        *,
+        source_batch_size: int,
+        target_batch_size: int,
+        seed: int,
+        source_row_ids: list | None = None,
+        target_row_ids: list | None = None,
+    ):
+        if source_count <= 0 or target_count <= 0:
+            raise ValueError("DANN paired batches require both source and target rows")
+        if source_batch_size <= 0 or target_batch_size <= 0:
+            raise ValueError("DANN source and target batch sizes must be positive")
+        self.source_count = int(source_count)
+        self.target_count = int(target_count)
+        self.source_batch_size = int(source_batch_size)
+        self.target_batch_size = int(target_batch_size)
+        self.seed = int(seed)
+        self.source_row_ids = list(source_row_ids or range(self.source_count))
+        self.target_row_ids = list(target_row_ids or range(self.target_count))
+        if len(self.source_row_ids) != self.source_count or len(self.target_row_ids) != self.target_count:
+            raise ValueError("DANN row-id lists must match their domain counts")
+        self._epoch = 0
+        self.epoch_reports: list[dict] = []
+
+    def __len__(self) -> int:
+        source_batches = math.ceil(self.source_count / self.source_batch_size)
+        target_batches = math.ceil(self.target_count / self.target_batch_size)
+        return max(source_batches, target_batches)
+
+    def __iter__(self):
+        epoch = self._epoch
+        self._epoch += 1
+        source_order = list(range(self.source_count))
+        target_order = list(range(self.target_count))
+        random.Random(self.seed + epoch).shuffle(source_order)
+        random.Random(self.seed + epoch).shuffle(target_order)
+        report = {
+            "epoch": epoch,
+            "source_batch_size": self.source_batch_size,
+            "target_batch_size": self.target_batch_size,
+            "source_rows": 0,
+            "target_rows": 0,
+            "source_unique_rows": 0,
+            "target_unique_rows": 0,
+            "logical_batches": len(self),
+            "incomplete_batches": 0,
+            "batches": [],
+        }
+        seen_source = set()
+        seen_target = set()
+        for batch_id in range(len(self)):
+            source_positions = [
+                source_order[(batch_id * self.source_batch_size + offset) % self.source_count]
+                for offset in range(self.source_batch_size)
+            ]
+            target_positions = [
+                target_order[(batch_id * self.target_batch_size + offset) % self.target_count]
+                for offset in range(self.target_batch_size)
+            ]
+            if len(source_positions) != self.source_batch_size or len(target_positions) != self.target_batch_size:
+                report["incomplete_batches"] += 1
+                raise RuntimeError("DANN paired sampler produced an incomplete domain batch")
+            seen_source.update(source_positions)
+            seen_target.update(target_positions)
+            report["source_rows"] += len(source_positions)
+            report["target_rows"] += len(target_positions)
+            report["batches"].append(
+                {
+                    "logical_batch_id": batch_id,
+                    "source_indices": list(source_positions),
+                    "target_indices": [self.source_count + index for index in target_positions],
+                    "source_row_ids": [self.source_row_ids[index] for index in source_positions],
+                    "target_row_ids": [self.target_row_ids[index] for index in target_positions],
+                    "source_count": len(source_positions),
+                    "target_count": len(target_positions),
+                }
+            )
+            yield source_positions + [self.source_count + index for index in target_positions]
+        report["source_unique_rows"] = len(seen_source)
+        report["target_unique_rows"] = len(seen_target)
+        self.epoch_reports.append(report)
+
+    def audit_report(self) -> dict:
+        return {
+            "source_batch_size": self.source_batch_size,
+            "target_batch_size": self.target_batch_size,
+            "seed": self.seed,
+            "epochs": list(self.epoch_reports),
+        }
+
+
 class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
     _generation_only_input_keys = {
         "sample_weight",
@@ -800,6 +903,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         lambda_sentiment_contrastive: float = 0.0,
         sentiment_contrastive_temperature: float = 0.1,
         sentiment_contrastive_class_weights: list[float] | None = None,
+        dann_batch_sampler: PairedDomainBatchSampler | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -812,9 +916,30 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.lambda_sentiment_contrastive = lambda_sentiment_contrastive
         self.sentiment_contrastive_temperature = sentiment_contrastive_temperature
         self.sentiment_contrastive_class_weights = sentiment_contrastive_class_weights
+        self.dann_batch_sampler = dann_batch_sampler
         self._component_sums: dict[str, float] = {}
         self._component_counts: dict[str, int] = {}
         self._component_reductions: dict[str, str] = {}
+
+    def get_train_dataloader(self):
+        if self.dann_batch_sampler is None:
+            return super().get_train_dataloader()
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        dataloader = DataLoader(
+            train_dataset,
+            batch_sampler=self.dann_batch_sampler,
+            collate_fn=data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            persistent_workers=self.args.dataloader_persistent_workers,
+        )
+        return self.accelerator.prepare(dataloader)
+
+    def get_dann_batch_audit(self) -> dict | None:
+        return self.dann_batch_sampler.audit_report() if self.dann_batch_sampler is not None else None
 
     @classmethod
     def _strip_generation_only_inputs(cls, inputs: dict, keep_graph: bool = False) -> dict:
@@ -1365,7 +1490,7 @@ def enforce_graph_training_boundary(use_syntactic_graph_adapter: bool) -> None:
         )
 
 
-def run_phase_a_training(argv: list[str]) -> None:
+def run_phase_a_training(argv: list[str]) -> dict | None:
     """Run the existing trainer through a narrow in-process Phase A entry.
 
     The direct ``t5_absa_train.py`` command never sets the private authorization
@@ -1378,7 +1503,7 @@ def run_phase_a_training(argv: list[str]) -> None:
     sys.argv = ["t5_absa_train.py", *argv]
     _PHASE_A_GRAPH_TRAINING_AUTHORIZED = True
     try:
-        main()
+        return main()
     finally:
         sys.argv = previous_argv
         _PHASE_A_GRAPH_TRAINING_AUTHORIZED = previous_authorization
@@ -1411,6 +1536,10 @@ def main() -> None:
     parser.add_argument("--syntactic_graph_cache_dir", default="")
     parser.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
     parser.add_argument("--target_unlabeled_file", default="")
+    parser.add_argument("--paired_domain_batches", action="store_true")
+    parser.add_argument("--dann_source_batch_size", type=int, default=1)
+    parser.add_argument("--dann_target_batch_size", type=int, default=1)
+    parser.add_argument("--dann_batch_audit_path", default="")
     parser.add_argument("--source_weight", type=float, default=1.0)
     parser.add_argument("--pseudo_weight", type=float, default=0.5)
     parser.add_argument("--augment_weight", type=float, default=0.2)
@@ -1452,6 +1581,10 @@ def main() -> None:
     args = parser.parse_args()
 
     enforce_graph_training_boundary(args.use_syntactic_graph_adapter)
+    if args.paired_domain_batches and args.lambda_domain_adv <= 0:
+        raise ValueError("paired DANN batches require positive --lambda_domain_adv")
+    if args.paired_domain_batches and (args.dann_source_batch_size != 1 or args.dann_target_batch_size != 1):
+        raise ValueError("Phase A paired DANN batches require source=1 and target=1")
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
     reproducibility_mode = "deterministic" if args.deterministic else "legacy"
@@ -1470,6 +1603,7 @@ def main() -> None:
     train_graph_cache = None
     dev_graph_cache = None
     target_domain_rows = []
+    dann_batch_sampler = None
     graph_relation_vocab_size = 1
     if args.use_syntactic_graph_adapter:
         if not args.syntactic_graph_cache_dir:
@@ -1508,6 +1642,7 @@ def main() -> None:
                 target_rows,
                 use_task_prefix=train_graph_cache.use_task_prefix,
             )
+            source_train_rows = train_rows
             train_rows = train_rows + target_domain_rows
             train_graph_cache = CompositeGraphCache(
                 {
@@ -1515,10 +1650,33 @@ def main() -> None:
                     "target_unlabeled": target_graph_cache,
                 }
             )
+            if args.paired_domain_batches:
+                dann_batch_sampler = PairedDomainBatchSampler(
+                    len(source_train_rows),
+                    len(target_domain_rows),
+                    source_batch_size=args.dann_source_batch_size,
+                    target_batch_size=args.dann_target_batch_size,
+                    seed=args.seed,
+                    source_row_ids=[row.get("id") for row in source_train_rows],
+                    target_row_ids=[row.get("id") for row in target_domain_rows],
+                )
     elif args.target_unlabeled_file and args.lambda_domain_adv > 0:
         target_rows = read_jsonl(args.target_unlabeled_file)
         target_domain_rows = build_target_unlabeled_domain_rows(target_rows, use_task_prefix=False)
+        source_train_rows = train_rows
         train_rows = train_rows + target_domain_rows
+        if args.paired_domain_batches:
+            dann_batch_sampler = PairedDomainBatchSampler(
+                len(source_train_rows),
+                len(target_domain_rows),
+                source_batch_size=args.dann_source_batch_size,
+                target_batch_size=args.dann_target_batch_size,
+                seed=args.seed,
+                source_row_ids=[row.get("id") for row in source_train_rows],
+                target_row_ids=[row.get("id") for row in target_domain_rows],
+            )
+    elif args.paired_domain_batches:
+        raise ValueError("paired DANN batches require --target_unlabeled_file and positive lambda_domain_adv")
     model = load_seq2seq_model(
         args.model_path,
         use_syntactic_graph_adapter=args.use_syntactic_graph_adapter,
@@ -1689,6 +1847,7 @@ def main() -> None:
         lambda_sentiment_contrastive=args.lambda_sentiment_contrastive,
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
         sentiment_contrastive_class_weights=sentiment_class_weights,
+        dann_batch_sampler=dann_batch_sampler,
         compute_metrics=(
             build_aste_compute_metrics(tokenizer)
             if args.checkpoint_selection == "aste_f1"
@@ -1698,12 +1857,19 @@ def main() -> None:
     if resume_from_checkpoint:
         print(f"resuming from latest checkpoint in {output_dir}")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    if args.dann_batch_audit_path:
+        if dann_batch_sampler is None:
+            raise RuntimeError("DANN batch audit requested without a paired DANN sampler")
+        audit_path = Path(args.dann_batch_audit_path)
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(json.dumps(trainer.get_dann_batch_audit(), ensure_ascii=False, indent=2), encoding="utf-8")
     best_dir = output_dir / "best"
     if best_dir.exists():
         shutil.rmtree(best_dir)
     trainer.save_model(str(best_dir))
     tokenizer.save_pretrained(str(best_dir))
     print(f"saved {args.checkpoint_selection} model to {best_dir}")
+    return trainer.get_dann_batch_audit()
 
 
 if __name__ == "__main__":

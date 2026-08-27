@@ -9,6 +9,7 @@ from t5_absa_train import (
     JsonlSeq2SeqDataset,
     build_target_unlabeled_domain_rows,
     compute_domain_adversarial_loss,
+    PairedDomainBatchSampler,
 )
 from test_syntactic_graph_adapter import graph_inputs
 from test_syntactic_graph_training import BaseCollator, TinyTokenizer
@@ -93,6 +94,41 @@ def test_target_unlabeled_domain_rows_use_real_graph_collator_fields():
     batch = DataCollatorForSeq2SeqWithPairing(BaseCollator())([dataset[0]])
     assert batch["graph_word_to_subword"].shape == (1, 1, 1)
     assert batch["graph_edge_mask"].tolist() == [[True]]
+
+
+def test_paired_dann_batch_keeps_target_generation_disabled_and_domains_aligned():
+    source_rows = [{"id": "source-1", "input": "source", "target": "triplet", "text": "source"}]
+    target_rows = build_target_unlabeled_domain_rows(
+        [{"id": "target-1", "text": "target"}],
+        use_task_prefix=False,
+    )
+    dataset = JsonlSeq2SeqDataset(
+        source_rows + target_rows,
+        TinyTokenizer(),
+        max_source_length=32,
+        max_target_length=8,
+        source_weight=1.0,
+        pseudo_weight=0.5,
+        augment_weight=0.2,
+    )
+    sampler = PairedDomainBatchSampler(
+        1,
+        1,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["source-1"],
+        target_row_ids=["target-1"],
+    )
+    batch_indices = list(sampler)[0]
+    source_item, target_item = dataset[batch_indices[0]], dataset[batch_indices[1]]
+
+    assert source_item["domain_label"] == 0
+    assert target_item["domain_label"] == 1
+    assert target_item["domain_weight"] == 0.0
+    assert all(label == -100 for label in target_item["labels"])
+    assert sampler.epoch_reports[0]["batches"][0]["source_count"] == 1
+    assert sampler.epoch_reports[0]["batches"][0]["target_count"] == 1
 
 
 def test_dann_loss_from_post_graph_encoder_reaches_zero_initialized_output_projection():
