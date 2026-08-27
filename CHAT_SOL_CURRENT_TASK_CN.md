@@ -1,6 +1,6 @@
 # 当前任务
 
-> 更新时间：2026-08-27 20:02（北京时间）
+> 更新时间：2026-08-27 21:53（北京时间）
 
 - 任务编号：M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1
 - 任务类型：QUICK ABLATION（快速消融）
@@ -8,7 +8,7 @@
 - 随机种子：1000
 - 入口身份：M1 句法 RGAT zero-update（零更新）入口审计已达到 15/15 PASS（通过）；固定代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`
 - 状态：APPROVED（已批准）
-- 当前实现范围：仅实现 Phase A（上游阶段）可复现运行入口、Control/Treatment（对照组/实验组）身份审计、四项门控、断点恢复和硬停止
+- 当前实现范围：仅实现 Phase A（上游阶段）可复现运行入口、Control/Treatment（对照组/实验组）身份审计、四项门控、断点恢复和硬停止；本轮完成最终整体验收阻塞修复
 - Phase B（下游阶段）执行状态：NOT APPROVED（未批准）；本轮不实现或运行 Phase B
 
 ## Phase A 批准范围
@@ -26,18 +26,26 @@
 - A4：处理组 qualified multi pseudo rows（合格多三元组伪标签行）至少为对照组的 `1.05` 倍，qualified total pseudo rows（合格伪标签总行数）至少为对照组的 `0.95` 倍；不得读取目标测试金标。
 - 只有 A1–A4 全部通过才标记 Phase A PASS；任一失败输出 `STOP_M1_SYNTACTIC_GRAPH_UPSTREAM`，禁止 generator、augmentation、final training（最终训练）和 target test。全部通过时只输出 `REQUEST_PHASE_B`，等待新的 Chat Sol（研究负责人）和用户批准。
 
+## 本轮最终整体验收修复
+
+- 成对 DANN（领域对抗）模式的生成损失只按有效源域生成权重归一化；目标行继续 `labels=-100`、生成权重为 0；旧的非成对流程保持原有全批次权重语义，DANN 系数仍为 0.03。
+- Control/Treatment（对照组/实验组）初始化使用隔离随机状态；共享 T5 参数和 DANN head（领域分类头）初始哈希必须一致，只有 Treatment（实验组）拥有句法图参数；`phase_a_initialization_audit.json` 纳入训练阶段产物身份。
+- 成对 DANN 检查点原子保存采样器状态、截至当前轮次的完整审计和身份清单；恢复只选择最新完整且身份合法的检查点，损坏或半写入点安全回退，run-level（运行级）审计原子写入。
+- 配方、三个真实输入、T5 实际加载文件、外部 Control、DANN 审计、A4 伪标签产物和阶段产物均重新计算并硬校验；Control qualified multi（合格多三元组）为 0 时 A4 为 `BLOCKED`、ratio（比率）为 `undefined`。
+- 本轮没有改变句法图公式、图结构、损失系数、Gate（门控）、伪标签规则、Phase B 或正式研究范围；正式 Phase A 尚未运行，目标测试仍禁止访问。
+
 ## 冻结参数与输出
 
 - 冻结 T5-base、seed=1000、optimizer（优化器）、LR（学习率）、epoch（轮数）、batch（批大小）、checkpoint selection（检查点选择）、pseudo decoding/filtering（伪标签解码/过滤）、pseudo weight=0.75、DANN=0.03、generator/augmentation 配方、k=1 和 final ASTE 架构；不做参数搜索。
 - Phase A 输出 `phase_a_summary.json`、`phase_a_result_CN.md`、`stage_status.json`、`control_identity_audit.json`、配置快照、Git 身份、父运行身份和文件哈希，并支持 `--resume` 与长阶段进度条。
-- 本轮仅修复 DANN（领域对抗）成对批次、阶段产物身份、外部 Control（对照组）复用和采样器轮次恢复，运行 CPU（中央处理器）测试与静态检查；不启动 GPU（图形处理器）实验、正式训练、正式伪标签或目标测试。Phase A 的 Control/Treatment（对照组/实验组）抽取器训练、源域开发评估和目标无标签伪推理只允许由专用入口在用户运行实验时执行。
+- 本轮仅修复 Phase A 最终验收中的成对 DANN 生成损失归一化、Control/Treatment 初始化混杂、完整检查点恢复、配方/输入冻结和 DANN 审计真实性；运行 CPU（中央处理器）测试与静态检查，不启动 GPU（图形处理器）实验、正式训练、正式伪标签或目标测试。Phase A 的 Control/Treatment（对照组/实验组）抽取器训练、源域开发评估和目标无标签伪推理只允许由专用入口在用户运行实验时执行。
 
 ## 当前实现完成状态
 
 - Phase A 专用入口、固定配方、Control 身份审计、A1-A4 门控、断点恢复和硬停止已实现；实际 Phase A 运行尚未启动。
 - 本轮复审修复已补齐 Phase A 成对 DANN（领域对抗）批次：每个逻辑批次严格为 source=1/target=1，目标行标签为 `-100`、生成权重为 0，并记录逐 epoch（轮次）组成；同时为六个训练/评估/伪推理阶段写入可重算的命令、输入、配方、模型/输出、解析模型路径和 producer commit（产物提交）身份。
 - 本轮进一步修复了六个 A4 伪标签产物的逐项身份校验、训练模型与 DANN 审计报告联合身份、外部 Control 的 DANN 报告硬要求，以及显式 `set_epoch`/`state_dict`/`load_state_dict` 采样器恢复；Control/Treatment（对照组/实验组）批次种子、行 ID、顺序和轮次数必须一致。
-- RED（失败先行）证据：新增阶段身份/外部报告/采样器状态测试在实现前因 API（接口）不存在而失败；GREEN（修复后）证据：本轮新增 8 项通过，全部 M1 相关 CPU 测试共 102 项通过，AST（抽象语法树）检查和 `git diff --check`（差异格式检查）通过。
+- RED（失败先行）证据：首轮新增接口测试在实现前因 API（接口）不存在而失败；GREEN（修复后）证据：全部 M1 相关 CPU 测试共 124 项通过，包含成对损失、初始化、阶段身份、DANN 审计、检查点恢复、配方突变和 A4 零分母边界；AST（抽象语法树）检查和 `git diff --check`（差异格式检查）通过。
 - 当前仍未运行 GPU（图形处理器）、正式训练、正式伪标签实验或目标测试；Phase B 仍为 `NOT APPROVED`，M1 不得提前标记为最终通过，正式实验索引暂不更新。
 
 ## 前置核验状态
