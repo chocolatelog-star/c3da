@@ -1,5 +1,7 @@
 """CPU regression tests for the read-only M1 numerical trace."""
 
+from unittest.mock import patch
+
 import torch
 import torch.nn as nn
 from transformers import T5Config
@@ -116,6 +118,48 @@ def test_syntactic_adapter_can_emit_required_intermediate_trace_stages():
     ):
         assert stage in stages
         assert stages[stage]["finite_count"] == stages[stage]["total_count"]
+
+
+def test_trace_attention_probabilities_accepts_fp16_attention_with_fp32_logits():
+    class FloatProjection(nn.Module):
+        def forward(self, input_tensor):
+            return input_tensor.float()
+
+    adapter = SyntacticGraphAdapter(
+        hidden_size=8,
+        graph_hidden_size=8,
+        attention_heads=2,
+        head_size=4,
+        num_relations=1,
+        dropout=0.0,
+    )
+    trace = NumericalTrace("fp16")
+    fields = _small_graph_inputs()
+    adapter.query_projection = FloatProjection()
+    adapter.key_projection = FloatProjection()
+    adapter.value_projection = FloatProjection()
+    projected_nodes = torch.arange(16, dtype=torch.float16).reshape(1, 2, 8) / 100
+    original_softmax = torch.softmax
+
+    def fp16_softmax(input_tensor, dim):
+        return original_softmax(input_tensor, dim=dim).to(torch.float16)
+
+    with patch("syntactic_graph_adapter.torch.softmax", side_effect=fp16_softmax):
+        adapter._graph_attention(
+            projected_nodes,
+            fields["edge_src"],
+            fields["edge_dst"],
+            fields["relation_id"],
+            fields["dependency_relation_id"],
+            fields["pos_pair_id"],
+            fields["edge_mask"],
+            fields["word_mask"],
+            trace=trace,
+        )
+
+    stage = trace.finalize()["stages"]["attention_probabilities"]
+    assert stage["dtype"] == "torch.float32"
+    assert stage["finite_count"] == stage["total_count"]
 
 
 def test_t5_trace_records_encoder_decoder_and_loss_stages():

@@ -151,24 +151,28 @@ class SyntacticGraphAdapter(nn.Module):
         relation = self.relation_embedding(relation_ids).view(
             batch_size, edge_count, self.attention_heads, self.head_size
         )
-        _record_trace(trace, "relation_embeddings", relation, ("batch", "edge", "head", "feature"))
-        query_key_product = edge_queries * edge_keys
-        _record_trace(trace, "query_key_product", query_key_product, ("batch", "edge", "head", "feature"))
-        logits_before_scaling = query_key_product.sum(dim=-1)
-        _record_trace(trace, "attention_logits_before_scaling", logits_before_scaling, ("batch", "edge", "head"))
-        logits_scaled = logits_before_scaling / math.sqrt(self.head_size)
-        _record_trace(trace, "attention_logits_scaled", logits_scaled, ("batch", "edge", "head"))
-        dependency_bias = self.dependency_bias(dependency_ids)
-        pos_pair_bias = self.pos_pair_bias(pos_ids)
-        _record_trace(trace, "dependency_bias", dependency_bias, ("batch", "edge", "head"))
-        _record_trace(trace, "pos_pair_bias", pos_pair_bias, ("batch", "edge", "head"))
-        logits = logits_scaled + dependency_bias + pos_pair_bias
-        _record_trace(trace, "final_attention_logits", logits, ("batch", "edge", "head"))
-        softmax_input_float32 = logits.float()
-        _record_trace(trace, "softmax_input_float32_logits", softmax_input_float32, ("batch", "edge", "head"))
-        attention_probabilities = torch.zeros_like(logits)
-        edge_messages = edge_values + relation
-        _record_trace(trace, "edge_messages", edge_messages, ("batch", "edge", "head", "feature"))
+        if trace is None:
+            logits = (edge_queries * edge_keys).sum(dim=-1) / math.sqrt(self.head_size)
+            logits = logits + self.dependency_bias(dependency_ids) + self.pos_pair_bias(pos_ids)
+        else:
+            _record_trace(trace, "relation_embeddings", relation, ("batch", "edge", "head", "feature"))
+            query_key_product = edge_queries * edge_keys
+            _record_trace(trace, "query_key_product", query_key_product, ("batch", "edge", "head", "feature"))
+            logits_before_scaling = query_key_product.sum(dim=-1)
+            _record_trace(trace, "attention_logits_before_scaling", logits_before_scaling, ("batch", "edge", "head"))
+            logits_scaled = logits_before_scaling / math.sqrt(self.head_size)
+            _record_trace(trace, "attention_logits_scaled", logits_scaled, ("batch", "edge", "head"))
+            dependency_bias = self.dependency_bias(dependency_ids)
+            pos_pair_bias = self.pos_pair_bias(pos_ids)
+            _record_trace(trace, "dependency_bias", dependency_bias, ("batch", "edge", "head"))
+            _record_trace(trace, "pos_pair_bias", pos_pair_bias, ("batch", "edge", "head"))
+            logits = logits_scaled + dependency_bias + pos_pair_bias
+            _record_trace(trace, "final_attention_logits", logits, ("batch", "edge", "head"))
+            softmax_input_float32 = logits.float()
+            _record_trace(trace, "softmax_input_float32_logits", softmax_input_float32, ("batch", "edge", "head"))
+            attention_probabilities = torch.zeros_like(softmax_input_float32)
+            edge_messages = edge_values + relation
+            _record_trace(trace, "edge_messages", edge_messages, ("batch", "edge", "head", "feature"))
         messages = torch.zeros(
             batch_size,
             node_count,
@@ -183,11 +187,13 @@ class SyntacticGraphAdapter(nn.Module):
                 if not bool(word_mask[batch_index, node_index]) or not bool(active.any()):
                     continue
                 attention = torch.softmax(logits[batch_index, active].float(), dim=0).to(projected_nodes.dtype)
-                attention_probabilities[batch_index, active] = attention
-                message = edge_messages[batch_index, active]
+                if trace is not None:
+                    attention_probabilities[batch_index, active] = attention.float()
+                message = edge_values[batch_index, active] + relation[batch_index, active]
                 messages[batch_index, node_index] = (attention.unsqueeze(-1) * message).sum(dim=0)
-        _record_trace(trace, "attention_probabilities", attention_probabilities, ("batch", "edge", "head"))
-        _record_trace(trace, "aggregated_messages", messages, ("batch", "node", "head", "feature"))
+        if trace is not None:
+            _record_trace(trace, "attention_probabilities", attention_probabilities, ("batch", "edge", "head"))
+            _record_trace(trace, "aggregated_messages", messages, ("batch", "node", "head", "feature"))
         return messages.reshape(batch_size, node_count, self.graph_hidden_size)
 
     def _broadcast_to_subwords(

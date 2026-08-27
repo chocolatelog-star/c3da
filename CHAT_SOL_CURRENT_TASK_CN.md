@@ -1,6 +1,6 @@
 # 当前任务
 
-> 更新时间：2026-08-27 13:53（北京时间）
+> 更新时间：2026-08-27 14:18（北京时间）
 
 - 任务编号：M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1
 - 任务类型：READ-ONLY DIAGNOSTIC IMPLEMENTATION（只读诊断实现）
@@ -19,7 +19,7 @@
 
 - 已新增 `m1_graph_fp16_numerical_trace.py`，固定读取现有三份图缓存中的首批 source_train、source_dev 和 target_unlabeled 样本，分别执行 FP32（单精度）与 CUDA autocast FP16（自动混合精度半精度）追踪。
 - 已在适配器和 T5 图模型入口记录编码器、图注意力、消息聚合、融合、解码器 logits（逻辑值）、损失、ASTE 反向梯度和 DANN 损失/梯度；异常保留首个阶段、位置、行、边及关系类型。
-- CPU（中央处理器）合成测试、M1 相关直接回归测试和静态检查已完成；GPU 全量数值追踪仍待用户运行，M1 仍未最终通过。
+- 用户实际启动同一 GPU（图形处理器）数值追踪时，因 trace-only（仅追踪）`attention_probabilities` 的 FP32/FP16（单精度/半精度）布尔高级索引写入 dtype mismatch（数据类型不一致）而阻塞；本轮仅修复该旁路写入并补充回归测试，修复后必须用同一固定样本重新运行同一诊断，GPU 全量数值追踪仍待用户运行，M1 仍未最终通过。
 
 ## 批准范围
 
