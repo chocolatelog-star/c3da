@@ -1,6 +1,6 @@
 # 当前任务
 
-> 更新时间：2026-08-27 13:16（北京时间）
+> 更新时间：2026-08-27 13:53（北京时间）
 
 - 任务编号：M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1
 - 任务类型：READ-ONLY DIAGNOSTIC IMPLEMENTATION（只读诊断实现）
@@ -14,6 +14,12 @@
 - M1 句法图 zero-update（零更新）入口审计当前为 BLOCKED（阻塞），代码提交为 `3877838c0e0b0e5079bd4b0797ec7014d301ab30`。
 - 审计目录为 `J:\\nlp\\CD-C3DA\\runs\\diagnostics\\laptop14_to_rest15_m1_syntactic_rgat_entry_audit_v2`；图缓存、身份、边合法性、断点恢复、8GB 显存和零更新门控已通过。
 - control_loss（控制组损失）有限；treatment_loss（处理组损失）、重复前向、source training/dev、DANN（领域对抗网络）损失、treatment encoder/logit 差异和 ASTE/DANN 梯度为 NaN（非数值）；参数未更新，target test（目标测试集）未访问。
+
+## 本轮实现状态
+
+- 已新增 `m1_graph_fp16_numerical_trace.py`，固定读取现有三份图缓存中的首批 source_train、source_dev 和 target_unlabeled 样本，分别执行 FP32（单精度）与 CUDA autocast FP16（自动混合精度半精度）追踪。
+- 已在适配器和 T5 图模型入口记录编码器、图注意力、消息聚合、融合、解码器 logits（逻辑值）、损失、ASTE 反向梯度和 DANN 损失/梯度；异常保留首个阶段、位置、行、边及关系类型。
+- CPU（中央处理器）合成测试、M1 相关直接回归测试和静态检查已完成；GPU 全量数值追踪仍待用户运行，M1 仍未最终通过。
 
 ## 批准范围
 
@@ -31,7 +37,7 @@
 ## 禁止事项
 
 - 不修改模型公式、训练逻辑、实验参数、DANN 系数、图层数、头数或隐藏维度。
-- 不运行正式训练，不读取 target test，不生成新的目标伪标签，不启动 GPU（图形处理器）诊断；GPU 命令仅由用户运行。
+- 不运行正式训练，不读取 target test，不保存新的目标伪标签，不由执行器启动 GPU（图形处理器）诊断；GPU 命令仅由用户运行。
 - 不修改数据增强、生成器、NLI（自然语言推断）、最终 ASTE 或实验索引。
 
 ## 研究边界
