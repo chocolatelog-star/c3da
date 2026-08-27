@@ -1,10 +1,16 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-27 17:04（北京时间）
+> 更新时间：2026-08-27 17:48（北京时间）
 
 ## 当前任务状态
 
-`M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），V3 数值追踪已 PASS（通过），确认此前问题是基础 T5 检查点加载时新增自定义图适配器参数未初始化，而不是 FP16 图传播公式。完整 zero-update 入口审计当前 14/15 门控通过，唯一阻塞是 target pseudo inference 中完整 target_unlabeled 缓存身份与单条推理子集混用。本轮只修复接口职责分离和回归测试；新版 GPU 入口审计尚未运行，正式训练、正式伪标签生成和目标测试读取仍未批准/执行，M1 不能记为通过。
+`M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），固定种子为 1000，入口前置 zero-update 审计为 15/15 PASS（通过），父代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`。本轮只实现 Phase A（上游阶段）快速消融入口；实际 GPU（图形处理器）运行、正式训练、正式伪标签实验和目标测试读取尚未执行，Phase B（下游阶段）仍未批准。
+
+## 当前 Phase A 实现状态
+
+- 新增专用 `m1_syntactic_rgat_pseudo_quick_ablation.py` 和固定配方，覆盖 Control（无图）/Treatment（句法 RGAT）四个上游调用点、Control 身份机器复核、A1-A4 门控、断点恢复、配置/代码/输入/模型文件哈希和中文/JSON（结构化）结果输出。
+- 现有 `t5_absa_train.py` 的直接图训练入口继续硬停止；只有专用 Phase A API 可在入口完成配方、Git（版本管理）和数据边界校验后调用既有训练主体。图模块不进入生成器、增强、NLI（自然语言推断）、选择器、最终 ASTE（方面级情感三元组抽取）或 target_test（目标测试集）。
+- 当前只完成 CPU（中央处理器）/静态实现验证，未运行 Phase A 实验，因此不能写成 Phase A 或 M1 已通过；正式实验索引暂不更新，等待用户实际运行结果。
 
 ## 当前任务边界
 
