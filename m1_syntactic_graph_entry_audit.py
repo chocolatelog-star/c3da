@@ -881,6 +881,7 @@ def _run_model_audit(
             use_syntactic_graph_adapter=True,
             graph_cache_dir=cache_dir,
             graph_rows=target_sample,
+            graph_cache_identity_rows=target_rows,
             graph_parser_dir=args.parser_dir,
             graph_split="target_unlabeled",
         )

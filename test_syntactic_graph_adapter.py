@@ -150,6 +150,32 @@ def test_graph_checkpoint_round_trip_preserves_every_graph_parameter(tmp_path):
     assert loaded.graph_parameter_initialization["graph_checkpoint_detected"] is True
 
 
+def test_partial_graph_checkpoint_is_rejected_without_resetting_graph_parameters(tmp_path):
+    config = _tiny_t5_config()
+    graph_model_config(config, 8)
+    source = SyntacticGraphT5ForConditionalGeneration(config).eval()
+    checkpoint_dir = tmp_path / "partial-graph-checkpoint"
+    source.save_pretrained(checkpoint_dir, safe_serialization=False)
+
+    weights_path = checkpoint_dir / "pytorch_model.bin"
+    state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    removed_name = "syntactic_graph_adapter.node_projection.weight"
+    assert removed_name in state
+    del state[removed_name]
+    torch.save(state, weights_path)
+
+    try:
+        SyntacticGraphT5ForConditionalGeneration.from_pretrained(
+            checkpoint_dir,
+            local_files_only=True,
+        )
+    except RuntimeError as exc:
+        assert "partial syntactic graph adapter" in str(exc)
+        assert removed_name in str(exc)
+    else:
+        raise AssertionError("partial graph checkpoints must be rejected")
+
+
 def test_base_checkpoint_zero_update_graph_path_is_finite_and_control_equivalent(tmp_path):
     base_dir = _write_tiny_base_checkpoint(tmp_path)
     control = T5ForConditionalGeneration.from_pretrained(base_dir, local_files_only=True).eval()

@@ -107,6 +107,7 @@ def generate_texts(
     use_syntactic_graph_adapter: bool = False,
     graph_cache_dir: str | Path = "",
     graph_rows: list[dict] | None = None,
+    graph_cache_identity_rows: list[dict] | None = None,
     graph_parser_dir: str | Path = r"J:\nlp\models\stanza_resources",
     graph_split: str = "target_unlabeled",
 ) -> list[str]:
@@ -120,6 +121,8 @@ def generate_texts(
     if use_syntactic_graph_adapter:
         if not graph_cache_dir or graph_rows is None:
             raise GraphCacheError("graph cache and graph rows are required for graph-aware generation")
+        if graph_cache_identity_rows is None:
+            graph_cache_identity_rows = graph_rows
         tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
         tokenizer_identity = build_tokenizer_identity(model_path, tokenizer)
         parser_identity = build_parser_identity(graph_parser_dir)
@@ -128,7 +131,7 @@ def generate_texts(
         graph_cache = load_graph_cache_directory(
             graph_cache_dir,
             graph_split,
-            graph_rows,
+            graph_cache_identity_rows,
             tokenizer_identity=tokenizer_identity,
             parser_identity=parser_identity,
         )

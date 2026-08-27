@@ -12,6 +12,7 @@ from syntactic_graph import (
     canonical_row_json,
     load_graph_cache_directory,
     load_graph_cache_rows,
+    sha256_file,
     validate_alignment_policy,
 )
 
@@ -410,3 +411,26 @@ def test_graph_cache_resume_rejects_an_older_alignment_policy(tmp_path):
         assert "alignment_policy_version" in str(exc)
     else:
         raise AssertionError("a cache from another alignment policy must not resume")
+
+
+def test_graph_cache_target_test_split_is_forbidden(tmp_path):
+    vocab_path = Path(tmp_path) / "relation_vocab.json"
+    vocab_path.write_text("[]\n", encoding="utf-8")
+    (Path(tmp_path) / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": GRAPH_SCHEMA_VERSION,
+                "alignment_policy_version": ALIGNMENT_POLICY_VERSION,
+                "target_test_access": False,
+                "relation_vocab_sha256": sha256_file(vocab_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        load_graph_cache_directory(Path(tmp_path), "target_test", [])
+    except GraphCacheError as exc:
+        assert "target_test graph cache is forbidden" in str(exc)
+    else:
+        raise AssertionError("target_test graph caches must remain forbidden")

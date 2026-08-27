@@ -1,16 +1,22 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-27 15:41（北京时间）
+> 更新时间：2026-08-27 17:04（北京时间）
 
 ## 当前任务状态
 
-`M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），数值追踪旁路 dtype mismatch 已修复；后续追踪确认真正根因为基础 T5 检查点快速初始化上下文下新增自定义图适配器参数未初始化，node_projection 出现异常大值并导致后续溢出，不是 FP16 图传播公式问题。本轮已增加显式初始化/检查点保留契约、逐参数初始化报告和 CPU 测试，需重新运行同一 GPU 诊断。当前 zero-update 入口审计仍为 `BLOCKED`（阻塞）：control_loss 有限，但 treatment、重复前向、source training/dev、DANN 损失及 ASTE/DANN 梯度为 NaN；参数未更新，target test 未访问。正式训练仍未批准，M1 仍不能记为通过。
+`M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），V3 数值追踪已 PASS（通过），确认此前问题是基础 T5 检查点加载时新增自定义图适配器参数未初始化，而不是 FP16 图传播公式。完整 zero-update 入口审计当前 14/15 门控通过，唯一阻塞是 target pseudo inference 中完整 target_unlabeled 缓存身份与单条推理子集混用。本轮只修复接口职责分离和回归测试；新版 GPU 入口审计尚未运行，正式训练、正式伪标签生成和目标测试读取仍未批准/执行，M1 不能记为通过。
 
 ## 当前任务边界
 
 - 不修改模型公式、训练逻辑、实验参数、图结构、DANN 系数或数据增强逻辑。
 - 不使用 `nan_to_num`、梯度裁剪、关闭图模块或改成 FP32 掩盖异常；不创建优化器、更新调度器、保存模型或读取 target test；只允许记录目标无标签推理异常，不保存新的目标伪标签。
 - 逐阶段报告 FP32 与 CUDA autocast FP16 的张量统计、首个非有限阶段、首个异常行/边、关系类型、入边数量、target pseudo inference 异常类型和消息；CPU 测试验证有限路径、人工溢出定位、参数不变和异常不静默吞掉。
+
+## 本轮接口修复状态
+
+- `generate_texts` 新增可选 `graph_cache_identity_rows`：完整 `target_unlabeled` 行只进入 `load_graph_cache_directory` 的 manifest 身份验证，`graph_rows` 仍只负责当前子集的 `GraphCache.get` 和批次整理；未提供新参数时回退到原有 `graph_rows` 行为。
+- 审计入口已传入完整 `target_rows` 和当前 `target_sample`，仍只保留一条内存诊断结果；缓存 manifest 哈希校验、子集行 ID/文本/输入哈希硬拒绝和 `target_test` 禁止访问均未放宽。
+- 本轮 M1 CPU 直接测试共 75 项通过，新增部分图检查点硬拒绝回归；未运行 GPU、正式训练、正式伪标签或目标测试，正式训练仍未批准。
 
 ## 上一任务只读对齐预检状态
 
