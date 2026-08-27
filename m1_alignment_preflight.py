@@ -464,8 +464,13 @@ def scan_alignment_row(
             word_positions = list(shared["word_positions"])
             if shared["legal"]:
                 legal_shared_token_count += 1
+                issue_type = (
+                    "partial_contiguous_shared_subword"
+                    if shared["partial_contiguous_shared_subword"]
+                    else "legal_contiguous_shared_subword"
+                )
                 add_issue(
-                    "legal_contiguous_shared_subword",
+                    issue_type,
                     f"legal contiguous shared subword: token_index={token_index} word_positions={word_positions}",
                     [token_index],
                 )

@@ -10,7 +10,7 @@ from typing import Iterable
 
 
 GRAPH_SCHEMA_VERSION = 2
-ALIGNMENT_POLICY_VERSION = "overlap-contiguous-sharing-v2"
+ALIGNMENT_POLICY_VERSION = "overlap-contiguous-contained-sharing-v3"
 DEFAULT_PARSER_DIR = Path(r"J:\nlp\models\stanza_resources")
 PARSER_PROCESSORS = "tokenize,mwt,pos,lemma,depparse"
 PARSER_PACKAGES = {
@@ -387,12 +387,27 @@ def validate_alignment_policy(
             int(shared_words[0]["start"]) == token_start
             and int(shared_words[-1]["end"]) == token_end
         )
+        contained_in_parser_union = (
+            token_start >= int(shared_words[0]["start"])
+            and token_end <= int(shared_words[-1]["end"])
+        )
         gaps_are_spaces = any(
             int(left["end"]) < int(right["start"])
             and graph_text[int(left["end"]) : int(right["start"])].isspace()
             for left, right in zip(shared_words, shared_words[1:])
         )
-        legal = positions_are_contiguous and spans_are_contiguous and same_sentence and exact_union
+        overlaps_all_recorded_words = all(
+            token_start < int(word["end"]) and token_end > int(word["start"])
+            for word in (words[position] for position in word_positions)
+        )
+        legal = (
+            positions_are_contiguous
+            and spans_are_contiguous
+            and same_sentence
+            and contained_in_parser_union
+            and overlaps_all_recorded_words
+        )
+        partial_contiguous_shared_subword = legal and not exact_union
         shared = {
             "token_index": token_index,
             "word_positions": list(word_positions),
@@ -401,35 +416,39 @@ def validate_alignment_policy(
             "spans_are_contiguous": spans_are_contiguous,
             "same_sentence": same_sentence,
             "exact_union": exact_union,
+            "contained_in_parser_union": contained_in_parser_union,
             "gaps_are_spaces": gaps_are_spaces,
+            "overlaps_all_recorded_words": overlaps_all_recorded_words,
+            "partial_contiguous_shared_subword": partial_contiguous_shared_subword,
             "legal": legal,
         }
         shared_subwords.append(shared)
-        if not legal:
-            violations.append(
-                _alignment_policy_violation(
-                    "shared_subword_span_not_exact_union",
-                    "alignment policy violation: shared subword spans non-contiguous parser words: "
-                    f"token_index={token_index} word_indices={shared['word_indices']} "
-                    f"token_span=({token_start},{token_end})",
-                    [token_index],
-                    word_positions,
-                )
-            )
         if not positions_are_contiguous:
             violations.append(
                 _alignment_policy_violation(
                     "non_contiguous_shared_subword",
-                    f"shared subword skips parser words: token_index={token_index} word_positions={word_positions}",
+                    "non_contiguous_shared_subword: shared subword skips parser words: "
+                    f"token_index={token_index} word_positions={word_positions}",
                     [token_index],
                     word_positions,
                 )
             )
-        if gaps_are_spaces:
+        elif not spans_are_contiguous and gaps_are_spaces:
             violations.append(
                 _alignment_policy_violation(
                     "cross_space_shared_subword",
-                    f"shared subword crosses whitespace: token_index={token_index} word_positions={word_positions}",
+                    "cross_space_shared_subword: shared subword crosses whitespace: "
+                    f"token_index={token_index} word_positions={word_positions}",
+                    [token_index],
+                    word_positions,
+                )
+            )
+        elif not spans_are_contiguous:
+            violations.append(
+                _alignment_policy_violation(
+                    "non_contiguous_shared_subword",
+                    "non_contiguous_shared_subword: parser word spans are not contiguous: "
+                    f"token_index={token_index} word_positions={word_positions}",
                     [token_index],
                     word_positions,
                 )
@@ -438,7 +457,30 @@ def validate_alignment_policy(
             violations.append(
                 _alignment_policy_violation(
                     "cross_sentence_shared_subword",
-                    f"shared subword crosses parser sentences: token_index={token_index} word_positions={word_positions}",
+                    "cross_sentence_shared_subword: shared subword crosses parser sentences: "
+                    f"token_index={token_index} word_positions={word_positions}",
+                    [token_index],
+                    word_positions,
+                )
+            )
+        if not contained_in_parser_union:
+            violations.append(
+                _alignment_policy_violation(
+                    "shared_subword_outside_parser_union",
+                    "shared_subword_outside_parser_union: shared subword exceeds parser word union: "
+                    f"token_index={token_index} word_positions={word_positions} "
+                    f"token_span=({token_start},{token_end}) "
+                    f"parser_union=({shared_words[0]['start']},{shared_words[-1]['end']})",
+                    [token_index],
+                    word_positions,
+                )
+            )
+        if not overlaps_all_recorded_words:
+            violations.append(
+                _alignment_policy_violation(
+                    "non_contiguous_shared_subword",
+                    "non_contiguous_shared_subword: shared subword does not overlap every recorded parser word: "
+                    f"token_index={token_index} word_positions={word_positions}",
                     [token_index],
                     word_positions,
                 )

@@ -132,6 +132,60 @@ def test_alignment_policy_shared_validator_accepts_iphone_and_formal_alignment_m
     assert align_parser_words_to_subwords(words, "iPhone", "iPhone", [(0, 6)]) == validation["aligned"]
 
 
+def test_alignment_policy_accepts_real_partial_contiguous_shared_subwords():
+    cases = [
+        (
+            "didnt",
+            [("did", 0, 3), ("nt", 3, 5)],
+            [(0, 4), (4, 5)],
+        ),
+        (
+            "doesnt",
+            [("does", 0, 4), ("nt", 4, 6)],
+            [(0, 5), (5, 6)],
+        ),
+        (
+            "cant",
+            [("ca", 0, 2), ("nt", 2, 4)],
+            [(0, 3), (3, 4)],
+        ),
+        (
+            "wont",
+            [("wo", 0, 2), ("nt", 2, 4)],
+            [(0, 3), (3, 4)],
+        ),
+        (
+            "wasnt",
+            [("was", 0, 3), ("nt", 3, 5)],
+            [(0, 4), (4, 5)],
+        ),
+        (
+            "Registration/1st",
+            [("Registration", 0, 12), ("/", 12, 13), ("1st", 13, 16)],
+            [(0, 12), (12, 14), (14, 15), (15, 16)],
+        ),
+        (
+            "WIth",
+            [("WIt", 0, 3), ("h", 3, 4)],
+            [(0, 2), (2, 4)],
+        ),
+    ]
+
+    for text, raw_words, offsets in cases:
+        words = [
+            {"index": index, "sentence_index": 0, "text": word, "start": start, "end": end}
+            for index, (word, start, end) in enumerate(raw_words)
+        ]
+        validation = validate_alignment_policy(words, text, text, offsets)
+
+        assert validation["valid"] is True, text
+        partial = [item for item in validation["shared_subwords"] if item["partial_contiguous_shared_subword"]]
+        assert len(partial) == 1, text
+        assert partial[0]["exact_union"] is False, text
+        assert partial[0]["contained_in_parser_union"] is True, text
+        assert align_parser_words_to_subwords(words, text, text, offsets) == validation["aligned"]
+
+
 def test_alignment_policy_rejects_abx_incomplete_shared_union_in_preflight_and_formal_code():
     words = [
         {"index": 0, "sentence_index": 0, "text": "a", "start": 0, "end": 1},
@@ -140,11 +194,11 @@ def test_alignment_policy_rejects_abx_incomplete_shared_union_in_preflight_and_f
     validation = validate_alignment_policy(words, "abx", "abx", [(0, 3)])
 
     assert validation["valid"] is False
-    assert any(item["issue_type"] == "shared_subword_span_not_exact_union" for item in validation["violations"])
+    assert any(item["issue_type"] == "shared_subword_outside_parser_union" for item in validation["violations"])
     try:
         align_parser_words_to_subwords(words, "abx", "abx", [(0, 3)])
     except GraphCacheError as exc:
-        assert "alignment policy" in str(exc)
+        assert "shared_subword_outside_parser_union" in str(exc)
     else:
         raise AssertionError("formal alignment must reject an incomplete shared union")
 
@@ -189,6 +243,13 @@ def test_alignment_policy_rejects_cross_space_non_contiguous_cross_sentence_and_
             [(0, 1)],
             "out_of_bounds_mapping",
         ),
+        (
+            "incomplete_character_coverage",
+            [{"index": 0, "sentence_index": 0, "text": "staff", "start": 0, "end": 5}],
+            "staff",
+            [(0, 2), (3, 5)],
+            "incomplete_character_coverage",
+        ),
     ]
 
     for _name, words, text, offsets, issue_type in cases:
@@ -224,7 +285,7 @@ def test_alignment_rejects_shared_subword_across_a_character_gap():
             offset_mapping=[(0, 3), (0, 0)],
         )
     except GraphCacheError as exc:
-        assert "non-contiguous parser words" in str(exc)
+        assert "cross_space_shared_subword" in str(exc)
     else:
         raise AssertionError("a shared subword must not bridge a character gap")
 

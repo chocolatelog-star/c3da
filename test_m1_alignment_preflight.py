@@ -119,6 +119,34 @@ def test_preflight_records_legal_iphone_contiguous_sharing():
     assert "subword_maps_to_multiple_parser_words" in result["issue_types"]
 
 
+def test_preflight_accepts_real_partial_contiguous_shared_words():
+    cases = [
+        ("didnt", [("did", 0, 3), ("nt", 3, 5)], [(0, 4), (4, 5)]),
+        ("doesnt", [("does", 0, 4), ("nt", 4, 6)], [(0, 5), (5, 6)]),
+        ("cant", [("ca", 0, 2), ("nt", 2, 4)], [(0, 3), (3, 4)]),
+        ("wont", [("wo", 0, 2), ("nt", 2, 4)], [(0, 3), (3, 4)]),
+        ("wasnt", [("was", 0, 3), ("nt", 3, 5)], [(0, 4), (4, 5)]),
+        (
+            "Registration/1st",
+            [("Registration", 0, 12), ("/", 12, 13), ("1st", 13, 16)],
+            [(0, 12), (12, 14), (14, 15), (15, 16)],
+        ),
+        ("WIth", [("WIt", 0, 3), ("h", 3, 4)], [(0, 2), (2, 4)]),
+    ]
+
+    for text, raw_words, offsets in cases:
+        parser = FakeParser(
+            FakeDoc([FakeSentence(_words(*raw_words))])
+        )
+        tokenizer = FakeTokenizer(offsets, tokens=[f"tok-{i}" for i in range(len(offsets))])
+        result = scan_alignment_row("source_train", _row(text), tokenizer, parser, max_source_length=128)
+
+        assert result["failed"] is False, text
+        assert result["stats"]["alignment_policy_violation_count"] == 0, text
+        assert "partial_contiguous_shared_subword" in result["issue_types"], text
+        assert "alignment_policy_violation" not in result["issue_types"], text
+
+
 def test_preflight_rejects_cross_space_shared_subword():
     parser = FakeParser(FakeDoc([FakeSentence(_words(("a", 0, 1), ("b", 2, 3)))]))
     tokenizer = FakeTokenizer([(0, 3)], tokens=["▁a▁b"])
@@ -154,8 +182,11 @@ def test_preflight_rejects_abx_incomplete_shared_union_with_formal_policy_reason
     assert result["failed"] is False
     assert result["stats"]["alignment_policy_violation_count"] == 1
     assert "alignment_policy_violation" in result["issue_types"]
-    assert "shared_subword_span_not_exact_union" in result["issue_types"]
-    assert any("alignment policy" in row["error_message"] for row in result["suspicious_rows"])
+    assert "shared_subword_outside_parser_union" in result["issue_types"]
+    assert any(
+        "shared_subword_outside_parser_union" in row["error_message"]
+        for row in result["suspicious_rows"]
+    )
 
 
 def test_summary_blocks_when_alignment_policy_violation_exists():

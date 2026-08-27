@@ -1,19 +1,18 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-27 12:17（北京时间）
+> 更新时间：2026-08-27 12:46（北京时间）
 
 ## 当前任务状态
 
-`M1_ALIGNMENT_PREFLIGHT_V1`（laptop14 -> rest15，source_train/source_dev/target_unlabeled）已完成本轮只读对齐预检工具修复。当前状态为 `RUNNING`（等待 Codex Sol 最终只读验收；GPU 全量预检尚未运行）；未运行 GPU 预检、正式训练、伪标签生成或目标测试读取。M1 图结构、DANN 系数和研究方案未改动，不能提前记为 M1 通过。
+`M1_ALIGNMENT_PREFLIGHT_V1`（laptop14 -> rest15，source_train/source_dev/target_unlabeled）已完成本轮对齐策略修复。当前状态为 `RUNNING`（等待 Codex Sol 最终只读验收；新版 GPU 全量预检尚未运行）；未运行新版 GPU 预检、正式训练、伪标签生成或目标测试读取。M1 图结构、DANN 系数和研究方案未改动，不能提前记为 M1 通过。
 
 ## 本轮只读对齐预检状态
 
-- 新增独立 `m1_alignment_preflight.py`，只扫描 source_train、source_dev 和 target_unlabeled；目标域只请求 train 输入，代码路径不请求 target_test。
-- 预检逐行继续、写入三个固定输出文件，显示三个数据划分进度条，并以 Git commit、输入 SHA256、Stanza 解析器身份、T5 fast tokenizer（快速分词器）身份、图模式、对齐策略版本和 max_source_length=128 做断点恢复硬校验。
-- `syntactic_graph.py` 提供无副作用的公开 `validate_alignment_policy`；正式图缓存与预检统一调用它。策略违规计数进入总 Gate（门控），摘要同时记录 `GRAPH_SCHEMA_VERSION`（图模式版本）和 `ALIGNMENT_POLICY_VERSION`（对齐策略版本）。
-- 输出恢复先完成数据、模型、解析器和配置身份验证；只回滚 JSONL 未提交尾部，恢复后重新扫描未提交当前行，身份变化或已提交记录缺失仍硬停止。摘要记录 requested/actual CUDA（统一计算设备架构）索引、parser/model device（解析器/模型设备）。
+- 上一版全量只读预检完成 1730/1730 行，字符覆盖率 100%、failed_rows=0、目标测试隔离为 false；12 项 `alignment_policy_violation` 已确定属于合法的连续部分共享边界，包括缩写、`Registration/1st` 和 `WIth`。
+- 新版 `overlap-contiguous-contained-sharing-v3` 由 `syntactic_graph.py` 的公开 `validate_alignment_policy` 统一提供，正式图缓存与预检共同使用；`exact_union` 保留，同时记录 `contained_in_parser_union` 和 `partial_contiguous_shared_subword`。`GRAPH_SCHEMA_VERSION`（图模式版本）保持不变，旧缓存因策略版本变化不可复用。
+- 预检仍只扫描 source_train、source_dev 和 target_unlabeled，不请求 target_test；`abx`、跨空格、非连续解析词、跨句、越界和字符缺口仍拒绝。旧版 BLOCKED 预检目录未删除或覆盖。
 - 可疑清单包含合法连续共享和所有异常类型；机器可读汇总记录句/词/子词统计、分布、成功/失败行、覆盖率、截断和 PASS/BLOCKED 门控。
-- 本轮新增 CPU 测试 12 项；M1 相关测试共 76 项通过，未更新正式实验索引，等待实际预检结果后统一记录。
+- 本轮新增 CPU 测试 2 项，覆盖 7 类部分共享及预检输出；M1 相关直接测试共 78 项通过，未更新正式实验索引，等待新版实际预检结果后统一记录。
 
 ## 上一轮参数协议修复证据
 
