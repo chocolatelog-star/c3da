@@ -9,6 +9,7 @@ from transformers import T5Config
 from m1_graph_fp16_numerical_trace import (
     NumericalTrace,
     build_trace_report,
+    graph_parameter_initialization_report,
     record_target_pseudo_result,
     summarize_tensor_stats,
 )
@@ -206,6 +207,45 @@ def test_trace_does_not_change_model_parameters():
     after = [parameter.detach().clone() for parameter in model.parameters()]
 
     assert all(torch.equal(left, right) for left, right in zip(before, after))
+
+
+def test_graph_parameter_initialization_report_records_each_parameter():
+    config = T5Config(
+        vocab_size=32,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=2,
+        dropout_rate=0.0,
+        pad_token_id=0,
+        eos_token_id=1,
+        decoder_start_token_id=0,
+    )
+    graph_model_config(config, 1)
+    model = SyntacticGraphT5ForConditionalGeneration(config).eval()
+
+    report = graph_parameter_initialization_report(model)
+
+    assert report["initialization_mode"] == "constructor_default"
+    assert report["initialized_from_base_checkpoint"] is False
+    assert report["graph_checkpoint_detected"] is False
+    assert report["graph_parameter_sha256"]
+    assert set(report["parameters"]) == {
+        name for name, _ in model.syntactic_graph_adapter.named_parameters()
+    }
+    assert all(
+        stats["finite_count"] == stats["total_count"]
+        and stats["max_abs"] is not None
+        for stats in report["parameters"].values()
+    )
+    assembled = build_trace_report(
+        fp32=NumericalTrace("fp32").finalize(),
+        fp16=NumericalTrace("fp16").finalize(),
+        graph_parameter_initialization=report,
+    )
+    assert assembled["graph_parameter_initialization"] == report
 
 
 def test_target_pseudo_exception_is_structured_and_not_swallowed():

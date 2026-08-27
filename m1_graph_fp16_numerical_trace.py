@@ -268,6 +268,7 @@ def build_trace_report(
     target_test_access: bool = False,
     target_pseudo_inference: dict | None = None,
     metadata: dict | None = None,
+    graph_parameter_initialization: dict | None = None,
 ) -> dict:
     """Assemble a machine-readable report for both numerical modes."""
     model_hashes_match = (
@@ -306,6 +307,7 @@ def build_trace_report(
         "parameter_updates": 0,
         "target_test_access": bool(target_test_access),
         "target_pseudo_inference": pseudo,
+        "graph_parameter_initialization": dict(graph_parameter_initialization or {}),
         "metadata": dict(metadata or {}),
     }
 
@@ -323,6 +325,40 @@ def parameter_state_sha256(model) -> str:
         digest.update(b"\0")
         digest.update(value.numpy().tobytes(order="C"))
     return digest.hexdigest()
+
+
+def graph_parameter_initialization_report(model) -> dict:
+    """Report graph-parameter initialization provenance and finite-value stats."""
+    adapter = getattr(model, "syntactic_graph_adapter", None)
+    if adapter is None:
+        raise ValueError("model has no syntactic graph adapter")
+    provenance = dict(getattr(model, "graph_parameter_initialization", {}))
+    digest = hashlib.sha256()
+    parameters = {}
+    for name, parameter in sorted(adapter.named_parameters(), key=lambda item: item[0]):
+        value = parameter.detach().to(device="cpu").contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(json.dumps(list(value.shape), separators=(",", ":")).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(value.numpy().tobytes(order="C"))
+        axes = tuple(f"dimension_{index}" for index in range(value.ndim))
+        parameters[name] = summarize_tensor_stats(
+            f"graph_parameter.{name}",
+            value,
+            axes=axes,
+        )
+    return {
+        "initialization_mode": provenance.get("initialization_mode", "unknown"),
+        "initialized_from_base_checkpoint": bool(
+            provenance.get("initialized_from_base_checkpoint", False)
+        ),
+        "graph_checkpoint_detected": bool(provenance.get("graph_checkpoint_detected", False)),
+        "graph_parameter_sha256": digest.hexdigest(),
+        "parameters": parameters,
+    }
 
 
 def _amp_context(device: torch.device, enabled: bool):
@@ -568,6 +604,7 @@ def run_gpu_trace(args) -> dict:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
     model.to(device)
+    graph_initialization = graph_parameter_initialization_report(model)
     model_parameter_hash_before = parameter_state_sha256(model)
 
     source_dataset = audit._build_dataset(
@@ -687,6 +724,7 @@ def run_gpu_trace(args) -> dict:
         model_hash_after=model_parameter_hash_after,
         target_test_access=False,
         target_pseudo_inference=target_pseudo_inference,
+        graph_parameter_initialization=graph_initialization,
         metadata={
             "requested_cuda_index": int(requested_cuda_index),
             "actual_cuda_index": actual_cuda_index,

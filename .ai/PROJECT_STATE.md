@@ -1,10 +1,10 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-27 14:18（北京时间）
+> 更新时间：2026-08-27 15:41（北京时间）
 
 ## 当前任务状态
 
-`M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），数值追踪代码和 CPU 测试已完成；用户实际运行 GPU 诊断时曾因 trace-only `attention_probabilities` 的 FP32/FP16 布尔高级索引写入 dtype mismatch 阻塞，本轮已修复并需重新运行同一诊断。当前 zero-update 入口审计仍为 `BLOCKED`（阻塞）：control_loss 有限，但 treatment、重复前向、source training/dev、DANN 损失及 ASTE/DANN 梯度为 NaN；参数未更新，target test 未访问。正式训练仍未批准，M1 仍不能记为通过。
+`M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），数值追踪旁路 dtype mismatch 已修复；后续追踪确认真正根因为基础 T5 检查点快速初始化上下文下新增自定义图适配器参数未初始化，node_projection 出现异常大值并导致后续溢出，不是 FP16 图传播公式问题。本轮已增加显式初始化/检查点保留契约、逐参数初始化报告和 CPU 测试，需重新运行同一 GPU 诊断。当前 zero-update 入口审计仍为 `BLOCKED`（阻塞）：control_loss 有限，但 treatment、重复前向、source training/dev、DANN 损失及 ASTE/DANN 梯度为 NaN；参数未更新，target test 未访问。正式训练仍未批准，M1 仍不能记为通过。
 
 ## 当前任务边界
 

@@ -1,6 +1,6 @@
 # 当前任务
 
-> 更新时间：2026-08-27 14:18（北京时间）
+> 更新时间：2026-08-27 15:41（北京时间）
 
 - 任务编号：M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1
 - 任务类型：READ-ONLY DIAGNOSTIC IMPLEMENTATION（只读诊断实现）
@@ -14,12 +14,14 @@
 - M1 句法图 zero-update（零更新）入口审计当前为 BLOCKED（阻塞），代码提交为 `3877838c0e0b0e5079bd4b0797ec7014d301ab30`。
 - 审计目录为 `J:\\nlp\\CD-C3DA\\runs\\diagnostics\\laptop14_to_rest15_m1_syntactic_rgat_entry_audit_v2`；图缓存、身份、边合法性、断点恢复、8GB 显存和零更新门控已通过。
 - control_loss（控制组损失）有限；treatment_loss（处理组损失）、重复前向、source training/dev、DANN（领域对抗网络）损失、treatment encoder/logit 差异和 ASTE/DANN 梯度为 NaN（非数值）；参数未更新，target test（目标测试集）未访问。
+- 后续 FP32/FP16 数值追踪确认真正根因为基础 T5 检查点的快速初始化上下文使新增自定义图适配器参数未完成初始化，node_projection（节点投影）出现异常大值并导致后续溢出；这不是 FP16 图传播公式问题。
 
 ## 本轮实现状态
 
 - 已新增 `m1_graph_fp16_numerical_trace.py`，固定读取现有三份图缓存中的首批 source_train、source_dev 和 target_unlabeled 样本，分别执行 FP32（单精度）与 CUDA autocast FP16（自动混合精度半精度）追踪。
 - 已在适配器和 T5 图模型入口记录编码器、图注意力、消息聚合、融合、解码器 logits（逻辑值）、损失、ASTE 反向梯度和 DANN 损失/梯度；异常保留首个阶段、位置、行、边及关系类型。
-- 用户实际启动同一 GPU（图形处理器）数值追踪时，因 trace-only（仅追踪）`attention_probabilities` 的 FP32/FP16（单精度/半精度）布尔高级索引写入 dtype mismatch（数据类型不一致）而阻塞；本轮仅修复该旁路写入并补充回归测试，修复后必须用同一固定样本重新运行同一诊断，GPU 全量数值追踪仍待用户运行，M1 仍未最终通过。
+- 用户实际启动同一 GPU（图形处理器）数值追踪时，先因 trace-only（仅追踪）`attention_probabilities` 的 FP32/FP16（单精度/半精度）布尔高级索引写入 dtype mismatch（数据类型不一致）而阻塞；该旁路问题已修复。随后确认基础检查点加载时新增图参数未初始化，本轮已增加显式初始化与检查点保留契约及 CPU 回归测试；必须用同一固定样本重新运行同一诊断，GPU 全量数值追踪仍待用户运行，M1 仍未最终通过。
+- 数值追踪报告现记录 `graph_parameter_initialization`（图参数初始化）模式、基础/图检查点识别、图参数 SHA256（哈希）和逐参数有限性统计。
 
 ## 批准范围
 

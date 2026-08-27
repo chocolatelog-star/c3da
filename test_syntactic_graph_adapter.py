@@ -43,6 +43,134 @@ def graph_inputs(batch_size=2, token_count=6, word_count=3):
     }
 
 
+def _tiny_t5_config():
+    return T5Config(
+        vocab_size=32,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=2,
+        dropout_rate=0.0,
+        pad_token_id=0,
+        eos_token_id=1,
+        decoder_start_token_id=0,
+    )
+
+
+def _write_tiny_base_checkpoint(tmp_path):
+    base_dir = tmp_path / "base-t5"
+    T5ForConditionalGeneration(_tiny_t5_config()).save_pretrained(base_dir)
+    return base_dir
+
+
+def _load_graph_model_from_base(base_dir, seed=1000):
+    config = T5Config.from_pretrained(base_dir, local_files_only=True)
+    graph_model_config(config, 8)
+    torch.manual_seed(seed)
+    return SyntacticGraphT5ForConditionalGeneration.from_pretrained(
+        base_dir,
+        config=config,
+        local_files_only=True,
+    )
+
+
+def _graph_parameter_state(model):
+    return {
+        name: parameter.detach().clone()
+        for name, parameter in model.syntactic_graph_adapter.named_parameters()
+    }
+
+
+def test_graph_adapter_explicit_reset_parameters_is_deterministic_and_zeroes_output():
+    first = SyntacticGraphAdapter(8, 8, 2, 4, 8, 0.0)
+    second = SyntacticGraphAdapter(8, 8, 2, 4, 8, 0.0)
+    torch.manual_seed(1000)
+    first.reset_parameters()
+    torch.manual_seed(1000)
+    second.reset_parameters()
+
+    first_state = _graph_parameter_state(type("Model", (), {"syntactic_graph_adapter": first})())
+    second_state = _graph_parameter_state(type("Model", (), {"syntactic_graph_adapter": second})())
+    assert first_state.keys() == second_state.keys()
+    assert all(torch.equal(first_state[name], second_state[name]) for name in first_state)
+    assert all(torch.isfinite(parameter).all() for parameter in first.parameters())
+    assert all(parameter.detach().abs().max() < 1.0e6 for parameter in first.parameters())
+    assert torch.count_nonzero(first.output_projection.weight) == 0
+
+
+def test_base_checkpoint_loading_initializes_graph_parameters_deterministically(tmp_path):
+    base_dir = _write_tiny_base_checkpoint(tmp_path)
+    first = _load_graph_model_from_base(base_dir, seed=1000)
+    second = _load_graph_model_from_base(base_dir, seed=1000)
+    first_state = _graph_parameter_state(first)
+    second_state = _graph_parameter_state(second)
+
+    assert first_state.keys() == second_state.keys()
+    assert all(torch.equal(first_state[name], second_state[name]) for name in first_state)
+    assert all(torch.isfinite(parameter).all() for parameter in first_state.values())
+    assert all(parameter.abs().max() < 1.0e6 for parameter in first_state.values())
+    assert torch.count_nonzero(first.syntactic_graph_adapter.output_projection.weight) == 0
+    assert first.graph_parameter_initialization["initialized_from_base_checkpoint"] is True
+    assert first.graph_parameter_initialization["graph_checkpoint_detected"] is False
+
+
+def test_base_checkpoint_loading_uses_seed_for_nonzero_graph_parameters(tmp_path):
+    base_dir = _write_tiny_base_checkpoint(tmp_path)
+    first = _load_graph_model_from_base(base_dir, seed=1000)
+    second = _load_graph_model_from_base(base_dir, seed=1001)
+    first_state = _graph_parameter_state(first)
+    second_state = _graph_parameter_state(second)
+
+    nonzero_names = [name for name, parameter in first_state.items() if torch.count_nonzero(parameter)]
+    assert nonzero_names
+    assert any(not torch.equal(first_state[name], second_state[name]) for name in nonzero_names)
+
+
+def test_graph_checkpoint_round_trip_preserves_every_graph_parameter(tmp_path):
+    config = _tiny_t5_config()
+    graph_model_config(config, 8)
+    source = SyntacticGraphT5ForConditionalGeneration(config).eval()
+    with torch.no_grad():
+        for index, parameter in enumerate(source.syntactic_graph_adapter.parameters(), start=1):
+            parameter.fill_(index / 100.0)
+    checkpoint_dir = tmp_path / "graph-checkpoint"
+    source.save_pretrained(checkpoint_dir)
+
+    loaded = SyntacticGraphT5ForConditionalGeneration.from_pretrained(
+        checkpoint_dir,
+        local_files_only=True,
+    )
+    source_state = _graph_parameter_state(source)
+    loaded_state = _graph_parameter_state(loaded)
+    assert source_state.keys() == loaded_state.keys()
+    assert all(torch.equal(source_state[name], loaded_state[name]) for name in source_state)
+    assert loaded.graph_parameter_initialization["initialized_from_base_checkpoint"] is False
+    assert loaded.graph_parameter_initialization["graph_checkpoint_detected"] is True
+
+
+def test_base_checkpoint_zero_update_graph_path_is_finite_and_control_equivalent(tmp_path):
+    base_dir = _write_tiny_base_checkpoint(tmp_path)
+    control = T5ForConditionalGeneration.from_pretrained(base_dir, local_files_only=True).eval()
+    treatment = _load_graph_model_from_base(base_dir, seed=1000).eval()
+    input_ids = torch.tensor([[2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13]])
+    labels = torch.tensor([[1, 2, 3], [1, 2, 3]])
+    fields = {"graph_" + key: value for key, value in graph_inputs().items()}
+
+    control_output = control(input_ids=input_ids, attention_mask=torch.ones_like(input_ids), labels=labels)
+    treatment_output = treatment(
+        input_ids=input_ids,
+        attention_mask=torch.ones_like(input_ids),
+        labels=labels,
+        **fields,
+    )
+    assert torch.isfinite(treatment_output.logits).all()
+    assert torch.isfinite(treatment_output.loss)
+    assert torch.equal(control_output.logits, treatment_output.logits)
+    assert torch.equal(control_output.loss, treatment_output.loss)
+
+
 def test_zero_initialized_output_preserves_encoder_hidden_and_prefix_padding():
     torch.manual_seed(1000)
     adapter = SyntacticGraphAdapter(

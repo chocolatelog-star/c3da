@@ -57,6 +57,19 @@ class SyntacticGraphAdapter(nn.Module):
         self.graph_dropout = nn.Dropout(float(dropout))
         self.output_projection = nn.Linear(graph_hidden_size, hidden_size, bias=False)
         self.gate_projection = nn.Linear(hidden_size * 2, hidden_size)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Restore the standard child-module initialization contract."""
+        self.node_projection.reset_parameters()
+        self.query_projection.reset_parameters()
+        self.key_projection.reset_parameters()
+        self.value_projection.reset_parameters()
+        self.relation_embedding.reset_parameters()
+        self.dependency_bias.reset_parameters()
+        self.pos_pair_bias.reset_parameters()
+        self.output_projection.reset_parameters()
+        self.gate_projection.reset_parameters()
         nn.init.zeros_(self.output_projection.weight)
 
     def _pool_word_hidden(
@@ -318,6 +331,52 @@ if AutoModelForSeq2SeqLM is not None:
         def __init__(self, config):
             super().__init__(config)
             self.syntactic_graph_adapter = _graph_adapter_from_config(config)
+            self.graph_parameter_initialization = {
+                "initialization_mode": "constructor_default",
+                "initialized_from_base_checkpoint": False,
+                "graph_checkpoint_detected": False,
+            }
+
+        @classmethod
+        def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+            """Load T5 weights while initializing only missing graph parameters."""
+            caller_requested_loading_info = bool(kwargs.get("output_loading_info", False))
+            kwargs["output_loading_info"] = True
+            model, loading_info = super().from_pretrained(
+                pretrained_model_name_or_path,
+                *model_args,
+                **kwargs,
+            )
+            graph_parameter_names = {
+                f"syntactic_graph_adapter.{name}"
+                for name, _ in model.syntactic_graph_adapter.named_parameters()
+            }
+            missing_graph_parameters = graph_parameter_names.intersection(
+                set(loading_info.get("missing_keys", []))
+            )
+            loaded_graph_parameters = graph_parameter_names - missing_graph_parameters
+            if missing_graph_parameters and loaded_graph_parameters:
+                missing = ", ".join(sorted(missing_graph_parameters))
+                raise RuntimeError(
+                    "checkpoint contains only a partial syntactic graph adapter; "
+                    f"refusing to reset or overwrite graph parameters (missing: {missing})"
+                )
+            if missing_graph_parameters:
+                model.syntactic_graph_adapter.reset_parameters()
+                model.graph_parameter_initialization = {
+                    "initialization_mode": "base_checkpoint_missing_graph_parameters",
+                    "initialized_from_base_checkpoint": True,
+                    "graph_checkpoint_detected": False,
+                }
+            else:
+                model.graph_parameter_initialization = {
+                    "initialization_mode": "graph_checkpoint_loaded",
+                    "initialized_from_base_checkpoint": False,
+                    "graph_checkpoint_detected": True,
+                }
+            if caller_requested_loading_info:
+                return model, loading_info
+            return model
 
         @property
         def use_syntactic_graph_adapter(self) -> bool:
