@@ -624,7 +624,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             raise RuntimeError("saved Phase A Control artifact is missing; refusing resume")
         saved_actual = _read_json(existing_control_audit).get("actual", {})
         expected_for_resume = dict(actual_identity)
-        expected_for_resume["artifact_sha256"] = _sha256_bytes(_canonical_json({"base": actual_identity, "model_tree": _hash_tree(control_model_path)}))
+        expected_for_resume["artifact_sha256"] = _hash_tree(control_model_path)
         control_reuse_audit = audit_control_identity(expected_for_resume, saved_actual)
         control_reuse_audit["source"] = "resumed_phase_a_control"
         if not control_reuse_audit["reuse_allowed"]:
@@ -638,7 +638,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             expected = dict(actual_identity)
             prior_model_path = control_source / "models" / "extractor" / "best"
             if prior_model_path.is_dir():
-                expected["artifact_sha256"] = _sha256_bytes(_canonical_json({"base": actual_identity, "model_tree": _hash_tree(prior_model_path)}))
+                expected["artifact_sha256"] = _hash_tree(prior_model_path)
             control_reuse_audit = audit_control_identity(expected, prior_actual)
             control_reuse_audit["source"] = str(control_source)
             if control_reuse_audit["reuse_allowed"] and (control_source / "models" / "extractor" / "best").is_dir():
@@ -673,7 +673,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                     control_model_path = variant_dirs["control"] / "models" / "extractor" / "best"
                     control_artifact = _hash_tree(control_model_path)
                     control_identity = dict(actual_identity)
-                    control_identity["artifact_sha256"] = _sha256_bytes(_canonical_json({"base": actual_identity, "model_tree": control_artifact}))
+                    control_identity["artifact_sha256"] = control_artifact
                     control_reuse_audit = {"expected": control_identity, "actual": control_identity, "matches": {field: True for field in CONTROL_IDENTITY_FIELDS}, "all_matches": True, "reuse_allowed": True, "requires_rerun": False, "model_path": str(control_model_path), "source": "fresh_phase_a_control"}
                     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
                 elif stage == "treatment_training":
