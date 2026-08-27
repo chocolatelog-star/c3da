@@ -1,10 +1,17 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-26 22:59（北京时间）
+> 更新时间：2026-08-27 10:53（北京时间）
 
 ## 当前任务状态
 
-`M1_SYNTACTIC_RGAT_PSEUDO_INTERFACE_V1`（laptop14 -> rest15，seed 1000）已完成 Stanza English EWT（Stanza 英语 EWT）模型、CUDA、单句依存解析和六个文件 SHA256（哈希）核验。上一轮四项工程缺口已通过 Codex Sol 复验；本轮只补齐审计配方参数硬校验、显式批次组成和长度约束，未改变图结构参数、DANN 系数或研究方案。当前状态为 `RUNNING`（等待 Codex Sol 最后一次只读验收）；正式训练、GPU zero-update（零更新）审计和新伪标签仍未批准。未读取目标测试金标。
+`M1_ALIGNMENT_PREFLIGHT_V1`（laptop14 -> rest15，source_train/source_dev/target_unlabeled）已完成只读全量词—子词对齐预检入口实现。当前状态为 `RUNNING`（等待用户运行 GPU 预检并返回结果）；未运行 GPU 预检、正式训练、伪标签生成或目标测试读取。上一轮 M1 句法图入口和参数协议修复保持不变，图结构、DANN 系数和研究方案未改动。
+
+## 本轮只读对齐预检状态
+
+- 新增独立 `m1_alignment_preflight.py`，只扫描 source_train、source_dev 和 target_unlabeled；目标域只请求 train 输入，代码路径不请求 target_test。
+- 预检逐行继续、写入三个固定输出文件，显示三个数据划分进度条，并以 Git commit、输入 SHA256、Stanza 解析器身份、T5 fast tokenizer（快速分词器）身份、对齐策略版本和 max_source_length=128 做断点恢复硬校验。
+- 可疑清单包含合法连续共享和所有异常类型；机器可读汇总记录句/词/子词统计、分布、成功/失败行、覆盖率、截断和 PASS/BLOCKED 门控。
+- CPU 新增 8 项测试，M1 图相关回归 56 项通过；未更新正式实验索引，等待实际预检结果后统一记录。
 
 ## 本轮参数协议修复证据
 

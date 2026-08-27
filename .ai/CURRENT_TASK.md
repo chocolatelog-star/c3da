@@ -1,14 +1,21 @@
 # 当前任务
 
-> 更新时间：2026-08-26 22:59（北京时间）
+> 更新时间：2026-08-27 10:53（北京时间）
 
-- 任务编号：M1_SYNTACTIC_RGAT_PSEUDO_INTERFACE_V1
-- 任务类型：DIAGNOSTIC + IMPLEMENTATION ENTRY（诊断与实现入口）
+- 任务编号：M1_ALIGNMENT_PREFLIGHT_V1
+- 任务类型：READ-ONLY DIAGNOSTIC + IMPLEMENTATION（只读诊断与实现）
 - 方向：laptop14 -> rest15
-- 随机种子：1000
-- 状态：RUNNING（已完成最后参数协议修复，等待 Codex Sol 最后一次只读验收）
-- 用户批准状态：APPROVED_FOR_IMPLEMENTATION_ENTRY（已批准实现入口）
+- 扫描划分：source_train、source_dev、target_unlabeled
+- 状态：RUNNING（代码与 CPU 验证完成，等待用户运行 GPU 预检）
+- 用户批准状态：APPROVED_FOR_READ_ONLY_PREFLIGHT（已批准只读预检）
 - 正式训练状态：NOT APPROVED（未批准）
+
+## 本任务交付边界
+
+- 新增独立 `m1_alignment_preflight.py`，复用 `syntactic_graph.py` 的 Stanza EWT、fast offset mapping（快速偏移映射）和 `overlap-contiguous-sharing-v2` 对齐策略；不修改模型、训练、损失、数据、标签或正式实验逻辑。
+- 对三份实际输入逐行扫描；遇到行级异常只记录 `row_failure` 并继续后续行。合法连续共享也写入可疑清单，异常类型、覆盖率、分布和截断信息写入 JSON（结构化）汇总。
+- 输出目录只允许 `alignment_preflight_summary.json`、`alignment_suspicious_rows.jsonl` 和 `alignment_preflight_CN.md` 三个文件；恢复时硬校验 Git commit、输入 SHA256、解析器、分词器、策略版本和 `max_source_length=128`。
+- 目标测试隔离为硬约束；代码只加载 source train/dev 和 target train 作为 target_unlabeled，不请求 target_test。
 
 ## 研究边界
 
@@ -33,4 +40,4 @@ Control（控制组）与 Treatment（处理组）只允许在源域抽取器到
 
 ## 当前结论
 
-本轮固定 EWT 解析器前置核验完整通过；已完成最后参数协议修复：审计入口硬校验 recipe（配方）参数，固定 seed=1000、lambda_domain_adv=0.03、fp16、gradient_checkpointing、source train batch=1、source-dev eval batch=2、DANN source/target 组成和 128/96 长度，并将 actual/expected/matches 写入 JSON。图开关未带 `--syntactic_graph_entry_audit_only` 时继续硬停，普通无图流程保持旧路径；目标行 ASTE 标签为全 `-100`。CPU 11 项直接测试、AST 解析和差异格式检查通过；尚未启动 GPU zero-update（零更新）审计、正式训练、伪标签生成或目标测试读取。下一步等待 Codex Sol 最后一次只读验收。
+本轮只读对齐预检实现已完成：新增测试 8 项全部通过，M1 图、DANN、入口边界、恢复及后处理相关回归 56 项全部通过，AST（抽象语法树）解析和差异格式检查通过。断点测试验证中断后继续扫描、输出目录三文件契约和身份变化硬停止；未运行 GPU 预检、正式训练、伪标签生成或目标测试读取。未更新正式实验索引，等待用户返回实际预检结果后统一记录。
