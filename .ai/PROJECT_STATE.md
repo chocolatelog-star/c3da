@@ -1,6 +1,6 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-27 19:30（北京时间）
+> 更新时间：2026-08-27 20:02（北京时间）
 
 ## 当前任务状态
 
@@ -14,16 +14,17 @@
 
 ## 当前任务边界
 
-- 本轮只修复 Phase A 的 DANN 成对批次、逐阶段产物身份和外部 Control（对照组）恢复；不修改模型公式、损失系数、实验参数、图结构或数据增强逻辑。
+- 本轮只修复 Phase A 的 DANN 成对批次、逐阶段产物身份、外部 Control（对照组）恢复和采样器轮次恢复；不修改模型公式、损失系数、实验参数、图结构或数据增强逻辑。
 - Phase A 允许通过专用入口执行 Control/Treatment（对照组/实验组）抽取器训练、source-dev（源域开发集）评估、目标无标签 DANN 和目标伪推理；本轮代码修复不启动 GPU（图形处理器）实验、正式训练、正式伪标签或目标测试。
 - 不使用 `nan_to_num`、梯度裁剪、关闭图模块或改成 FP32 掩盖异常；Phase B（下游阶段）、生成器、增强、NLI（自然语言推断）、最终 ASTE（方面级情感三元组抽取）和 target test（目标测试）始终禁止。
-- 本轮复审只修复 Phase A 的成对 DANN 批次和逐阶段产物身份恢复：每个逻辑批次严格为 source=1/target=1，目标行仅承担 DANN 损失；Control/Treatment 抽取器训练、source-dev 评估和 target-unlabeled 伪推理仍只能经专用入口执行。
+- 本轮复审只修复 Phase A 的成对 DANN 批次和逐阶段产物身份恢复：每个逻辑批次严格为 source=1/target=1，目标行仅承担 DANN 损失；Control/Treatment 抽取器训练、source-dev 评估和 target-unlabeled 伪推理仍只能经专用入口执行。A4 六个伪标签产物、训练模型与 DANN 审计报告均逐项记录和重算校验；外部 Control 缺少报告或报告/批次身份不一致时硬失败。
+- PairedDomainBatchSampler（成对领域批次采样器）现在由显式 `set_epoch` 控制轮次，并提供带 seed、行 ID、计数和批大小身份的 `state_dict/load_state_dict`；额外 DataLoader（数据加载器）迭代不会推进轮次，恢复后批次顺序按 seed+epoch 保持一致。
 
 ## 本轮接口修复状态
 
 - `generate_texts` 新增可选 `graph_cache_identity_rows`：完整 `target_unlabeled` 行只进入 `load_graph_cache_directory` 的 manifest 身份验证，`graph_rows` 仍只负责当前子集的 `GraphCache.get` 和批次整理；未提供新参数时回退到原有 `graph_rows` 行为。
 - 审计入口已传入完整 `target_rows` 和当前 `target_sample`，仍只保留一条内存诊断结果；缓存 manifest 哈希校验、子集行 ID/文本/输入哈希硬拒绝和 `target_test` 禁止访问均未放宽。
-- 本轮 M1 CPU 直接测试共 75 项通过，新增部分图检查点硬拒绝回归；未运行 GPU、正式训练、正式伪标签或目标测试，正式训练仍未批准。
+- 本轮 M1 相关 CPU 直接测试共 102 项通过，其中新增 8 项覆盖六产物身份、DANN 报告联合身份、外部 Control 硬失败和采样器恢复；未运行 GPU、正式训练、正式伪标签或目标测试，正式训练仍未批准。
 
 ## 上一任务只读对齐预检状态
 
