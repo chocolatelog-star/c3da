@@ -867,6 +867,7 @@ def _run_model_audit(
     treatment.zero_grad(set_to_none=True)
 
     treatment.eval()
+    target_pseudo_error = None
     try:
         from t5_aste_pipeline import generate_texts
 
@@ -884,7 +885,11 @@ def _run_model_audit(
             graph_split="target_unlabeled",
         )
         callpoints["target_pseudo_inference"] = len(generated) == len(target_sample)
-    except Exception:
+    except Exception as exc:
+        target_pseudo_error = {
+            "exception_type": type(exc).__name__,
+            "message": str(exc),
+        }
         callpoints["target_pseudo_inference"] = False
 
     treatment.train()
@@ -934,6 +939,7 @@ def _run_model_audit(
         "source_train_batch_size": len(source_sample),
         "source_dev_batch_size": len(dev_sample),
         "target_pseudo_batch_size": int(args.target_pseudo_batch_size),
+        "target_pseudo_inference_error": target_pseudo_error,
         "gradient_checkpointing_enabled": bool(getattr(treatment, "is_gradient_checkpointing", False)),
         "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
         "gpu_total_memory_bytes": int(torch.cuda.get_device_properties(device).total_memory) if device.type == "cuda" else 0,

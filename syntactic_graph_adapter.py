@@ -7,6 +7,11 @@ import torch
 import torch.nn as nn
 
 
+def _record_trace(trace, stage: str, value: torch.Tensor, axes=()):
+    if trace is not None:
+        trace.record(stage, value, axes=axes)
+
+
 @dataclass
 class GraphAdapterOutput:
     fused_hidden: torch.Tensor
@@ -102,6 +107,7 @@ class SyntacticGraphAdapter(nn.Module):
         pos_pair_id: torch.Tensor,
         edge_mask: torch.Tensor,
         word_mask: torch.Tensor,
+        trace=None,
     ) -> torch.Tensor:
         batch_size, node_count, _ = projected_nodes.shape
         edge_count = edge_src.size(1)
@@ -124,6 +130,9 @@ class SyntacticGraphAdapter(nn.Module):
         values = self.value_projection(projected_nodes).view(
             batch_size, node_count, self.attention_heads, self.head_size
         )
+        _record_trace(trace, "query_projection", queries, ("batch", "node", "head", "feature"))
+        _record_trace(trace, "key_projection", keys, ("batch", "node", "head", "feature"))
+        _record_trace(trace, "value_projection", values, ("batch", "node", "head", "feature"))
         edge_queries = self._gather_nodes(queries.reshape(batch_size, node_count, -1), safe_dst).view(
             batch_size, edge_count, self.attention_heads, self.head_size
         )
@@ -133,14 +142,33 @@ class SyntacticGraphAdapter(nn.Module):
         edge_values = self._gather_nodes(values.reshape(batch_size, node_count, -1), safe_src).view(
             batch_size, edge_count, self.attention_heads, self.head_size
         )
+        _record_trace(trace, "edge_query", edge_queries, ("batch", "edge", "head", "feature"))
+        _record_trace(trace, "edge_key", edge_keys, ("batch", "edge", "head", "feature"))
+        _record_trace(trace, "edge_value", edge_values, ("batch", "edge", "head", "feature"))
         relation_ids = relation_id.clamp(min=0, max=self.relation_embedding.num_embeddings - 1)
         dependency_ids = dependency_relation_id.clamp(min=0, max=self.dependency_bias.num_embeddings - 1)
         pos_ids = pos_pair_id.clamp(min=0, max=self.pos_pair_bias.num_embeddings - 1)
         relation = self.relation_embedding(relation_ids).view(
             batch_size, edge_count, self.attention_heads, self.head_size
         )
-        logits = (edge_queries * edge_keys).sum(dim=-1) / math.sqrt(self.head_size)
-        logits = logits + self.dependency_bias(dependency_ids) + self.pos_pair_bias(pos_ids)
+        _record_trace(trace, "relation_embeddings", relation, ("batch", "edge", "head", "feature"))
+        query_key_product = edge_queries * edge_keys
+        _record_trace(trace, "query_key_product", query_key_product, ("batch", "edge", "head", "feature"))
+        logits_before_scaling = query_key_product.sum(dim=-1)
+        _record_trace(trace, "attention_logits_before_scaling", logits_before_scaling, ("batch", "edge", "head"))
+        logits_scaled = logits_before_scaling / math.sqrt(self.head_size)
+        _record_trace(trace, "attention_logits_scaled", logits_scaled, ("batch", "edge", "head"))
+        dependency_bias = self.dependency_bias(dependency_ids)
+        pos_pair_bias = self.pos_pair_bias(pos_ids)
+        _record_trace(trace, "dependency_bias", dependency_bias, ("batch", "edge", "head"))
+        _record_trace(trace, "pos_pair_bias", pos_pair_bias, ("batch", "edge", "head"))
+        logits = logits_scaled + dependency_bias + pos_pair_bias
+        _record_trace(trace, "final_attention_logits", logits, ("batch", "edge", "head"))
+        softmax_input_float32 = logits.float()
+        _record_trace(trace, "softmax_input_float32_logits", softmax_input_float32, ("batch", "edge", "head"))
+        attention_probabilities = torch.zeros_like(logits)
+        edge_messages = edge_values + relation
+        _record_trace(trace, "edge_messages", edge_messages, ("batch", "edge", "head", "feature"))
         messages = torch.zeros(
             batch_size,
             node_count,
@@ -155,8 +183,11 @@ class SyntacticGraphAdapter(nn.Module):
                 if not bool(word_mask[batch_index, node_index]) or not bool(active.any()):
                     continue
                 attention = torch.softmax(logits[batch_index, active].float(), dim=0).to(projected_nodes.dtype)
-                message = edge_values[batch_index, active] + relation[batch_index, active]
+                attention_probabilities[batch_index, active] = attention
+                message = edge_messages[batch_index, active]
                 messages[batch_index, node_index] = (attention.unsqueeze(-1) * message).sum(dim=0)
+        _record_trace(trace, "attention_probabilities", attention_probabilities, ("batch", "edge", "head"))
+        _record_trace(trace, "aggregated_messages", messages, ("batch", "node", "head", "feature"))
         return messages.reshape(batch_size, node_count, self.graph_hidden_size)
 
     def _broadcast_to_subwords(
@@ -195,9 +226,12 @@ class SyntacticGraphAdapter(nn.Module):
         dependency_relation_id: torch.Tensor,
         pos_pair_id: torch.Tensor,
         edge_mask: torch.Tensor,
+        trace=None,
     ) -> GraphAdapterOutput:
         word_hidden = self._pool_word_hidden(hidden, word_to_subword, word_mask)
+        _record_trace(trace, "pooled_word_hidden", word_hidden, ("batch", "node", "feature"))
         projected = self.node_projection(word_hidden)
+        _record_trace(trace, "node_projection", projected, ("batch", "node", "feature"))
         graph_hidden = self._graph_attention(
             projected,
             edge_src,
@@ -207,11 +241,19 @@ class SyntacticGraphAdapter(nn.Module):
             pos_pair_id,
             edge_mask,
             word_mask,
+            trace=trace,
         )
+        _record_trace(trace, "graph_hidden", graph_hidden, ("batch", "node", "feature"))
         graph_hidden = self.graph_dropout(graph_hidden)
+        _record_trace(trace, "dropout_graph_hidden", graph_hidden, ("batch", "node", "feature"))
+        _record_trace(trace, "output_projection_input", graph_hidden, ("batch", "node", "feature"))
         residual = self.output_projection(graph_hidden)
+        _record_trace(trace, "output_projection_output", residual, ("batch", "node", "feature"))
+        _record_trace(trace, "residual", residual, ("batch", "node", "feature"))
         gate = torch.sigmoid(self.gate_projection(torch.cat([word_hidden, residual], dim=-1)))
+        _record_trace(trace, "gate", gate, ("batch", "node", "feature"))
         word_delta = gate * residual
+        _record_trace(trace, "word_delta", word_delta, ("batch", "node", "feature"))
         fused_hidden = self._broadcast_to_subwords(
             hidden,
             word_delta,
@@ -219,6 +261,7 @@ class SyntacticGraphAdapter(nn.Module):
             word_mask,
             attention_mask,
         )
+        _record_trace(trace, "fused_hidden", fused_hidden, ("batch", "token", "feature"))
         return GraphAdapterOutput(
             fused_hidden=fused_hidden,
             graph_hidden=graph_hidden * word_mask.unsqueeze(-1).to(graph_hidden.dtype),
@@ -287,6 +330,7 @@ if AutoModelForSeq2SeqLM is not None:
             dependency_relation_id=None,
             pos_pair_id=None,
             edge_mask=None,
+            trace=None,
         ):
             graph_fields = {
                 "word_to_subword": word_to_subword,
@@ -307,10 +351,17 @@ if AutoModelForSeq2SeqLM is not None:
                 inputs_embeds=inputs_embeds,
                 return_dict=True,
             )
+            _record_trace(
+                trace,
+                "t5_encoder_last_hidden_state",
+                encoder_outputs.last_hidden_state,
+                ("batch", "token", "feature"),
+            )
             adapter_output = self.syntactic_graph_adapter(
                 encoder_outputs.last_hidden_state,
                 attention_mask=attention_mask,
                 **graph_fields,
+                trace=trace,
             )
             return BaseModelOutput(
                 last_hidden_state=adapter_output.fused_hidden,
@@ -344,6 +395,7 @@ if AutoModelForSeq2SeqLM is not None:
             graph_dependency_relation_id=None,
             graph_pos_pair_id=None,
             graph_edge_mask=None,
+            graph_trace=None,
             **kwargs,
         ):
             if encoder_outputs is None:
@@ -359,8 +411,9 @@ if AutoModelForSeq2SeqLM is not None:
                     dependency_relation_id=graph_dependency_relation_id,
                     pos_pair_id=graph_pos_pair_id,
                     edge_mask=graph_edge_mask,
+                    trace=graph_trace,
                 )
-            return super().forward(
+            outputs = super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 decoder_input_ids=decoder_input_ids,
@@ -378,8 +431,20 @@ if AutoModelForSeq2SeqLM is not None:
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
+            if graph_trace is not None:
+                if getattr(outputs, "logits", None) is not None:
+                    _record_trace(
+                        graph_trace,
+                        "decoder_logits",
+                        outputs.logits,
+                        ("batch", "token", "feature"),
+                    )
+                if getattr(outputs, "loss", None) is not None:
+                    _record_trace(graph_trace, "final_loss", outputs.loss, ())
+            return outputs
 
         def generate(self, inputs=None, **kwargs):
+            graph_trace = kwargs.pop("graph_trace", None)
             graph_names = (
                 "graph_word_to_subword",
                 "graph_word_mask",
@@ -401,6 +466,7 @@ if AutoModelForSeq2SeqLM is not None:
                         name.removeprefix("graph_"): value
                         for name, value in graph_fields.items()
                     },
+                    trace=graph_trace,
                 )
                 kwargs["encoder_outputs"] = encoder_outputs
             return super().generate(inputs=inputs, **kwargs)
