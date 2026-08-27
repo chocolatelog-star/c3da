@@ -136,6 +136,7 @@ def build_stage_identity(
     model_path: Path,
     producer_commit: str,
     recipe_path: Path | None = None,
+    output_artifacts: dict[str, Path] | None = None,
 ) -> dict:
     input_identities = {}
     for name, raw_path in sorted(input_files.items()):
@@ -143,6 +144,12 @@ def build_stage_identity(
         input_identities[name] = {"path": str(path), "sha256": sha256_file(path)}
     output_identity = _artifact_identity(Path(artifact_path))
     model_identity = _artifact_identity(Path(model_path))
+    output_identities = {
+        name: _artifact_identity(Path(path))
+        for name, path in sorted((output_artifacts or {}).items())
+    }
+    if not output_identities:
+        output_identities["primary"] = output_identity
     return {
         "schema_version": 2,
         "stage": stage,
@@ -154,6 +161,7 @@ def build_stage_identity(
         "output_artifact_path": output_identity["path"],
         "output_artifact_kind": output_identity["kind"],
         "output_artifact_sha256": output_identity["sha256"],
+        "output_artifacts": output_identities,
         "model_artifact_path": model_identity["path"],
         "model_artifact_kind": model_identity["kind"],
         "model_artifact_sha256": model_identity["sha256"],
@@ -174,6 +182,7 @@ def validate_stage_identity(saved: dict, expected: dict | None = None) -> bool:
         "output_artifact_path",
         "output_artifact_kind",
         "output_artifact_sha256",
+        "output_artifacts",
         "model_artifact_path",
         "model_artifact_kind",
         "model_artifact_sha256",
@@ -218,6 +227,33 @@ def validate_stage_identity(saved: dict, expected: dict | None = None) -> bool:
             continue
         if current["kind"] != kind or current["sha256"] != saved.get(f"{prefix}_sha256"):
             problems.append(f"{prefix}_sha256")
+    output_artifacts = saved.get("output_artifacts")
+    if not isinstance(output_artifacts, dict) or not output_artifacts:
+        problems.append("output_artifacts")
+    else:
+        for name, identity in output_artifacts.items():
+            if not isinstance(identity, dict) or not identity.get("path") or not identity.get("kind") or not identity.get("sha256"):
+                problems.append(f"output_artifacts:{name}")
+                continue
+            path = Path(identity["path"])
+            if not path.exists():
+                problems.append(f"output_artifacts:{name}")
+                continue
+            try:
+                current = _artifact_identity(path)
+            except FileNotFoundError:
+                problems.append(f"output_artifacts:{name}")
+                continue
+            if current != identity:
+                problems.append(f"output_artifacts:{name}")
+        primary = output_artifacts.get("primary")
+        if isinstance(primary, dict):
+            if primary.get("path") != saved.get("output_artifact_path"):
+                problems.append("output_artifacts:primary_path")
+            if primary.get("kind") != saved.get("output_artifact_kind"):
+                problems.append("output_artifacts:primary_kind")
+            if primary.get("sha256") != saved.get("output_artifact_sha256"):
+                problems.append("output_artifacts:primary_sha256")
     if saved.get("resolved_model_path") != saved.get("model_artifact_path"):
         problems.append("resolved_model_path")
     if expected is not None:
@@ -699,14 +735,38 @@ def _pseudo_supply(variant_dir: Path) -> dict:
     }
 
 
-def _read_dann_batch_audit(variant_dir: Path) -> dict:
-    path = variant_dir / "dann_batch_audit.json"
+def build_phase_a_pseudo_output_paths(variant_dir: Path) -> dict[str, Path]:
+    names = (
+        "target_pseudo.jsonl",
+        "target_pseudo_selected.jsonl",
+        "target_pseudo_high_precision.jsonl",
+        "target_pseudo_train_selected.jsonl",
+        "target_pseudo_selected_analysis.json",
+        "target_pseudo_generation_state.json",
+    )
+    return {name: Path(variant_dir) / name for name in names}
+
+
+def _read_dann_batch_audit(variant_dir: Path, expected_epochs: int | None = None) -> dict:
+    path = Path(variant_dir)
+    if path.is_dir():
+        path = path / "dann_batch_audit.json"
     if not path.is_file():
         raise RuntimeError(f"missing DANN batch audit report: {path}")
     report = _read_json(path)
-    if not isinstance(report, dict) or not isinstance(report.get("epochs"), list):
+    if not isinstance(report, dict) or not isinstance(report.get("epochs"), list) or not report["epochs"]:
         raise RuntimeError(f"invalid DANN batch audit report: {path}")
+    if expected_epochs is not None and len(report["epochs"]) != expected_epochs:
+        raise RuntimeError(f"DANN batch audit epoch count mismatch: {path}")
+    seen_epochs = set()
     for epoch in report["epochs"]:
+        if not isinstance(epoch, dict):
+            raise RuntimeError(f"DANN batch audit contains a non-object epoch: {path}")
+        if not isinstance(epoch.get("epoch"), int) or epoch["epoch"] in seen_epochs:
+            raise RuntimeError(f"DANN batch audit has duplicate or invalid epoch numbers: {path}")
+        seen_epochs.add(epoch["epoch"])
+        if not isinstance(epoch.get("batches"), list) or not epoch["batches"]:
+            raise RuntimeError(f"DANN batch audit has an empty epoch: {path}")
         if (
             epoch.get("source_batch_size") != 1
             or epoch.get("target_batch_size") != 1
@@ -715,19 +775,43 @@ def _read_dann_batch_audit(variant_dir: Path) -> dict:
                 batch.get("source_count") != 1 or batch.get("target_count") != 1
                 for batch in epoch.get("batches", [])
             )
-        ):
+            ):
             raise RuntimeError(f"DANN batch audit contains an incomplete or non-1/1 epoch: {path}")
+    if expected_epochs is not None and sorted(seen_epochs) != list(range(expected_epochs)):
+        raise RuntimeError(f"DANN batch audit epochs must be contiguous from zero: {path}")
     return report
 
 
-def _validate_control_treatment_dann_reports(variant_dirs: dict[str, Path], control_reuse_audit: dict) -> dict:
-    control_path = variant_dirs["control"] / "dann_batch_audit.json"
+def validate_external_control_dann_audit(control_reuse_audit: dict, expected_epochs: int | None = None) -> dict:
+    path = Path(control_reuse_audit.get("dann_batch_audit_path", ""))
+    expected_hash = control_reuse_audit.get("dann_batch_audit_sha256")
+    if not path.is_file() or not expected_hash:
+        raise RuntimeError("external Control requires a DANN batch audit path and SHA256")
+    actual_hash = sha256_file(path)
+    if actual_hash != expected_hash:
+        raise RuntimeError("external Control DANN batch audit hash changed; refusing reuse")
+    return _read_dann_batch_audit(path, expected_epochs=expected_epochs)
+
+
+def _validate_control_treatment_dann_reports(
+    variant_dirs: dict[str, Path],
+    control_reuse_audit: dict,
+    expected_epochs: int | None = None,
+) -> dict:
     treatment_path = variant_dirs["treatment"] / "dann_batch_audit.json"
-    if not control_path.is_file() and control_reuse_audit.get("source") not in {"fresh_phase_a_control", "resumed_phase_a_control"}:
-        return {"status": "external_control_report_unavailable", "control": None, "treatment": _read_dann_batch_audit(treatment_path)}
-    control_report = _read_dann_batch_audit(control_path)
-    treatment_report = _read_dann_batch_audit(treatment_path)
-    if control_report.get("epochs") != treatment_report.get("epochs"):
+    control_report = validate_external_control_dann_audit(control_reuse_audit, expected_epochs=expected_epochs)
+    treatment_report = _read_dann_batch_audit(treatment_path, expected_epochs=expected_epochs)
+    comparable_fields = (
+        "seed",
+        "source_batch_size",
+        "target_batch_size",
+        "source_count",
+        "target_count",
+        "source_row_ids",
+        "target_row_ids",
+        "epochs",
+    )
+    if any(control_report.get(field) != treatment_report.get(field) for field in comparable_fields):
         raise RuntimeError("Control and Treatment DANN batch orders or steps differ")
     return {"status": "matched", "control": control_report, "treatment": treatment_report}
 
@@ -798,12 +882,16 @@ def _stage_spec(
     control_model_path: Path,
     *,
     execute_control_training: bool,
+    control_dann_batch_audit_path: Path | None = None,
 ) -> dict:
     control_dir = variant_dirs["control"]
     treatment_dir = variant_dirs["treatment"]
     if stage == "control_training":
+        audit_path = control_dann_batch_audit_path or (control_dir / "dann_batch_audit.json")
+        if not execute_control_training and control_dann_batch_audit_path is None:
+            raise RuntimeError("reused Control stage requires its resolved DANN batch audit path")
         if execute_control_training:
-            command = _training_argv(args, control_dir, False, control_dir / "dann_batch_audit.json")
+            command = _training_argv(args, control_dir, False, audit_path)
         else:
             command = [
                 "reuse_external_control",
@@ -813,14 +901,17 @@ def _stage_spec(
             "command": command,
             "artifact_path": control_model_path,
             "model_path": control_model_path,
+            "output_artifacts": {"extractor_best": control_model_path, "dann_batch_audit": audit_path},
             "variant_dir": control_dir,
         }
     if stage == "treatment_training":
         model_path = treatment_dir / "models" / "extractor" / "best"
+        audit_path = treatment_dir / "dann_batch_audit.json"
         return {
-            "command": _training_argv(args, treatment_dir, True, treatment_dir / "dann_batch_audit.json"),
+            "command": _training_argv(args, treatment_dir, True, audit_path),
             "artifact_path": model_path,
             "model_path": model_path,
+            "output_artifacts": {"extractor_best": model_path, "dann_batch_audit": audit_path},
             "variant_dir": treatment_dir,
         }
     if stage == "control_source_dev_evaluation":
@@ -841,20 +932,24 @@ def _stage_spec(
             "variant_dir": treatment_dir,
         }
     if stage == "control_target_pseudo_inference":
-        artifact = control_dir / "target_pseudo_high_precision.jsonl"
+        output_artifacts = build_phase_a_pseudo_output_paths(control_dir)
+        artifact = output_artifacts["target_pseudo_selected.jsonl"]
         return {
             "command": _pipeline_argv(args, control_dir, "pseudo", False, control_model_path),
             "artifact_path": artifact,
             "model_path": control_model_path,
+            "output_artifacts": output_artifacts,
             "variant_dir": control_dir,
         }
     if stage == "treatment_target_pseudo_inference":
         model_path = treatment_dir / "models" / "extractor" / "best"
-        artifact = treatment_dir / "target_pseudo_high_precision.jsonl"
+        output_artifacts = build_phase_a_pseudo_output_paths(treatment_dir)
+        artifact = output_artifacts["target_pseudo_selected.jsonl"]
         return {
             "command": _pipeline_argv(args, treatment_dir, "pseudo", True, model_path),
             "artifact_path": artifact,
             "model_path": model_path,
+            "output_artifacts": output_artifacts,
             "variant_dir": treatment_dir,
         }
     raise ValueError(f"unsupported Phase A stage: {stage}")
@@ -876,12 +971,14 @@ def _stage_record(
         spec["model_path"],
         git_commit,
         recipe_path=Path(args.recipe),
+        output_artifacts=spec.get("output_artifacts"),
     )
 
 
 def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
     _validate_recipe(recipe)
+    expected_dann_epochs = int(recipe["training"]["num_train_epochs"])
     run_dir = Path(args.output_dir)
     if run_dir.exists() and not args.resume:
         raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")
@@ -930,6 +1027,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         "reason": "no machine-verifiable control identity supplied",
     }
     control_model_path = variant_dirs["control"] / "models" / "extractor" / "best"
+    control_dann_batch_audit_path: Path | None = None
     control_training_is_reuse = False
     existing_control_audit = run_dir / "control_identity_audit.json"
     if args.resume and "control_training" in state.get("completed_stages", []):
@@ -945,12 +1043,14 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         saved_model_hash = saved_audit.get("model_tree_sha256")
         if not saved_model_hash or _hash_tree(control_model_path) != saved_model_hash:
             raise RuntimeError("saved Control model path or hash changed; refusing resume")
+        validate_external_control_dann_audit(saved_audit, expected_epochs=expected_dann_epochs)
         saved_actual = saved_audit.get("actual", saved_audit.get("identity", {}))
         expected_for_resume = dict(actual_identity)
         expected_for_resume["artifact_sha256"] = saved_model_hash
         if not audit_control_identity(expected_for_resume, saved_actual)["reuse_allowed"]:
             raise RuntimeError("saved Control identity changed; refusing resume")
         control_reuse_audit = saved_audit
+        control_dann_batch_audit_path = Path(saved_audit["dann_batch_audit_path"]).resolve()
         control_training_is_reuse = saved_audit.get("source") not in {"fresh_phase_a_control", "resumed_phase_a_control"}
     if args.control_run_dir:
         control_source = Path(args.control_run_dir).resolve()
@@ -969,12 +1069,18 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         prior_model_hash = prior.get("model_tree_sha256") or prior_actual.get("model_tree_sha256")
         if not prior_model_hash or _hash_tree(prior_model_path) != prior_model_hash:
             raise RuntimeError("external Control model tree hash changed; refusing reuse")
+        prior_dann_path = Path(prior.get("dann_batch_audit_path", ""))
+        prior_dann_hash = prior.get("dann_batch_audit_sha256")
+        if not prior_dann_path.is_file() or not prior_dann_hash or sha256_file(prior_dann_path) != prior_dann_hash:
+            raise RuntimeError("external Control DANN batch audit is missing or changed; refusing reuse")
+        _read_dann_batch_audit(prior_dann_path, expected_epochs=expected_dann_epochs)
         expected = dict(actual_identity)
         expected["artifact_sha256"] = prior_model_hash
         identity_audit = audit_control_identity(expected, prior_actual)
         if not identity_audit["reuse_allowed"]:
             raise RuntimeError("external Control identity mismatch; refusing reuse")
         control_model_path = prior_model_path
+        control_dann_batch_audit_path = prior_dann_path.resolve()
         control_training_is_reuse = True
         control_reuse_audit = {
             **identity_audit,
@@ -982,6 +1088,8 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             "resolved_model_path": str(prior_model_path),
             "model_path": str(prior_model_path),
             "model_tree_sha256": prior_model_hash,
+            "dann_batch_audit_path": str(prior_dann_path.resolve()),
+            "dann_batch_audit_sha256": prior_dann_hash,
         }
     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
 
@@ -1004,6 +1112,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 variant_dirs,
                 control_model_path,
                 execute_control_training=not control_training_is_reuse,
+                control_dann_batch_audit_path=control_dann_batch_audit_path,
             )
             if stage in state.get("completed_stages", []):
                 saved_stage = state.get("stages", {}).get(stage)
@@ -1019,6 +1128,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 if stage == "control_training":
                     _run_training(args, variant_dirs["control"], False)
                     control_model_path = variant_dirs["control"] / "models" / "extractor" / "best"
+                    control_dann_batch_audit_path = (variant_dirs["control"] / "dann_batch_audit.json").resolve()
                     control_artifact = _hash_tree(control_model_path)
                     control_identity = dict(actual_identity)
                     control_identity["artifact_sha256"] = control_artifact
@@ -1032,6 +1142,8 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                         "model_path": str(control_model_path.resolve()),
                         "resolved_model_path": str(control_model_path.resolve()),
                         "model_tree_sha256": control_artifact,
+                        "dann_batch_audit_path": str((variant_dirs["control"] / "dann_batch_audit.json").resolve()),
+                        "dann_batch_audit_sha256": sha256_file(variant_dirs["control"] / "dann_batch_audit.json"),
                         "source": "fresh_phase_a_control",
                     }
                     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
@@ -1051,6 +1163,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 variant_dirs,
                 control_model_path,
                 execute_control_training=not control_training_is_reuse,
+                control_dann_batch_audit_path=control_dann_batch_audit_path,
             )
             stage_record = _stage_record(args, stage, spec, recipe_sha256, git_identity["commit"])
             validate_stage_identity(stage_record)
@@ -1062,6 +1175,18 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     finally:
         progress.close()
 
+    for stage in stages:
+        spec = _stage_spec(
+            args,
+            stage,
+            variant_dirs,
+            control_model_path,
+            execute_control_training=not control_training_is_reuse,
+            control_dann_batch_audit_path=control_dann_batch_audit_path,
+        )
+        expected_stage = _stage_record(args, stage, spec, recipe_sha256, git_identity["commit"])
+        validate_stage_identity(state["stages"][stage], expected_stage)
+
     metrics = {
         "source_dev": {
             "control": _source_dev_metrics(variant_dirs["control"] / "aste_predictions_raw_fixed_source_dev.jsonl"),
@@ -1072,7 +1197,11 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             "treatment": _pseudo_supply(variant_dirs["treatment"]),
         },
     }
-    dann_batch_audit = _validate_control_treatment_dann_reports(variant_dirs, control_reuse_audit)
+    dann_batch_audit = _validate_control_treatment_dann_reports(
+        variant_dirs,
+        control_reuse_audit,
+        expected_epochs=expected_dann_epochs,
+    )
     gate_result = evaluate_phase_a_gates(metrics)
     decision = decide_phase_a(gate_result)
     summary = {

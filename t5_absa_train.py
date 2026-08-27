@@ -803,9 +803,74 @@ class PairedDomainBatchSampler:
         target_batches = math.ceil(self.target_count / self.target_batch_size)
         return max(source_batches, target_batches)
 
+    def set_epoch(self, epoch: int) -> None:
+        epoch = int(epoch)
+        if epoch < 0:
+            raise ValueError("DANN sampler epoch must be non-negative")
+        self._epoch = epoch
+
+    def state_dict(self) -> dict:
+        return {
+            "schema_version": 1,
+            "seed": self.seed,
+            "epoch": self._epoch,
+            "source_count": self.source_count,
+            "target_count": self.target_count,
+            "source_batch_size": self.source_batch_size,
+            "target_batch_size": self.target_batch_size,
+            "source_row_ids": list(self.source_row_ids),
+            "target_row_ids": list(self.target_row_ids),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            raise ValueError("DANN sampler state must be a mapping")
+        expected = self.state_dict()
+        for field in (
+            "schema_version",
+            "seed",
+            "source_count",
+            "target_count",
+            "source_batch_size",
+            "target_batch_size",
+            "source_row_ids",
+            "target_row_ids",
+        ):
+            if state.get(field) != expected[field]:
+                raise ValueError(f"DANN sampler state mismatch: {field}")
+        epoch = state.get("epoch")
+        if not isinstance(epoch, int) or epoch < 0:
+            raise ValueError("DANN sampler state has an invalid epoch")
+        self._epoch = epoch
+
+    def load_audit_report(self, report: dict) -> None:
+        if not isinstance(report, dict) or not isinstance(report.get("epochs"), list):
+            raise ValueError("DANN sampler audit report is invalid")
+        if report.get("seed") != self.seed:
+            raise ValueError("DANN sampler audit report mismatch: seed")
+        if report.get("source_batch_size") != self.source_batch_size:
+            raise ValueError("DANN sampler audit report mismatch: source_batch_size")
+        if report.get("target_batch_size") != self.target_batch_size:
+            raise ValueError("DANN sampler audit report mismatch: target_batch_size")
+        if report.get("source_count") != self.source_count:
+            raise ValueError("DANN sampler audit report mismatch: source_count")
+        if report.get("target_count") != self.target_count:
+            raise ValueError("DANN sampler audit report mismatch: target_count")
+        if report.get("source_row_ids") != self.source_row_ids:
+            raise ValueError("DANN sampler audit report mismatch: source_row_ids")
+        if report.get("target_row_ids") != self.target_row_ids:
+            raise ValueError("DANN sampler audit report mismatch: target_row_ids")
+        epochs = report["epochs"]
+        seen = set()
+        for epoch_report in epochs:
+            epoch = epoch_report.get("epoch") if isinstance(epoch_report, dict) else None
+            if not isinstance(epoch, int) or epoch in seen:
+                raise ValueError("DANN sampler audit report has duplicate or invalid epochs")
+            seen.add(epoch)
+        self.epoch_reports = list(epochs)
+
     def __iter__(self):
         epoch = self._epoch
-        self._epoch += 1
         source_order = list(range(self.source_count))
         target_order = list(range(self.target_count))
         random.Random(self.seed + epoch).shuffle(source_order)
@@ -854,13 +919,20 @@ class PairedDomainBatchSampler:
             yield source_positions + [self.source_count + index for index in target_positions]
         report["source_unique_rows"] = len(seen_source)
         report["target_unique_rows"] = len(seen_target)
+        self.epoch_reports = [item for item in self.epoch_reports if item.get("epoch") != epoch]
         self.epoch_reports.append(report)
+        self.epoch_reports.sort(key=lambda item: item["epoch"])
 
     def audit_report(self) -> dict:
         return {
             "source_batch_size": self.source_batch_size,
             "target_batch_size": self.target_batch_size,
             "seed": self.seed,
+            "current_epoch": self._epoch,
+            "source_count": self.source_count,
+            "target_count": self.target_count,
+            "source_row_ids": list(self.source_row_ids),
+            "target_row_ids": list(self.target_row_ids),
             "epochs": list(self.epoch_reports),
         }
 
@@ -936,10 +1008,34 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             pin_memory=self.args.dataloader_pin_memory,
             persistent_workers=self.args.dataloader_persistent_workers,
         )
-        return self.accelerator.prepare(dataloader)
+        prepared = self.accelerator.prepare(dataloader)
+        if hasattr(prepared, "batch_sampler") and hasattr(prepared.batch_sampler, "batch_sampler"):
+            # Accelerate wraps a custom batch sampler in BatchSamplerShard and
+            # only forwards set_epoch through its ``sampler`` attribute.
+            prepared.batch_sampler.sampler = self.dann_batch_sampler
+        return prepared
 
     def get_dann_batch_audit(self) -> dict | None:
         return self.dann_batch_sampler.audit_report() if self.dann_batch_sampler is not None else None
+
+    def load_dann_batch_sampler_state(self, checkpoint_dir: str | Path) -> None:
+        if self.dann_batch_sampler is None:
+            return
+        state_path = Path(checkpoint_dir) / "dann_batch_sampler_state.json"
+        if not state_path.is_file():
+            raise RuntimeError(f"missing DANN sampler state in checkpoint: {state_path}")
+        self.dann_batch_sampler.load_state_dict(json.loads(state_path.read_text(encoding="utf-8")))
+
+    def _save_checkpoint(self, model, trial, metrics=None):
+        super()._save_checkpoint(model, trial, metrics=metrics)
+        if self.dann_batch_sampler is None or not self.args.should_save:
+            return
+        checkpoint_dir = Path(self._get_output_dir(trial=trial)) / f"checkpoint-{self.state.global_step}"
+        state_path = checkpoint_dir / "dann_batch_sampler_state.json"
+        state_path.write_text(
+            json.dumps(self.dann_batch_sampler.state_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     @classmethod
     def _strip_generation_only_inputs(cls, inputs: dict, keep_graph: bool = False) -> dict:
@@ -1591,7 +1687,16 @@ def main() -> None:
     reproducibility_config = configure_reproducibility(args.seed, reproducibility_mode)
     print("reproducibility:", reproducibility_config)
     output_dir = Path(args.output_dir)
-    checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
+    checkpoint_dirs = (
+        [path for path in output_dir.glob("checkpoint-*") if path.is_dir()]
+        if output_dir.exists()
+        else []
+    )
+    latest_checkpoint = max(
+        checkpoint_dirs,
+        key=lambda path: int(path.name.rsplit("-", 1)[1]),
+        default=None,
+    )
     resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
 
     if args.use_syntactic_graph_adapter:
@@ -1854,9 +1959,19 @@ def main() -> None:
             else None
         ),
     )
+    if resume_from_checkpoint and dann_batch_sampler is not None:
+        if latest_checkpoint is None:
+            raise RuntimeError("paired DANN resume requested without a checkpoint")
+        trainer.load_dann_batch_sampler_state(latest_checkpoint)
+        audit_path = Path(args.dann_batch_audit_path)
+        if not audit_path.is_file():
+            raise RuntimeError(f"missing prior DANN audit for sampler resume: {audit_path}")
+        dann_batch_sampler.load_audit_report(json.loads(audit_path.read_text(encoding="utf-8")))
     if resume_from_checkpoint:
         print(f"resuming from latest checkpoint in {output_dir}")
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    trainer.train(
+        resume_from_checkpoint=str(latest_checkpoint) if resume_from_checkpoint else None
+    )
     if args.dann_batch_audit_path:
         if dann_batch_sampler is None:
             raise RuntimeError("DANN batch audit requested without a paired DANN sampler")

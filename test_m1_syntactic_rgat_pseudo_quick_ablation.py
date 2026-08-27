@@ -15,12 +15,15 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     audit_control_identity,
     build_phase_a_scope,
     build_variant_config,
+    build_phase_a_pseudo_output_paths,
     decide_phase_a,
     evaluate_phase_a_gates,
     load_or_initialize_stage_status,
     build_stage_identity,
     validate_stage_identity,
     validate_stage_status_shape,
+    validate_external_control_dann_audit,
+    _validate_control_treatment_dann_reports,
     validate_input_split,
 )
 from t5_absa_train import PairedDomainBatchSampler, WeightedSeq2SeqTrainer
@@ -171,6 +174,65 @@ def test_dann_batch_sampler_rejects_single_domain_batches():
         raise AssertionError("a DANN sampler without a target domain must fail")
 
 
+def test_dann_sampler_explicit_epoch_is_repeatable_and_checkpointable():
+    sampler = PairedDomainBatchSampler(
+        4,
+        4,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["s1", "s2", "s3", "s4"],
+        target_row_ids=["t1", "t2", "t3", "t4"],
+    )
+    sampler.set_epoch(0)
+    epoch_zero = list(sampler)
+    sampler.set_epoch(1)
+    epoch_one = list(sampler)
+    sampler.set_epoch(2)
+    epoch_two = list(sampler)
+    sampler.set_epoch(0)
+    assert list(sampler) == epoch_zero
+    assert epoch_two != epoch_zero
+
+    state = sampler.state_dict()
+    restored = PairedDomainBatchSampler(
+        4,
+        4,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["s1", "s2", "s3", "s4"],
+        target_row_ids=["t1", "t2", "t3", "t4"],
+    )
+    restored.load_state_dict(state)
+    assert restored.state_dict() == state
+    assert list(restored) == epoch_zero
+
+
+def test_dann_sampler_rejects_checkpoint_identity_or_batch_mismatch():
+    sampler = PairedDomainBatchSampler(2, 2, source_batch_size=1, target_batch_size=1, seed=1000)
+    state = sampler.state_dict()
+    for field, value in (("seed", 2000), ("source_count", 3), ("target_batch_size", 2), ("source_row_ids", ["changed", 1])):
+        changed = dict(state)
+        changed[field] = value
+        try:
+            sampler.load_state_dict(changed)
+        except ValueError as exc:
+            assert field in str(exc)
+        else:
+            raise AssertionError(f"sampler state mismatch must hard-fail: {field}")
+
+
+def test_dataloader_extra_iteration_does_not_advance_explicit_sampler_epoch():
+    sampler = PairedDomainBatchSampler(3, 3, source_batch_size=1, target_batch_size=1, seed=1000)
+    sampler.set_epoch(2)
+    expected = list(sampler)
+    sampler.set_epoch(2)
+    _ = list(sampler)
+    sampler.set_epoch(2)
+    assert list(sampler) == expected
+
+
 def test_trainer_dataloader_preserves_the_complete_paired_domain_batch():
     class PairDataset(Dataset):
         def __len__(self):
@@ -262,6 +324,134 @@ def test_stage_identity_records_and_validates_artifact_hashes():
             assert "treatment_training" in str(exc)
         else:
             raise AssertionError("modified treatment artifact must hard-fail resume")
+
+
+def test_pseudo_stage_identity_covers_all_a4_outputs_and_rejects_each_change():
+    required_names = (
+        "target_pseudo.jsonl",
+        "target_pseudo_selected.jsonl",
+        "target_pseudo_high_precision.jsonl",
+        "target_pseudo_train_selected.jsonl",
+        "target_pseudo_selected_analysis.json",
+        "target_pseudo_generation_state.json",
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        output_paths = {name: root / name for name in required_names}
+        for name, path in output_paths.items():
+            path.write_text(name, encoding="utf-8")
+        input_file = root / "target_unlabeled.jsonl"
+        input_file.write_text("target", encoding="utf-8")
+        recipe_file = root / "recipe.json"
+        recipe_file.write_text("recipe", encoding="utf-8")
+        record = build_stage_identity(
+            "treatment_target_pseudo_inference",
+            ["python", "pseudo"],
+            {"target_unlabeled": input_file},
+            hashlib.sha256(b"recipe").hexdigest(),
+            output_paths["target_pseudo_selected.jsonl"],
+            root,
+            "commit-a",
+            recipe_path=recipe_file,
+            output_artifacts=output_paths,
+        )
+        assert set(record["output_artifacts"]) == set(required_names)
+        assert validate_stage_identity(record) is True
+        for name, path in output_paths.items():
+            path.write_text(name + "-changed", encoding="utf-8")
+            try:
+                validate_stage_identity(record)
+            except RuntimeError as exc:
+                assert name in str(exc)
+            else:
+                raise AssertionError(f"modified pseudo output must hard-fail: {name}")
+            path.write_text(name, encoding="utf-8")
+
+
+def test_training_stage_identity_covers_dann_audit_and_rejects_change():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        model_dir = root / "extractor" / "best"
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}", encoding="utf-8")
+        audit = root / "dann_batch_audit.json"
+        audit.write_text(json.dumps({"seed": 1000, "epochs": [{"epoch": 0}]}), encoding="utf-8")
+        input_file = root / "source_train.jsonl"
+        input_file.write_text("source", encoding="utf-8")
+        recipe_file = root / "recipe.json"
+        recipe_file.write_text("recipe", encoding="utf-8")
+        record = build_stage_identity(
+            "treatment_training",
+            ["python", "train", "--paired_domain_batches"],
+            {"source_train": input_file},
+            hashlib.sha256(b"recipe").hexdigest(),
+            model_dir,
+            model_dir,
+            "commit-a",
+            recipe_path=recipe_file,
+            output_artifacts={"extractor_best": model_dir, "dann_batch_audit": audit},
+        )
+        assert set(record["output_artifacts"]) == {"extractor_best", "dann_batch_audit"}
+        audit.write_text(json.dumps({"seed": 1000, "epochs": [{"epoch": 1}]}), encoding="utf-8")
+        try:
+            validate_stage_identity(record)
+        except RuntimeError as exc:
+            assert "dann_batch_audit" in str(exc)
+        else:
+            raise AssertionError("modified DANN audit must hard-fail resume")
+
+
+def test_pseudo_output_path_contract_names_all_required_a4_artifacts():
+    paths = build_phase_a_pseudo_output_paths(Path("variant"))
+    assert set(paths) == {
+        "target_pseudo.jsonl",
+        "target_pseudo_selected.jsonl",
+        "target_pseudo_high_precision.jsonl",
+        "target_pseudo_train_selected.jsonl",
+        "target_pseudo_selected_analysis.json",
+        "target_pseudo_generation_state.json",
+    }
+
+
+def test_external_control_without_dann_audit_hard_fails():
+    try:
+        validate_external_control_dann_audit({"resolved_model_path": "missing-model"})
+    except RuntimeError as exc:
+        assert "DANN" in str(exc)
+    else:
+        raise AssertionError("external Control without DANN audit must hard-fail")
+
+
+def test_control_and_treatment_dann_row_ids_or_order_must_match():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        control_dir = root / "control"
+        treatment_dir = root / "treatment"
+        control_dir.mkdir()
+        treatment_dir.mkdir()
+        control_report = {
+            "seed": 1000,
+            "epochs": [{
+                "epoch": 0,
+                "source_batch_size": 1,
+                "target_batch_size": 1,
+                "incomplete_batches": 0,
+                "batches": [{"source_count": 1, "target_count": 1, "source_row_ids": ["s1"], "target_row_ids": ["t1"]}],
+            }],
+        }
+        treatment_report = json.loads(json.dumps(control_report))
+        treatment_report["epochs"][0]["batches"][0]["source_row_ids"] = ["s2"]
+        (control_dir / "dann_batch_audit.json").write_text(json.dumps(control_report), encoding="utf-8")
+        (treatment_dir / "dann_batch_audit.json").write_text(json.dumps(treatment_report), encoding="utf-8")
+        try:
+            _validate_control_treatment_dann_reports(
+                {"control": control_dir, "treatment": treatment_dir},
+                {"dann_batch_audit_path": str(control_dir / "dann_batch_audit.json")},
+            )
+        except RuntimeError as exc:
+            assert "batch" in str(exc).lower()
+        else:
+            raise AssertionError("different DANN row IDs must hard-fail")
 
 
 def test_external_control_stage_identity_uses_resolved_model_path():
