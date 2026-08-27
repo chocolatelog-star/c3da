@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -13,13 +14,14 @@ from syntactic_graph import (
     ALIGNMENT_POLICY_VERSION,
     DEFAULT_PARSER_DIR,
     EXPECTED_PARSER_SHA256,
+    GRAPH_SCHEMA_VERSION,
     GraphCacheError,
-    _find_graph_text_start,
     _parser_words_from_doc,
     build_parser_identity,
     build_stanza_pipeline,
     build_tokenizer_identity,
     sha256_file,
+    validate_alignment_policy,
 )
 from t5_aste_pipeline import DATASETS, load_split
 
@@ -46,6 +48,7 @@ STAT_KEYS = (
     "cross_space_shared_count",
     "cross_sentence_shared_count",
     "out_of_bounds_count",
+    "alignment_policy_violation_count",
     "legal_contiguous_shared_subword_count",
     "legal_contiguous_shared_row_count",
     "truncated_rows",
@@ -175,12 +178,18 @@ def _gate_values(split_reports: dict[str, dict], target_test_access: bool) -> di
         "cross_space_shared_zero": stats["cross_space_shared_count"] == 0,
         "cross_sentence_shared_zero": stats["cross_sentence_shared_count"] == 0,
         "out_of_bounds_zero": stats["out_of_bounds_count"] == 0,
+        "alignment_policy_violation_zero": stats["alignment_policy_violation_count"] == 0,
         "truncation_uncovered_zero": stats["truncation_uncovered_word_count"] == 0,
         "target_test_isolated": target_test_access is False,
     }
 
 
-def build_preflight_summary(split_reports: dict[str, dict], identity: dict, max_source_length: int) -> dict:
+def build_preflight_summary(
+    split_reports: dict[str, dict],
+    identity: dict,
+    max_source_length: int,
+    runtime_devices: dict | None = None,
+) -> dict:
     """Build the machine-readable summary without reading data or writing files."""
     normalized = {
         split: _normalize_split_report(report) for split, report in split_reports.items()
@@ -194,8 +203,20 @@ def build_preflight_summary(split_reports: dict[str, dict], identity: dict, max_
         "schema_version": 1,
         "status": "PASS" if complete else "BLOCKED",
         "target_test_access": False,
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "alignment_policy_version": ALIGNMENT_POLICY_VERSION,
+        "runtime_devices": dict(
+            runtime_devices
+            or {
+                "requested_cuda_index": 0,
+                "actual_cuda_index": None,
+                "parser_device": "unknown",
+                "model_device": "unknown",
+            }
+        ),
         "alignment_strategy": {
             "version": ALIGNMENT_POLICY_VERSION,
+            "graph_schema_version": GRAPH_SCHEMA_VERSION,
             "max_source_length": int(max_source_length),
         },
         "identity": identity,
@@ -221,21 +242,6 @@ def build_preflight_summary(split_reports: dict[str, dict], identity: dict, max_
             "character_coverage_rate": _coverage_rate(report["stats"]),
         }
     return summary
-
-
-def _find_graph_start(input_text: str, graph_text: str) -> int:
-    return _find_graph_text_start(input_text, graph_text)
-
-
-def _merge_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
-    ordered = sorted((int(start), int(end)) for start, end in ranges if int(end) > int(start))
-    merged: list[tuple[int, int]] = []
-    for start, end in ordered:
-        if not merged or start > merged[-1][1]:
-            merged.append((start, end))
-        else:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-    return merged
 
 
 def _tokenizer_tokens(tokenizer, input_ids: list[int]) -> list[str]:
@@ -334,17 +340,20 @@ def scan_alignment_row(
         full_offsets = [tuple(pair) for pair in full_encoded.get("offset_mapping", [])]
         if len(full_ids) != len(full_offsets):
             raise GraphCacheError("full tokenizer input_ids and offset_mapping length mismatch")
-        graph_start = _find_graph_start(input_text, text)
         doc = parser(text)
         words = _parser_words_from_doc(doc)
         sentence_count = len(getattr(doc, "sentences", []))
         tokenizer_tokens = _tokenizer_tokens(tokenizer, input_ids)
-        token_spans: dict[int, tuple[int, int]] = {}
-        full_token_spans: dict[int, tuple[int, int]] = {}
+        validation = validate_alignment_policy(words, input_text, text, offsets)
+        full_validation = validate_alignment_policy(words, input_text, text, full_offsets)
+        token_spans = validation["token_spans"]
+        token_to_words: dict[int, list[int]] = {
+            int(index): list(positions)
+            for index, positions in validation["token_to_word_positions"].items()
+        }
         character_spans = []
         for token_index, (token_start, token_end) in enumerate(offsets):
-            relative_start = int(token_start) - graph_start
-            relative_end = int(token_end) - graph_start
+            relative_start, relative_end = token_spans.get(token_index, (0, 0))
             character_spans.append(
                 {
                     "token_index": token_index,
@@ -354,13 +363,6 @@ def scan_alignment_row(
                     "raw_end": int(token_end),
                 }
             )
-            if relative_end > relative_start:
-                token_spans[token_index] = (relative_start, relative_end)
-        for token_index, (token_start, token_end) in enumerate(full_offsets):
-            relative_start = int(token_start) - graph_start
-            relative_end = int(token_end) - graph_start
-            if relative_end > relative_start:
-                full_token_spans[token_index] = (relative_start, relative_end)
 
         was_truncated = len(full_ids) > len(input_ids)
         stats = _empty_stats()
@@ -372,30 +374,49 @@ def scan_alignment_row(
             issue_tokens.setdefault(issue_type, set()).update(int(value) for value in token_indices)
             issue_messages.setdefault(issue_type, []).append(str(message))
 
-        word_to_tokens: list[list[int]] = []
-        for word in words:
+        policy_violations = validation["violations"]
+        stats["alignment_policy_violation_count"] = len(policy_violations)
+        if policy_violations:
+            add_issue(
+                "alignment_policy_violation",
+                "; ".join(item["message"] for item in policy_violations),
+                [
+                    token_index
+                    for item in policy_violations
+                    for token_index in item.get("token_indices", [])
+                ],
+            )
+        for item in policy_violations:
+            add_issue(item["issue_type"], item["message"], item.get("token_indices", []))
+        stats["out_of_bounds_count"] = sum(
+            item["issue_type"] == "out_of_bounds_mapping" for item in policy_violations
+        )
+        stats["non_contiguous_shared_count"] = sum(
+            item["issue_type"] == "non_contiguous_shared_subword" for item in policy_violations
+        )
+        stats["cross_space_shared_count"] = sum(
+            item["issue_type"] == "cross_space_shared_subword" for item in policy_violations
+        )
+        stats["cross_sentence_shared_count"] = sum(
+            item["issue_type"] == "cross_sentence_shared_subword" for item in policy_violations
+        )
+
+        coverage_by_position = {
+            int(item["word_position"]): item for item in validation["word_coverage"]
+        }
+        full_coverage_by_position = {
+            int(item["word_position"]): item for item in full_validation["word_coverage"]
+        }
+        for word_position, word in enumerate(words):
             start = int(word["start"])
             end = int(word["end"])
             word_length = max(0, end - start)
             stats["word_character_count"] += word_length
-            out_of_bounds_word = start < 0 or end < start or end > len(text)
-            if out_of_bounds_word:
-                stats["out_of_bounds_count"] += 1
-                add_issue(
-                    "out_of_bounds_mapping",
-                    f"parser word span outside text: index={word['index']} span=({start},{end}) text_length={len(text)}",
-                )
-            token_indices = [
-                token_index
-                for token_index, (token_start, token_end) in token_spans.items()
-                if token_start < end and token_end > start
-            ]
-            full_token_indices = [
-                token_index
-                for token_index, (token_start, token_end) in full_token_spans.items()
-                if token_start < end and token_end > start
-            ]
-            word_to_tokens.append(token_indices)
+            coverage = coverage_by_position.get(
+                word_position,
+                {"token_indices": [], "covered_length": 0, "fully_covered": False},
+            )
+            token_indices = list(coverage.get("token_indices", []))
             _increment_distribution(distributions["word_subword_count"], len(token_indices))
             if len(token_indices) > int(max_subwords_per_word):
                 stats["abnormally_many_subwords_word_count"] += 1
@@ -404,61 +425,17 @@ def scan_alignment_row(
                     f"parser word maps to {len(token_indices)} subwords, threshold={max_subwords_per_word}: index={word['index']} text={word['text']!r}",
                     token_indices,
                 )
-            invalid_token_indices = [
-                token_index
-                for token_index in token_indices
-                if token_spans[token_index][0] < 0 or token_spans[token_index][1] > len(text)
-            ]
-            if invalid_token_indices:
-                stats["out_of_bounds_count"] += len(invalid_token_indices)
-                add_issue(
-                    "out_of_bounds_mapping",
-                    f"token span outside graph text for parser word index={word['index']}",
-                    invalid_token_indices,
-                )
-            covered_ranges = _merge_ranges(
-                (max(start, token_spans[index][0]), min(end, token_spans[index][1]))
-                for index in token_indices
-            )
-            covered_length = sum(end_i - start_i for start_i, end_i in covered_ranges)
+            covered_length = int(coverage.get("covered_length", 0))
+            fully_covered = bool(coverage.get("fully_covered", False))
             stats["covered_character_count"] += min(word_length, covered_length)
-            fully_covered = (
-                not out_of_bounds_word
-                and bool(covered_ranges)
-                and covered_ranges[0][0] <= start
-                and covered_ranges[-1][1] >= end
-                and sum(end_i - start_i for start_i, end_i in covered_ranges) >= word_length
-                and all(right[0] <= left[1] for left, right in zip(covered_ranges, covered_ranges[1:]))
-            )
             if not token_indices:
                 stats["unaligned_word_count"] += 1
-                add_issue(
-                    "unaligned_parser_word",
-                    f"parser word has no overlapping tokenizer subword: index={word['index']} text={word['text']!r}",
-                )
             if not fully_covered:
                 stats["character_coverage_incomplete_count"] += 1
-                add_issue(
-                    "incomplete_character_coverage",
-                    f"parser word character coverage incomplete: index={word['index']} text={word['text']!r} covered={covered_length}/{word_length}",
-                    token_indices,
+                full_coverage = full_coverage_by_position.get(
+                    word_position, {"fully_covered": False}
                 )
-                full_covered_ranges = _merge_ranges(
-                    (max(start, full_token_spans[index][0]), min(end, full_token_spans[index][1]))
-                    for index in full_token_indices
-                )
-                full_covered_length = sum(end_i - start_i for start_i, end_i in full_covered_ranges)
-                full_fully_covered = (
-                    not out_of_bounds_word
-                    and bool(full_covered_ranges)
-                    and full_covered_ranges[0][0] <= start
-                    and full_covered_ranges[-1][1] >= end
-                    and full_covered_length >= word_length
-                    and all(
-                        right[0] <= left[1]
-                        for left, right in zip(full_covered_ranges, full_covered_ranges[1:])
-                    )
-                )
+                full_fully_covered = bool(full_coverage.get("fully_covered", False))
                 if was_truncated and full_fully_covered and not fully_covered:
                     stats["truncation_uncovered_word_count"] += 1
                     add_issue(
@@ -467,15 +444,13 @@ def scan_alignment_row(
                         token_indices,
                     )
 
-        token_to_words: dict[int, list[int]] = {index: [] for index in range(len(offsets))}
-        for word_position, token_indices in enumerate(word_to_tokens):
-            for token_index in token_indices:
-                token_to_words.setdefault(token_index, []).append(word_position)
+        for token_index in range(len(offsets)):
+            token_to_words.setdefault(token_index, [])
         for token_index in range(len(offsets)):
             _increment_distribution(distributions["subword_parser_word_count"], len(token_to_words[token_index]))
 
         legal_shared_token_count = 0
-        for token_index, word_positions in token_to_words.items():
+        for token_index, word_positions in validation["token_to_word_positions"].items():
             if len(word_positions) <= 1:
                 continue
             stats["subword_maps_to_multiple_parser_words_count"] += 1
@@ -484,54 +459,10 @@ def scan_alignment_row(
                 f"subword maps to parser word positions={word_positions}: token_index={token_index}",
                 [token_index],
             )
-            first = word_positions[0]
-            last = word_positions[-1]
-            shared_words = words[first : last + 1]
-            token_start, token_end = token_spans[token_index]
-            positions_are_contiguous = word_positions == list(range(first, last + 1))
-            spans_are_contiguous = all(
-                int(left["end"]) == int(right["start"])
-                for left, right in zip(shared_words, shared_words[1:])
-            )
-            same_sentence = len({int(word.get("sentence_index", 0)) for word in shared_words}) == 1
-            exact_union = (
-                int(shared_words[0]["start"]) == token_start
-                and int(shared_words[-1]["end"]) == token_end
-            )
-            gaps_are_spaces = any(
-                int(left["end"]) < int(right["start"])
-                and text[int(left["end"]) : int(right["start"])].isspace()
-                for left, right in zip(shared_words, shared_words[1:])
-            )
-            if not positions_are_contiguous:
-                stats["non_contiguous_shared_count"] += 1
-                add_issue(
-                    "non_contiguous_shared_subword",
-                    f"shared subword skips parser words: token_index={token_index} word_positions={word_positions}",
-                    [token_index],
-                )
-            if gaps_are_spaces:
-                stats["cross_space_shared_count"] += 1
-                add_issue(
-                    "cross_space_shared_subword",
-                    f"shared subword crosses whitespace: token_index={token_index} word_positions={word_positions}",
-                    [token_index],
-                )
-            if not same_sentence:
-                stats["cross_sentence_shared_count"] += 1
-                add_issue(
-                    "cross_sentence_shared_subword",
-                    f"shared subword crosses parser sentences: token_index={token_index} word_positions={word_positions}",
-                    [token_index],
-                )
-            if token_start < 0 or token_end > len(text) or token_end <= token_start:
-                stats["out_of_bounds_count"] += 1
-                add_issue(
-                    "out_of_bounds_mapping",
-                    f"shared subword span outside graph text: token_index={token_index} span=({token_start},{token_end})",
-                    [token_index],
-                )
-            if positions_are_contiguous and spans_are_contiguous and same_sentence and exact_union:
+        for shared in validation["shared_subwords"]:
+            token_index = int(shared["token_index"])
+            word_positions = list(shared["word_positions"])
+            if shared["legal"]:
                 legal_shared_token_count += 1
                 add_issue(
                     "legal_contiguous_shared_subword",
@@ -661,6 +592,7 @@ def _build_identity(
     parser_identity: dict,
     max_source_length: int,
     max_subwords_per_word: int,
+    runtime_devices: dict,
 ) -> dict:
     parser_actual = dict(parser_identity)
     parser_actual.setdefault("expected_sha256", dict(EXPECTED_PARSER_SHA256))
@@ -670,9 +602,46 @@ def _build_identity(
         "parser": parser_actual,
         "tokenizer": tokenizer_identity,
         "code": _code_identity(repo_dir),
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
         "alignment_policy_version": ALIGNMENT_POLICY_VERSION,
         "max_source_length": int(max_source_length),
         "max_subwords_per_word": int(max_subwords_per_word),
+        "runtime_devices": dict(runtime_devices),
+    }
+
+
+def _runtime_device_identity(args) -> dict:
+    requested = int(getattr(args, "cuda", 0))
+    if requested < 0:
+        raise AlignmentPreflightError("--cuda must be a non-negative device index")
+    if bool(getattr(args, "cpu", False)):
+        return {
+            "requested_cuda_index": requested,
+            "actual_cuda_index": None,
+            "parser_device": "cpu",
+            "model_device": "cpu",
+        }
+    try:
+        import torch
+    except ImportError as exc:
+        raise AlignmentPreflightError("torch is required for non-CPU preflight") from exc
+    if not torch.cuda.is_available():
+        raise AlignmentPreflightError(
+            f"requested CUDA device {requested}, but CUDA is unavailable"
+        )
+    device_count = int(torch.cuda.device_count())
+    if requested >= device_count:
+        raise AlignmentPreflightError(
+            f"requested CUDA device {requested} is out of range; device_count={device_count}"
+        )
+    torch.cuda.set_device(requested)
+    actual = int(torch.cuda.current_device())
+    device_name = f"cuda:{actual}"
+    return {
+        "requested_cuda_index": requested,
+        "actual_cuda_index": actual,
+        "parser_device": device_name,
+        "model_device": device_name,
     }
 
 
@@ -684,45 +653,124 @@ def _read_json(path: Path) -> dict:
 
 
 def _read_suspicious_count(path: Path) -> int:
-    count = 0
+    return len(_read_complete_suspicious_lines(path))
+
+
+def _read_complete_suspicious_lines(path: Path) -> list[bytes]:
+    required = {
+        "split",
+        "row_id",
+        "text",
+        "issue_type",
+        "parser_words",
+        "tokenizer_tokens",
+        "character_spans",
+        "shared_token_indices",
+        "error_message",
+    }
+    complete_lines: list[bytes] = []
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if not all(key in record for key in ("split", "row_id", "issue_type", "error_message")):
-                    raise AlignmentPreflightError(f"invalid suspicious row at line {line_number}")
-                count += 1
-    except (OSError, json.JSONDecodeError) as exc:
+        raw_lines = path.read_bytes().splitlines(keepends=True)
+        nonempty_line_numbers = [
+            line_number
+            for line_number, raw_line in enumerate(raw_lines, start=1)
+            if raw_line.strip()
+        ]
+        last_nonempty_line = nonempty_line_numbers[-1] if nonempty_line_numbers else 0
+        for line_number, raw_line in enumerate(raw_lines, start=1):
+            if not raw_line.strip():
+                continue
+            try:
+                record = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                if line_number == last_nonempty_line:
+                    break
+                raise AlignmentPreflightError(
+                    f"invalid suspicious row before tail at line {line_number}"
+                ) from exc
+            if not isinstance(record, dict) or not required.issubset(record):
+                raise AlignmentPreflightError(f"invalid suspicious row at line {line_number}")
+            complete_lines.append(raw_line)
+    except OSError as exc:
         raise AlignmentPreflightError(f"unreadable suspicious row file: {path}") from exc
-    return count
+    return complete_lines
 
 
-def _ensure_output_contract(output_dir: Path) -> tuple[Path, Path, Path, bool]:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _inspect_output_contract(output_dir: Path) -> tuple[tuple[Path, Path, Path], str]:
+    """Inspect output state without creating directories or files."""
+    output_dir = Path(output_dir)
+    paths = tuple(output_dir / name for name in OUTPUT_FILES)
+    if not output_dir.exists():
+        return paths, "new"
+    if not output_dir.is_dir():
+        raise AlignmentPreflightError(f"output path is not a directory: {output_dir}")
     entries = {entry.name for entry in output_dir.iterdir()}
-    unexpected = sorted(entries.difference(OUTPUT_FILES))
+    allowed = set(OUTPUT_FILES) | {OUTPUT_FILES[0] + ".tmp"}
+    unexpected = sorted(entries.difference(allowed))
     if unexpected:
         raise AlignmentPreflightError(
             f"output directory contains unexpected files; refusing to mix state: {unexpected}"
         )
-    paths = tuple(output_dir / name for name in OUTPUT_FILES)
-    exists = [path.exists() for path in paths]
-    if any(exists) and not all(exists):
-        raise AlignmentPreflightError("preflight output contract is incomplete; refusing resume")
-    if not any(exists):
+    for path in paths:
+        if path.exists() and not path.is_file():
+            raise AlignmentPreflightError(f"preflight output path is not a file: {path}")
+    summary_exists, suspicious_exists, markdown_exists = [path.exists() for path in paths]
+    if summary_exists and suspicious_exists:
+        return paths, "existing"
+    if not summary_exists and suspicious_exists:
+        return paths, "orphan_suspicious"
+    if not summary_exists and not suspicious_exists and not markdown_exists:
+        return paths, "new"
+    raise AlignmentPreflightError("preflight output contract is incomplete; refusing resume")
+
+
+def _ensure_output_contract(output_dir: Path) -> tuple[Path, Path, Path, bool]:
+    """Backward-compatible read-only contract inspection.
+
+    Unlike the old implementation, this helper never creates the directory or
+    any output file.  Initialization is performed only after identity checks.
+    """
+    paths, state = _inspect_output_contract(output_dir)
+    return paths[0], paths[1], paths[2], state == "existing"
+
+
+def _initialize_output_contract(
+    output_dir: Path,
+    paths: tuple[Path, Path, Path],
+    state: str,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temporary = paths[0].with_name(paths[0].name + ".tmp")
+    if temporary.exists():
+        temporary.unlink()
+    if state == "orphan_suspicious":
+        paths[1].write_bytes(b"")
+    else:
         paths[1].touch()
-    return paths[0], paths[1], paths[2], all(exists)
+
+
+def _reconcile_suspicious_log(path: Path, expected_count: int) -> None:
+    complete_lines = _read_complete_suspicious_lines(path)
+    if len(complete_lines) < int(expected_count):
+        raise AlignmentPreflightError(
+            f"resume suspicious rows are missing committed records: expected={expected_count} actual={len(complete_lines)}"
+        )
+    committed_bytes = b"".join(complete_lines[: int(expected_count)])
+    if path.read_bytes() != committed_bytes:
+        path.write_bytes(committed_bytes)
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _write_markdown(path: Path, summary: dict) -> None:
@@ -783,6 +831,7 @@ def _validate_resume_state(
             raise AlignmentPreflightError(f"resume completed row count invalid: split={split}")
         split_reports[split] = report
     expected_suspicious = sum(report["suspicious_row_count"] for report in split_reports.values())
+    _reconcile_suspicious_log(suspicious_path, expected_suspicious)
     actual_suspicious = _read_suspicious_count(suspicious_path)
     if actual_suspicious != expected_suspicious:
         raise AlignmentPreflightError(
@@ -804,7 +853,6 @@ def run_preflight(
 ) -> dict:
     """Run or resume the read-only preflight over all three required splits."""
     output_dir = Path(args.output_dir)
-    summary_path, suspicious_path, markdown_path, has_existing_state = _ensure_output_contract(output_dir)
     repo_dir = Path(repo_dir or Path(__file__).resolve().parent)
     max_source_length = int(getattr(args, "max_source_length", DEFAULT_MAX_SOURCE_LENGTH))
     max_subwords_per_word = int(
@@ -821,6 +869,7 @@ def run_preflight(
         tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True)
     tokenizer_identity = tokenizer_identity or build_tokenizer_identity(args.model_path, tokenizer)
     parser_identity = parser_identity or build_parser_identity(args.parser_dir)
+    runtime_devices = _runtime_device_identity(args)
     identity = _build_identity(
         repo_dir,
         rows_by_split,
@@ -828,30 +877,42 @@ def run_preflight(
         parser_identity,
         max_source_length,
         max_subwords_per_word,
+        runtime_devices,
     )
+    if parser is None:
+        parser = build_stanza_pipeline(args.parser_dir, use_gpu=not bool(getattr(args, "cpu", False)))
 
-    if has_existing_state:
+    paths, output_state = _inspect_output_contract(output_dir)
+    summary_path, suspicious_path, markdown_path = paths
+    temporary = summary_path.with_name(summary_path.name + ".tmp")
+
+    if output_state == "existing":
         split_reports = _validate_resume_state(
             _read_json(summary_path), identity, rows_by_split, suspicious_path
         )
+        if temporary.exists():
+            temporary.unlink()
     else:
+        _initialize_output_contract(output_dir, paths, output_state)
         split_reports = {
             split: _empty_split_report(len(rows_by_split[split])) for split in SPLITS
         }
-        initial_summary = build_preflight_summary(split_reports, identity, max_source_length)
+        initial_summary = build_preflight_summary(
+            split_reports, identity, max_source_length, runtime_devices
+        )
         initial_summary["status"] = "RUNNING"
         initial_summary["alignment_strategy"]["max_subwords_per_word"] = max_subwords_per_word
         _persist_progress(summary_path, markdown_path, initial_summary)
 
     all_completed = all(report["completed_rows"] == report["row_count"] for report in split_reports.values())
     if all_completed:
-        final_summary = build_preflight_summary(split_reports, identity, max_source_length)
+        final_summary = build_preflight_summary(
+            split_reports, identity, max_source_length, runtime_devices
+        )
         final_summary["alignment_strategy"]["max_subwords_per_word"] = max_subwords_per_word
         _persist_progress(summary_path, markdown_path, final_summary)
         return final_summary
 
-    if parser is None:
-        parser = build_stanza_pipeline(args.parser_dir, use_gpu=not bool(getattr(args, "cpu", False)))
     processed = sum(report["completed_rows"] for report in split_reports.values())
     with suspicious_path.open("a", encoding="utf-8", newline="\n") as suspicious_handle:
         from tqdm import tqdm
@@ -882,12 +943,10 @@ def run_preflight(
                         json.dumps(suspicious_row, ensure_ascii=False, sort_keys=True) + "\n"
                     )
                 suspicious_handle.flush()
-                import os
-
                 os.fsync(suspicious_handle.fileno())
                 processed += 1
                 progress_summary = build_preflight_summary(
-                    split_reports, identity, max_source_length
+                    split_reports, identity, max_source_length, runtime_devices
                 )
                 progress_summary["status"] = "RUNNING"
                 progress_summary["alignment_strategy"]["max_subwords_per_word"] = max_subwords_per_word
@@ -896,7 +955,9 @@ def run_preflight(
                     raise AlignmentPreflightInterrupted(
                         f"preflight interrupted after {processed} rows"
                     )
-    final_summary = build_preflight_summary(split_reports, identity, max_source_length)
+    final_summary = build_preflight_summary(
+        split_reports, identity, max_source_length, runtime_devices
+    )
     final_summary["alignment_strategy"]["max_subwords_per_word"] = max_subwords_per_word
     _persist_progress(summary_path, markdown_path, final_summary)
     return final_summary
@@ -911,6 +972,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parser_dir", default=str(DEFAULT_PARSER_DIR))
     parser.add_argument("--max_source_length", type=int, default=DEFAULT_MAX_SOURCE_LENGTH)
     parser.add_argument("--max_subwords_per_word", type=int, default=DEFAULT_MAX_SUBWORDS_PER_WORD)
+    parser.add_argument("--cuda", type=int, default=0, help="请求的 CUDA 设备编号")
     parser.add_argument("--cpu", action="store_true", help="仅用于 CPU 测试；正式命令不使用此开关")
     return parser
 

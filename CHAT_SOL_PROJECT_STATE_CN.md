@@ -1,19 +1,21 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-27 10:53（北京时间）
+> 更新时间：2026-08-27 12:17（北京时间）
 
 ## 当前任务状态
 
-`M1_ALIGNMENT_PREFLIGHT_V1`（laptop14 -> rest15，source_train/source_dev/target_unlabeled）已完成只读全量词—子词对齐预检入口实现。当前状态为 `RUNNING`（等待用户运行 GPU 预检并返回结果）；未运行 GPU 预检、正式训练、伪标签生成或目标测试读取。上一轮 M1 句法图入口和参数协议修复保持不变，图结构、DANN 系数和研究方案未改动。
+`M1_ALIGNMENT_PREFLIGHT_V1`（laptop14 -> rest15，source_train/source_dev/target_unlabeled）已完成本轮只读对齐预检工具修复。当前状态为 `RUNNING`（等待 Codex Sol 最终只读验收；GPU 全量预检尚未运行）；未运行 GPU 预检、正式训练、伪标签生成或目标测试读取。M1 图结构、DANN 系数和研究方案未改动，不能提前记为 M1 通过。
 
 ## 本轮只读对齐预检状态
 
 - 新增独立 `m1_alignment_preflight.py`，只扫描 source_train、source_dev 和 target_unlabeled；目标域只请求 train 输入，代码路径不请求 target_test。
-- 预检逐行继续、写入三个固定输出文件，显示三个数据划分进度条，并以 Git commit、输入 SHA256、Stanza 解析器身份、T5 fast tokenizer（快速分词器）身份、对齐策略版本和 max_source_length=128 做断点恢复硬校验。
+- 预检逐行继续、写入三个固定输出文件，显示三个数据划分进度条，并以 Git commit、输入 SHA256、Stanza 解析器身份、T5 fast tokenizer（快速分词器）身份、图模式、对齐策略版本和 max_source_length=128 做断点恢复硬校验。
+- `syntactic_graph.py` 提供无副作用的公开 `validate_alignment_policy`；正式图缓存与预检统一调用它。策略违规计数进入总 Gate（门控），摘要同时记录 `GRAPH_SCHEMA_VERSION`（图模式版本）和 `ALIGNMENT_POLICY_VERSION`（对齐策略版本）。
+- 输出恢复先完成数据、模型、解析器和配置身份验证；只回滚 JSONL 未提交尾部，恢复后重新扫描未提交当前行，身份变化或已提交记录缺失仍硬停止。摘要记录 requested/actual CUDA（统一计算设备架构）索引、parser/model device（解析器/模型设备）。
 - 可疑清单包含合法连续共享和所有异常类型；机器可读汇总记录句/词/子词统计、分布、成功/失败行、覆盖率、截断和 PASS/BLOCKED 门控。
-- CPU 新增 8 项测试，M1 图相关回归 56 项通过；未更新正式实验索引，等待实际预检结果后统一记录。
+- 本轮新增 CPU 测试 12 项；M1 相关测试共 76 项通过，未更新正式实验索引，等待实际预检结果后统一记录。
 
-## 本轮参数协议修复证据
+## 上一轮参数协议修复证据
 
 - 审计启动在读取数据、加载模型和探测 CUDA 前硬校验配方与命令行：source/target 数据集、seed=1000、lambda_domain_adv=0.03、fp16、gradient_checkpointing、训练/评估/DANN/伪推理批次以及 max_source_length=128、max_target_length=96；错误项立即生成 BLOCKED（阻塞）报告。
 - 源域抽取训练固定使用 train batch=1，source-dev 评估固定使用 eval batch=2；target-unlabeled DANN 明确记录 source_batch_size=1、target_batch_size=1 和 total_batch_size，不再使用含义模糊的统一 batch_size。

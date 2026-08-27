@@ -169,60 +169,214 @@ def _find_graph_text_start(input_text: str, graph_text: str) -> int:
     raise GraphCacheError("raw graph text has no unique exact span in the model input")
 
 
-def align_parser_words_to_subwords(
+def _alignment_policy_violation(
+    issue_type: str,
+    message: str,
+    token_indices: Iterable[int] = (),
+    word_positions: Iterable[int] = (),
+) -> dict:
+    return {
+        "issue_type": str(issue_type),
+        "message": str(message),
+        "token_indices": [int(index) for index in token_indices],
+        "word_positions": [int(position) for position in word_positions],
+    }
+
+
+def validate_alignment_policy(
     words: list[dict],
     input_text: str,
     graph_text: str,
     offset_mapping: list[tuple[int, int]],
-) -> list[list[int]]:
-    graph_start = _find_graph_text_start(input_text, graph_text)
+) -> dict:
+    """Validate and describe the single formal word-to-subword alignment policy.
+
+    The function is deliberately side-effect free.  It returns the alignment and
+    every policy violation so diagnostics can report failures without maintaining
+    a second acceptance rule.  ``align_parser_words_to_subwords`` below is the
+    strict adapter used by graph-cache construction.
+    """
+    violations: list[dict] = []
+    try:
+        graph_start = _find_graph_text_start(input_text, graph_text)
+    except GraphCacheError as exc:
+        violation = _alignment_policy_violation("graph_text_span_invalid", str(exc))
+        return {
+            "valid": False,
+            "aligned": [],
+            "word_to_subword": [],
+            "token_to_word_positions": {},
+            "token_spans": {},
+            "word_coverage": [],
+            "shared_subwords": [],
+            "violations": [violation],
+            "error_message": violation["message"],
+        }
+
     token_spans: dict[int, tuple[int, int]] = {}
-    for token_index, (token_start, token_end) in enumerate(offset_mapping):
-        relative_start = int(token_start) - graph_start
-        relative_end = int(token_end) - graph_start
+    for token_index, offset in enumerate(offset_mapping):
+        try:
+            token_start, token_end = (int(value) for value in offset)
+        except (TypeError, ValueError) as exc:
+            violation = _alignment_policy_violation(
+                "out_of_bounds_mapping",
+                f"token offset is invalid: token_index={token_index} offset={offset!r}",
+                [token_index],
+            )
+            violations.append(violation)
+            continue
+        relative_start = token_start - graph_start
+        relative_end = token_end - graph_start
         if relative_end > relative_start:
             token_spans[token_index] = (relative_start, relative_end)
 
     aligned: list[list[int]] = []
-    for word in words:
+    word_coverage: list[dict] = []
+    for word_position, word in enumerate(words):
         start = int(word["start"])
         end = int(word["end"])
+        word_length = max(0, end - start)
+        out_of_bounds_word = start < 0 or end < start or end > len(graph_text)
+        if out_of_bounds_word:
+            violations.append(
+                _alignment_policy_violation(
+                    "out_of_bounds_mapping",
+                    f"parser word span outside graph text: index={word['index']} span=({start},{end}) text_length={len(graph_text)}",
+                    word_positions=[word_position],
+                )
+            )
         token_indices = [
             token_index
             for token_index, (token_start, token_end) in token_spans.items()
             if token_start < end and token_end > start
         ]
+        aligned.append(token_indices)
         if not token_indices:
-            raise GraphCacheError(
-                f"parser word cannot be aligned to subwords: index={word['index']} text={word['text']!r}"
+            violations.append(
+                _alignment_policy_violation(
+                    "unaligned_parser_word",
+                    f"parser word cannot be aligned to subwords: index={word['index']} text={word['text']!r}",
+                    word_positions=[word_position],
+                )
             )
+            word_coverage.append(
+                {
+                    "word_position": word_position,
+                    "token_indices": [],
+                    "covered_length": 0,
+                    "word_length": word_length,
+                    "fully_covered": False,
+                }
+            )
+            continue
+
         covered_until = start
+        covered_ranges: list[tuple[int, int]] = []
         for token_index in token_indices:
             token_start, token_end = token_spans[token_index]
             clipped_start = max(start, token_start)
             clipped_end = min(end, token_end)
+            if clipped_end > clipped_start:
+                covered_ranges.append((clipped_start, clipped_end))
             if clipped_start > covered_until:
-                raise GraphCacheError(
-                    f"parser word has an uncovered character gap: index={word['index']} text={word['text']!r}"
+                violations.append(
+                    _alignment_policy_violation(
+                        "incomplete_character_coverage",
+                        f"parser word has an uncovered character gap: index={word['index']} text={word['text']!r}",
+                        token_indices,
+                        [word_position],
+                    )
                 )
+                break
             covered_until = max(covered_until, clipped_end)
-        if covered_until < end:
-            raise GraphCacheError(
-                f"parser word is only partially aligned: index={word['index']} text={word['text']!r}"
+        if covered_until < end and not any(
+            item["issue_type"] == "incomplete_character_coverage"
+            and word_position in item["word_positions"]
+            for item in violations
+        ):
+            violations.append(
+                _alignment_policy_violation(
+                    "incomplete_character_coverage",
+                    f"parser word is only partially aligned: index={word['index']} text={word['text']!r}",
+                    token_indices,
+                    [word_position],
+                )
             )
-        aligned.append(token_indices)
+        ordered_ranges = sorted(covered_ranges)
+        merged_ranges: list[tuple[int, int]] = []
+        for range_start, range_end in ordered_ranges:
+            if not merged_ranges or range_start > merged_ranges[-1][1]:
+                merged_ranges.append((range_start, range_end))
+            else:
+                merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], range_end))
+        covered_length = sum(range_end - range_start for range_start, range_end in merged_ranges)
+        fully_covered = (
+            not out_of_bounds_word
+            and bool(merged_ranges)
+            and merged_ranges[0][0] <= start
+            and merged_ranges[-1][1] >= end
+            and covered_length >= word_length
+            and all(
+                right[0] <= left[1]
+                for left, right in zip(merged_ranges, merged_ranges[1:])
+            )
+        )
+        if not fully_covered and not any(
+            item["issue_type"] == "incomplete_character_coverage"
+            and word_position in item["word_positions"]
+            for item in violations
+        ):
+            violations.append(
+                _alignment_policy_violation(
+                    "incomplete_character_coverage",
+                    f"parser word character coverage incomplete: index={word['index']} text={word['text']!r}",
+                    token_indices,
+                    [word_position],
+                )
+            )
+        word_coverage.append(
+            {
+                "word_position": word_position,
+                "token_indices": token_indices,
+                "covered_length": covered_length,
+                "word_length": word_length,
+                "fully_covered": fully_covered,
+            }
+        )
 
     token_to_word_positions: dict[int, list[int]] = {}
     for word_position, token_indices in enumerate(aligned):
         for token_index in token_indices:
             token_to_word_positions.setdefault(token_index, []).append(word_position)
+
+    shared_subwords: list[dict] = []
     for token_index, word_positions in token_to_word_positions.items():
-        if len(word_positions) <= 1:
+        token_start, token_end = token_spans[token_index]
+        if token_start < 0 or token_end > len(graph_text) or token_end <= token_start:
+            violations.append(
+                _alignment_policy_violation(
+                    "out_of_bounds_mapping",
+                    f"mapped subword span outside graph text: token_index={token_index} span=({token_start},{token_end})",
+                    [token_index],
+                    word_positions,
+                )
+            )
+        if len(word_positions) == 1:
+            word = words[word_positions[0]]
+            if token_start < int(word["start"]) or token_end > int(word["end"]):
+                violations.append(
+                    _alignment_policy_violation(
+                        "token_span_exceeds_parser_word",
+                        f"mapped subword exceeds parser word span: token_index={token_index} token_span=({token_start},{token_end}) word_index={word['index']} word_span=({word['start']},{word['end']})",
+                        [token_index],
+                        word_positions,
+                    )
+                )
             continue
+
         first = word_positions[0]
         last = word_positions[-1]
         shared_words = words[first : last + 1]
-        token_start, token_end = token_spans[token_index]
         positions_are_contiguous = word_positions == list(range(first, last + 1))
         spans_are_contiguous = all(
             int(left["end"]) == int(right["start"])
@@ -233,12 +387,86 @@ def align_parser_words_to_subwords(
             int(shared_words[0]["start"]) == token_start
             and int(shared_words[-1]["end"]) == token_end
         )
-        if not (positions_are_contiguous and spans_are_contiguous and same_sentence and exact_union):
-            raise GraphCacheError(
-                "shared subword spans non-contiguous parser words: "
-                f"token_index={token_index} word_indices={[word['index'] for word in shared_words]}"
+        gaps_are_spaces = any(
+            int(left["end"]) < int(right["start"])
+            and graph_text[int(left["end"]) : int(right["start"])].isspace()
+            for left, right in zip(shared_words, shared_words[1:])
+        )
+        legal = positions_are_contiguous and spans_are_contiguous and same_sentence and exact_union
+        shared = {
+            "token_index": token_index,
+            "word_positions": list(word_positions),
+            "word_indices": [int(word["index"]) for word in shared_words],
+            "positions_are_contiguous": positions_are_contiguous,
+            "spans_are_contiguous": spans_are_contiguous,
+            "same_sentence": same_sentence,
+            "exact_union": exact_union,
+            "gaps_are_spaces": gaps_are_spaces,
+            "legal": legal,
+        }
+        shared_subwords.append(shared)
+        if not legal:
+            violations.append(
+                _alignment_policy_violation(
+                    "shared_subword_span_not_exact_union",
+                    "alignment policy violation: shared subword spans non-contiguous parser words: "
+                    f"token_index={token_index} word_indices={shared['word_indices']} "
+                    f"token_span=({token_start},{token_end})",
+                    [token_index],
+                    word_positions,
+                )
             )
-    return aligned
+        if not positions_are_contiguous:
+            violations.append(
+                _alignment_policy_violation(
+                    "non_contiguous_shared_subword",
+                    f"shared subword skips parser words: token_index={token_index} word_positions={word_positions}",
+                    [token_index],
+                    word_positions,
+                )
+            )
+        if gaps_are_spaces:
+            violations.append(
+                _alignment_policy_violation(
+                    "cross_space_shared_subword",
+                    f"shared subword crosses whitespace: token_index={token_index} word_positions={word_positions}",
+                    [token_index],
+                    word_positions,
+                )
+            )
+        if not same_sentence:
+            violations.append(
+                _alignment_policy_violation(
+                    "cross_sentence_shared_subword",
+                    f"shared subword crosses parser sentences: token_index={token_index} word_positions={word_positions}",
+                    [token_index],
+                    word_positions,
+                )
+            )
+
+    return {
+        "valid": not violations,
+        "aligned": aligned,
+        "word_to_subword": aligned,
+        "token_to_word_positions": token_to_word_positions,
+        "token_spans": token_spans,
+        "word_coverage": word_coverage,
+        "shared_subwords": shared_subwords,
+        "violations": violations,
+        "error_message": violations[0]["message"] if violations else "",
+    }
+
+
+def align_parser_words_to_subwords(
+    words: list[dict],
+    input_text: str,
+    graph_text: str,
+    offset_mapping: list[tuple[int, int]],
+) -> list[list[int]]:
+    validation = validate_alignment_policy(words, input_text, graph_text, offset_mapping)
+    if not validation["valid"]:
+        raise GraphCacheError(validation["error_message"])
+    return validation["aligned"]
 
 
 def _parser_words_from_doc(doc) -> list[dict]:

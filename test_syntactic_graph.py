@@ -3,6 +3,7 @@ from pathlib import Path
 
 from syntactic_graph import (
     ALIGNMENT_POLICY_VERSION,
+    GRAPH_SCHEMA_VERSION,
     GraphCacheError,
     align_parser_words_to_subwords,
     build_graph_cache_records,
@@ -11,6 +12,7 @@ from syntactic_graph import (
     canonical_row_json,
     load_graph_cache_directory,
     load_graph_cache_rows,
+    validate_alignment_policy,
 )
 
 
@@ -117,6 +119,97 @@ def test_alignment_allows_one_subword_to_cover_adjacent_parser_fragments():
     assert aligned == [[0], [0]]
 
 
+def test_alignment_policy_shared_validator_accepts_iphone_and_formal_alignment_matches():
+    words = [
+        {"index": 0, "sentence_index": 0, "text": "i", "start": 0, "end": 1},
+        {"index": 1, "sentence_index": 0, "text": "Phone", "start": 1, "end": 6},
+    ]
+
+    validation = validate_alignment_policy(words, "iPhone", "iPhone", [(0, 6)])
+
+    assert validation["valid"] is True
+    assert validation["aligned"] == [[0], [0]]
+    assert align_parser_words_to_subwords(words, "iPhone", "iPhone", [(0, 6)]) == validation["aligned"]
+
+
+def test_alignment_policy_rejects_abx_incomplete_shared_union_in_preflight_and_formal_code():
+    words = [
+        {"index": 0, "sentence_index": 0, "text": "a", "start": 0, "end": 1},
+        {"index": 1, "sentence_index": 0, "text": "b", "start": 1, "end": 2},
+    ]
+    validation = validate_alignment_policy(words, "abx", "abx", [(0, 3)])
+
+    assert validation["valid"] is False
+    assert any(item["issue_type"] == "shared_subword_span_not_exact_union" for item in validation["violations"])
+    try:
+        align_parser_words_to_subwords(words, "abx", "abx", [(0, 3)])
+    except GraphCacheError as exc:
+        assert "alignment policy" in str(exc)
+    else:
+        raise AssertionError("formal alignment must reject an incomplete shared union")
+
+
+def test_alignment_policy_rejects_cross_space_non_contiguous_cross_sentence_and_out_of_bounds():
+    cases = [
+        (
+            "cross_space",
+            [
+                {"index": 0, "sentence_index": 0, "text": "a", "start": 0, "end": 1},
+                {"index": 1, "sentence_index": 0, "text": "b", "start": 2, "end": 3},
+            ],
+            "a b",
+            [(0, 3)],
+            "cross_space_shared_subword",
+        ),
+        (
+            "non_contiguous",
+            [
+                {"index": 0, "sentence_index": 0, "text": "a", "start": 0, "end": 1},
+                {"index": 1, "sentence_index": 0, "text": "x", "start": 4, "end": 5},
+                {"index": 2, "sentence_index": 0, "text": "b", "start": 1, "end": 2},
+            ],
+            "abxxx",
+            [(0, 2)],
+            "non_contiguous_shared_subword",
+        ),
+        (
+            "cross_sentence",
+            [
+                {"index": 0, "sentence_index": 0, "text": "a", "start": 0, "end": 1},
+                {"index": 1, "sentence_index": 1, "text": "b", "start": 1, "end": 2},
+            ],
+            "ab",
+            [(0, 2)],
+            "cross_sentence_shared_subword",
+        ),
+        (
+            "out_of_bounds",
+            [{"index": 0, "sentence_index": 0, "text": "a", "start": -1, "end": 1}],
+            "a",
+            [(0, 1)],
+            "out_of_bounds_mapping",
+        ),
+    ]
+
+    for _name, words, text, offsets, issue_type in cases:
+        validation = validate_alignment_policy(words, text, text, offsets)
+        assert validation["valid"] is False
+        assert any(item["issue_type"] == issue_type for item in validation["violations"])
+        try:
+            align_parser_words_to_subwords(words, text, text, offsets)
+        except GraphCacheError:
+            pass
+        else:
+            raise AssertionError(f"formal alignment must reject {_name}")
+
+
+def test_alignment_policy_accepts_one_to_one_and_one_to_many_subword_mapping():
+    word = [{"index": 0, "sentence_index": 0, "text": "staff", "start": 0, "end": 5}]
+
+    assert validate_alignment_policy(word, "staff", "staff", [(0, 5)])["valid"] is True
+    assert validate_alignment_policy(word, "staff", "staff", [(0, 2), (2, 5)])["valid"] is True
+
+
 def test_alignment_rejects_shared_subword_across_a_character_gap():
     words = [
         {"index": 0, "sentence_index": 0, "text": "a", "start": 0, "end": 1},
@@ -210,6 +303,9 @@ def test_graph_cache_resume_is_rowwise_and_byte_identical(tmp_path):
         parser_identity=parser_identity,
     )
     assert loaded.relation_vocab_size > 0
+    manifest = json.loads((interrupted_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == GRAPH_SCHEMA_VERSION
+    assert manifest["alignment_policy_version"] == ALIGNMENT_POLICY_VERSION
 
 
 def test_graph_cache_resume_rejects_an_older_alignment_policy(tmp_path):

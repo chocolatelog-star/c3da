@@ -6,6 +6,7 @@ from m1_alignment_preflight import (
     ALIGNMENT_POLICY_VERSION,
     AlignmentPreflightError,
     AlignmentPreflightInterrupted,
+    build_argument_parser,
     build_preflight_summary,
     load_preflight_rows,
     run_preflight,
@@ -72,6 +73,39 @@ def _words(*items):
     return [FakeWord(*item) for item in items]
 
 
+def _fake_rows(input_path):
+    return {
+        split: [
+            {
+                "id": f"{split}-r1",
+                "text": "iPhone",
+                "input": "iPhone",
+                "source_path": str(input_path),
+            }
+        ]
+        for split in ("source_train", "source_dev", "target_unlabeled")
+    }
+
+
+def _fake_preflight_args(output_dir, max_source_length=128):
+    return SimpleNamespace(
+        output_dir=str(output_dir),
+        source_dataset="laptop14",
+        target_dataset="rest15",
+        max_source_length=max_source_length,
+        max_subwords_per_word=8,
+        parser_dir="fake-parser",
+        cpu=True,
+        cuda=0,
+    )
+
+
+def _fake_preflight_dependencies():
+    parser = FakeParser(FakeDoc([FakeSentence(_words(("i", 0, 1), ("Phone", 1, 6)))]))
+    tokenizer = FakeTokenizer([(0, 6)], tokens=["▁iPhone"])
+    return tokenizer, parser, {"class": "fake", "files_sha256": {}}, {"name": "fake"}
+
+
 def test_preflight_records_legal_iphone_contiguous_sharing():
     parser = FakeParser(FakeDoc([FakeSentence(_words(("i", 0, 1), ("Phone", 1, 6)))]))
     tokenizer = FakeTokenizer([(0, 6)], tokens=["▁iPhone"])
@@ -109,6 +143,37 @@ def test_preflight_rejects_cross_sentence_shared_subword():
     result = scan_alignment_row("source_train", _row("a b"), tokenizer, parser, max_source_length=128)
 
     assert "cross_sentence_shared_subword" in result["issue_types"]
+
+
+def test_preflight_rejects_abx_incomplete_shared_union_with_formal_policy_reason():
+    parser = FakeParser(FakeDoc([FakeSentence(_words(("a", 0, 1), ("b", 1, 2)))]))
+    tokenizer = FakeTokenizer([(0, 3)], tokens=["abx"])
+
+    result = scan_alignment_row("source_train", _row("abx"), tokenizer, parser, max_source_length=128)
+
+    assert result["failed"] is False
+    assert result["stats"]["alignment_policy_violation_count"] == 1
+    assert "alignment_policy_violation" in result["issue_types"]
+    assert "shared_subword_span_not_exact_union" in result["issue_types"]
+    assert any("alignment policy" in row["error_message"] for row in result["suspicious_rows"])
+
+
+def test_summary_blocks_when_alignment_policy_violation_exists():
+    parser = FakeParser(FakeDoc([FakeSentence(_words(("a", 0, 1), ("b", 1, 2)))]))
+    tokenizer = FakeTokenizer([(0, 3)], tokens=["abx"])
+    report = scan_split_rows(
+        "source_train", [_row("abx")], tokenizer, parser, max_source_length=128
+    )
+
+    summary = build_preflight_summary(
+        {"source_train": report, "source_dev": {"row_count": 0}, "target_unlabeled": {"row_count": 0}},
+        {"alignment_policy_version": ALIGNMENT_POLICY_VERSION},
+        max_source_length=128,
+    )
+
+    assert summary["totals"]["stats"]["alignment_policy_violation_count"] == 1
+    assert summary["gates"]["alignment_policy_violation_zero"] is False
+    assert summary["status"] == "BLOCKED"
 
 
 def test_preflight_records_truncation_uncovered_word():
@@ -202,6 +267,218 @@ def test_preflight_loads_only_source_train_dev_and_target_train():
     assert all(split != "test" for _, split in calls)
 
 
+def test_preflight_does_not_leave_output_when_identity_loading_fails(tmp_path):
+    output_dir = tmp_path / "preflight"
+    rows = {
+        split: [{"id": split, "text": "iPhone", "input": "iPhone"}]
+        for split in ("source_train", "source_dev", "target_unlabeled")
+    }
+    tokenizer, parser, tokenizer_identity, parser_identity = _fake_preflight_dependencies()
+    args = _fake_preflight_args(output_dir)
+
+    try:
+        run_preflight(
+            args,
+            rows_by_split=rows,
+            tokenizer=tokenizer,
+            parser=parser,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+            repo_dir=Path(__file__).resolve().parent,
+        )
+    except AlignmentPreflightError as exc:
+        assert "input file" in str(exc)
+    else:
+        raise AssertionError("identity loading failure must stop before output initialization")
+    assert not output_dir.exists()
+
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"id":"r1","text":"iPhone"}\n', encoding="utf-8")
+    result = run_preflight(
+        args,
+        rows_by_split=_fake_rows(input_path),
+        tokenizer=tokenizer,
+        parser=parser,
+        tokenizer_identity=tokenizer_identity,
+        parser_identity=parser_identity,
+        repo_dir=Path(__file__).resolve().parent,
+    )
+    assert result["status"] == "PASS"
+
+
+def test_preflight_does_not_initialize_output_when_parser_loading_fails(tmp_path):
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"id":"r1","text":"iPhone"}\n', encoding="utf-8")
+    output_dir = tmp_path / "preflight"
+    tokenizer, _parser, tokenizer_identity, parser_identity = _fake_preflight_dependencies()
+    args = _fake_preflight_args(output_dir)
+
+    with patch(
+        "m1_alignment_preflight.build_stanza_pipeline",
+        side_effect=RuntimeError("synthetic parser loading failure"),
+    ):
+        try:
+            run_preflight(
+                args,
+                rows_by_split=_fake_rows(input_path),
+                tokenizer=tokenizer,
+                tokenizer_identity=tokenizer_identity,
+                parser_identity=parser_identity,
+                repo_dir=Path(__file__).resolve().parent,
+            )
+        except RuntimeError as exc:
+            assert "parser loading" in str(exc)
+        else:
+            raise AssertionError("parser loading failure must stop before output initialization")
+    assert not output_dir.exists()
+
+
+def test_preflight_recovers_orphan_suspicious_jsonl_without_manual_delete(tmp_path):
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"id":"r1","text":"iPhone"}\n', encoding="utf-8")
+    output_dir = tmp_path / "preflight"
+    output_dir.mkdir()
+    suspicious_path = output_dir / "alignment_suspicious_rows.jsonl"
+    suspicious_path.write_text('{"split":"orphan","row_id":"old","issue_type":"old","error_message":"old"}\n{"split":"orphan"', encoding="utf-8")
+    args = _fake_preflight_args(output_dir)
+    tokenizer, parser, tokenizer_identity, parser_identity = _fake_preflight_dependencies()
+
+    result = run_preflight(
+        args,
+        rows_by_split=_fake_rows(input_path),
+        tokenizer=tokenizer,
+        parser=parser,
+        tokenizer_identity=tokenizer_identity,
+        parser_identity=parser_identity,
+        repo_dir=Path(__file__).resolve().parent,
+    )
+
+    assert result["status"] == "PASS"
+    assert len(suspicious_path.read_text(encoding="utf-8").splitlines()) == 6
+
+
+def test_preflight_recovers_jsonl_tail_and_preserves_committed_rows(tmp_path):
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"id":"r1","text":"iPhone"}\n', encoding="utf-8")
+    rows = _fake_rows(input_path)
+    tokenizer, parser, tokenizer_identity, parser_identity = _fake_preflight_dependencies()
+    interrupted_dir = tmp_path / "interrupted"
+    args = _fake_preflight_args(interrupted_dir)
+
+    try:
+        run_preflight(
+            args,
+            rows_by_split=rows,
+            tokenizer=tokenizer,
+            parser=parser,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+            repo_dir=Path(__file__).resolve().parent,
+            stop_after_rows=1,
+        )
+    except AlignmentPreflightInterrupted:
+        pass
+    else:
+        raise AssertionError("controlled interruption must stop after one committed row")
+
+    suspicious_path = interrupted_dir / "alignment_suspicious_rows.jsonl"
+    committed_line = suspicious_path.read_bytes().splitlines(keepends=True)[0]
+    with suspicious_path.open("ab") as handle:
+        handle.write(committed_line)
+        handle.write(b'{"split":"source_train"')
+    tailed_bytes = suspicious_path.read_bytes()
+
+    resumed = run_preflight(
+        args,
+        rows_by_split=rows,
+        tokenizer=tokenizer,
+        parser=parser,
+        tokenizer_identity=tokenizer_identity,
+        parser_identity=parser_identity,
+        repo_dir=Path(__file__).resolve().parent,
+    )
+    clean_dir = tmp_path / "clean"
+    clean = run_preflight(
+        _fake_preflight_args(clean_dir),
+        rows_by_split=rows,
+        tokenizer=tokenizer,
+        parser=parser,
+        tokenizer_identity=tokenizer_identity,
+        parser_identity=parser_identity,
+        repo_dir=Path(__file__).resolve().parent,
+    )
+
+    assert resumed == clean
+    assert suspicious_path.read_bytes() == (clean_dir / "alignment_suspicious_rows.jsonl").read_bytes()
+    assert suspicious_path.read_bytes().splitlines(keepends=True)[0] == committed_line
+    assert suspicious_path.read_bytes() != tailed_bytes
+
+
+def test_preflight_identity_mismatch_does_not_truncate_existing_tail(tmp_path):
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"id":"r1","text":"iPhone"}\n', encoding="utf-8")
+    output_dir = tmp_path / "preflight"
+    rows = _fake_rows(input_path)
+    tokenizer, parser, tokenizer_identity, parser_identity = _fake_preflight_dependencies()
+    args = _fake_preflight_args(output_dir)
+    try:
+        run_preflight(
+            args,
+            rows_by_split=rows,
+            tokenizer=tokenizer,
+            parser=parser,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+            repo_dir=Path(__file__).resolve().parent,
+            stop_after_rows=1,
+        )
+    except AlignmentPreflightInterrupted:
+        pass
+    else:
+        raise AssertionError("controlled interruption must stop after one committed row")
+    suspicious_path = output_dir / "alignment_suspicious_rows.jsonl"
+    with suspicious_path.open("ab") as handle:
+        handle.write(b'{"split":"source_train"')
+    before = suspicious_path.read_bytes()
+
+    mismatch_args = _fake_preflight_args(output_dir, max_source_length=64)
+    try:
+        run_preflight(
+            mismatch_args,
+            rows_by_split=rows,
+            tokenizer=tokenizer,
+            parser=parser,
+            tokenizer_identity=tokenizer_identity,
+            parser_identity=parser_identity,
+            repo_dir=Path(__file__).resolve().parent,
+        )
+    except AlignmentPreflightError as exc:
+        assert "identity mismatch" in str(exc)
+    else:
+        raise AssertionError("changed alignment configuration must be rejected")
+    assert suspicious_path.read_bytes() == before
+
+
+def test_preflight_cli_records_requested_and_actual_cpu_device_metadata():
+    args = build_argument_parser().parse_args(["--output_dir", "unused", "--cuda", "0", "--cpu"])
+    assert args.cuda == 0
+    summary = build_preflight_summary(
+        {split: {"row_count": 0} for split in ("source_train", "source_dev", "target_unlabeled")},
+        {"alignment_policy_version": ALIGNMENT_POLICY_VERSION},
+        max_source_length=128,
+        runtime_devices={
+            "requested_cuda_index": 0,
+            "actual_cuda_index": None,
+            "parser_device": "cpu",
+            "model_device": "cpu",
+        },
+    )
+    assert summary["runtime_devices"]["requested_cuda_index"] == 0
+    assert summary["runtime_devices"]["actual_cuda_index"] is None
+    assert summary["runtime_devices"]["parser_device"] == "cpu"
+    assert summary["runtime_devices"]["model_device"] == "cpu"
+
+
 def test_run_preflight_resumes_rows_and_rejects_identity_mismatch(tmp_path):
     input_path = tmp_path / "input.jsonl"
     input_path.write_text('{"id":"r1","text":"iPhone"}\n', encoding="utf-8")
@@ -217,6 +494,8 @@ def test_run_preflight_resumes_rows_and_rejects_identity_mismatch(tmp_path):
         target_dataset="rest15",
         max_source_length=128,
         max_subwords_per_word=8,
+        cpu=True,
+        cuda=0,
     )
     identities = {"class": "fake", "files_sha256": {}}
 
