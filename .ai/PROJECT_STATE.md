@@ -1,12 +1,18 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-27 12:46（北京时间）
+> 更新时间：2026-08-27 13:16（北京时间）
 
 ## 当前任务状态
 
-`M1_ALIGNMENT_PREFLIGHT_V1`（laptop14 -> rest15，source_train/source_dev/target_unlabeled）已完成本轮对齐策略修复。当前状态为 `RUNNING`（等待 Codex Sol 最终只读验收；新版 GPU 全量预检尚未运行）；未运行新版 GPU 预检、正式训练、伪标签生成或目标测试读取。M1 图结构、DANN 系数和研究方案未改动，不能提前记为 M1 通过。
+`M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），只允许执行同一样本的 FP32/FP16 逐层数值追踪、首个非有限值定位、target pseudo inference 异常记录、CPU 合成测试和报告实现。当前 zero-update 入口审计为 `BLOCKED`（阻塞）：control_loss 有限，但 treatment、重复前向、source training/dev、DANN 损失及 ASTE/DANN 梯度为 NaN；参数未更新，target test 未访问。正式训练仍未批准，GPU 诊断由用户运行。
 
-## 本轮只读对齐预检状态
+## 当前任务边界
+
+- 不修改模型公式、训练逻辑、实验参数、图结构、DANN 系数或数据增强逻辑。
+- 不使用 `nan_to_num`、梯度裁剪、关闭图模块或改成 FP32 掩盖异常；不创建优化器、更新调度器、保存模型或读取 target test。
+- 逐阶段报告 FP32 与 CUDA autocast FP16 的张量统计、首个非有限阶段、首个异常行/边、关系类型、入边数量、target pseudo inference 异常类型和消息；CPU 测试验证有限路径、人工溢出定位、参数不变和异常不静默吞掉。
+
+## 上一任务只读对齐预检状态
 
 - 上一版全量只读预检完成 1730/1730 行，字符覆盖率 100%、failed_rows=0、目标测试隔离为 false；12 项 `alignment_policy_violation` 已确定属于合法的连续部分共享边界，包括缩写、`Registration/1st` 和 `WIth`。
 - 新版 `overlap-contiguous-contained-sharing-v3` 由 `syntactic_graph.py` 的公开 `validate_alignment_policy` 统一提供，正式图缓存与预检共同使用；`exact_union` 保留，同时记录 `contained_in_parser_union` 和 `partial_contiguous_shared_subword`。`GRAPH_SCHEMA_VERSION`（图模式版本）保持不变，旧缓存因策略版本变化不可复用。
