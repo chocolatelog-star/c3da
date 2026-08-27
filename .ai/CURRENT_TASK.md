@@ -1,20 +1,20 @@
 # 当前任务
 
-> 更新时间：2026-08-27 10:53（北京时间）
+> 更新时间：2026-08-27 12:17（北京时间）
 
 - 任务编号：M1_ALIGNMENT_PREFLIGHT_V1
 - 任务类型：READ-ONLY DIAGNOSTIC + IMPLEMENTATION（只读诊断与实现）
 - 方向：laptop14 -> rest15
 - 扫描划分：source_train、source_dev、target_unlabeled
-- 状态：RUNNING（代码与 CPU 验证完成，等待用户运行 GPU 预检）
+- 状态：RUNNING（本轮工具修复与 CPU 验证完成，等待 Codex Sol 最终只读验收；GPU 全量预检尚未运行）
 - 用户批准状态：APPROVED_FOR_READ_ONLY_PREFLIGHT（已批准只读预检）
 - 正式训练状态：NOT APPROVED（未批准）
 
 ## 本任务交付边界
 
-- 新增独立 `m1_alignment_preflight.py`，复用 `syntactic_graph.py` 的 Stanza EWT、fast offset mapping（快速偏移映射）和 `overlap-contiguous-sharing-v2` 对齐策略；不修改模型、训练、损失、数据、标签或正式实验逻辑。
+- 新增独立 `m1_alignment_preflight.py`，复用 `syntactic_graph.py` 的公开 `validate_alignment_policy`、Stanza EWT、fast offset mapping（快速偏移映射）和 `overlap-contiguous-sharing-v2` 对齐策略；不修改模型、训练、损失、数据、标签或正式实验逻辑。
 - 对三份实际输入逐行扫描；遇到行级异常只记录 `row_failure` 并继续后续行。合法连续共享也写入可疑清单，异常类型、覆盖率、分布和截断信息写入 JSON（结构化）汇总。
-- 输出目录只允许 `alignment_preflight_summary.json`、`alignment_suspicious_rows.jsonl` 和 `alignment_preflight_CN.md` 三个文件；恢复时硬校验 Git commit、输入 SHA256、解析器、分词器、策略版本和 `max_source_length=128`。
+- 输出目录只允许 `alignment_preflight_summary.json`、`alignment_suspicious_rows.jsonl` 和 `alignment_preflight_CN.md` 三个文件；身份完成校验后才初始化输出，恢复时硬校验 Git commit、输入 SHA256、解析器、分词器、图模式、策略版本和 `max_source_length=128`，并只截断未提交尾部。
 - 目标测试隔离为硬约束；代码只加载 source train/dev 和 target train 作为 target_unlabeled，不请求 target_test。
 
 ## 研究边界
@@ -38,6 +38,8 @@ Control（控制组）与 Treatment（处理组）只允许在源域抽取器到
 - 修改 parser（解析器）、图层数、attention heads（注意力头数）、graph hidden size（图隐藏维度）、DANN（领域对抗网络）、伪标签权重、筛选阈值或现有生成器；
 - fallback 到无图、删除失败行、参数网格、隐式改 tokenizer（分词器）或启动未经批准的 GPU（图形处理器）实验；不得绕过专用审计脚本进入图训练。
 
-## 当前结论
+## 本轮工具修复结论
 
-本轮只读对齐预检实现已完成：新增测试 8 项全部通过，M1 图、DANN、入口边界、恢复及后处理相关回归 56 项全部通过，AST（抽象语法树）解析和差异格式检查通过。断点测试验证中断后继续扫描、输出目录三文件契约和身份变化硬停止；未运行 GPU 预检、正式训练、伪标签生成或目标测试读取。未更新正式实验索引，等待用户返回实际预检结果后统一记录。
+- 本轮仅修复工具阻塞项：正式图缓存和预检共用同一个公开对齐策略验证函数；`alignment_policy_violation_count` 纳入总 Gate（门控），非法 `abx` 联合覆盖会被两条路径同时拒绝，合法 `iPhone` 共享继续通过。
+- 输出恢复改为身份校验后初始化；可恢复仅有 JSONL、JSONL 多出的未提交完整行、尾部半行 JSON 和初始化中断，并重新扫描未提交当前行；身份变化或已提交记录缺失仍硬停止。报告记录 `--cuda` 请求/实际设备及解析器、模型设备字段。
+- 本轮新增 CPU 测试 12 项，全部通过；M1 相关测试共 76 项全部通过，AST（抽象语法树）解析和 `git diff --check`（差异格式检查）通过。未运行 GPU 全量预检、正式训练、伪标签生成或目标测试读取；M1 尚不能写成已通过，正式实验索引暂不更新。
