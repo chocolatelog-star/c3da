@@ -1,50 +1,42 @@
 # 当前任务
 
-> 更新时间：2026-08-27 17:04（北京时间）
+> 更新时间：2026-08-27 18:02（北京时间）
 
-- 任务编号：M1_SYNTACTIC_RGAT_FP16_NUMERICAL_TRACE_V1
-- 任务类型：READ-ONLY DIAGNOSTIC IMPLEMENTATION（只读诊断实现）
+- 任务编号：M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1
+- 任务类型：QUICK ABLATION（快速消融）
 - 方向：laptop14 -> rest15
+- 随机种子：1000
+- 入口身份：M1 句法 RGAT zero-update（零更新）入口审计已达到 15/15 PASS（通过）；固定代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`
 - 状态：APPROVED（已批准）
-- 用户批准范围：同一固定样本的 FP32（单精度）/FP16（半精度）逐层数值追踪、首个非有限张量定位、target pseudo inference（目标伪标签推理）异常记录、CPU（中央处理器）合成测试、机器可读 JSON（结构化报告）和中文报告；本轮只修复完整缓存身份与目标推理子集的接口分离
-- 正式训练状态：NOT APPROVED（未批准）
+- 当前实现范围：仅实现 Phase A（上游阶段）可复现运行入口、Control/Treatment（对照组/实验组）身份审计、四项门控、断点恢复和硬停止
+- Phase B（下游阶段）执行状态：NOT APPROVED（未批准）；本轮不实现或运行 Phase B
 
-## 已知阻塞事实
+## Phase A 批准范围
 
-- M1 V3 数值追踪已通过（PASS）：此前的 trace-only（仅追踪）dtype mismatch（数据类型不一致）和基础检查点图参数未初始化问题均已修复，未改变 FP16 图传播公式。
-- 完整 zero-update（零更新）入口审计当前为 14/15 门控通过，唯一失败为 `target_pseudo_inference`（目标伪标签推理）中的完整 `target_unlabeled` 缓存身份与单条推理子集混用。
-- 本轮修复要求完整 `target_rows` 仅用于 manifest（清单）身份校验，`target_sample` 仅用于缓存读取和批次推理；不放宽身份校验，不生成正式伪标签，不读取 target test（目标测试集）。
-- 正式训练仍为 NOT APPROVED（未批准），M1 尚未最终通过；新版 GPU（图形处理器）入口审计尚未运行。
+- Control：原始 T5 pseudo extractor（伪标签抽取器），`graph_enabled=false`。
+- Treatment：source extractor training（源域抽取训练）、source-dev evaluation（源域开发集评估）、target-unlabeled DANN（目标无标签领域对抗）和 target pseudo inference（目标伪标签推理）启用句法 RGAT。
+- 图模块不得进入 generator（生成器）、augmentation（数据增强）、NLI（自然语言推断）、exact/conflict filtering（精确回抽/冲突过滤）、selector（选择器）、final ASTE（最终方面级情感三元组抽取）或 target test（目标测试集）。
+- Control 只有在方向、种子、数据划分、配方、检查点选择规则、模型/分词器、代码语义、配置和产物哈希全部机器匹配时才允许复用；任何未知项均从头重跑。
 
-## 本轮实现状态
+## Phase A 门控与硬停止
 
-- V3 数值追踪已 PASS；报告确认首个异常根因为基础 T5 检查点加载时新增自定义图适配器参数未初始化，而不是 FP16 图传播公式。
-- 本轮仅修改 `t5_aste_pipeline.generate_texts` 的可选 `graph_cache_identity_rows` 接口和审计入口调用：完整身份清单与实际推理子集职责分离，默认旧调用保持原行为。
-- 已补充目标子集外部/改 ID/改文本/长度不一致拒绝、完整清单加单条推理、审计接线、部分图检查点拒绝和 target test 隔离回归测试；M1 CPU 直接测试共 75 项通过。
-- 新版 GPU 入口审计尚未运行；正式训练、正式伪标签生成和目标测试读取均未执行，M1 仍未最终通过。
+- A1：source-dev strict triplet F1（源域开发集严格三元组 F1）处理组相对对照组差值 `>= -1.0` 个百分点。
+- A2：source-dev 多三元组句 recall（召回率）差值 `>= +2.0` 个百分点。
+- A3：处理组 overall/aspect/opinion absence rate（总体/方面/观点缺失率）满足总体不高于对照组，且方面或观点至少一项改善；方面和观点缺失可重叠，不宣称独立因果。
+- A4：处理组 qualified multi pseudo rows（合格多三元组伪标签行）至少为对照组的 `1.05` 倍，qualified total pseudo rows（合格伪标签总行数）至少为对照组的 `0.95` 倍；不得读取目标测试金标。
+- 只有 A1–A4 全部通过才标记 Phase A PASS；任一失败输出 `STOP_M1_SYNTACTIC_GRAPH_UPSTREAM`，禁止 generator、augmentation、final training（最终训练）和 target test。全部通过时只输出 `REQUEST_PHASE_B`，等待新的 Chat Sol（研究负责人）和用户批准。
 
-## 批准范围
+## 冻结参数与输出
 
-- 新增独立数值追踪入口，对同一固定 source train、source dev 和 target unlabeled（目标无标签）样本分别执行 FP32 完整前向与 CUDA autocast FP16（自动混合精度半精度）完整前向。
-- 逐阶段记录编码器、词池化、投影、边注意力、logits、softmax、关系消息、图融合、解码器 logits、损失、反向梯度和 DANN domain loss/gradient（领域损失/梯度）。
-- 报告必须给出 `first_nonfinite_stage`、FP32/FP16 首个非有限阶段、首个异常行、边及关系类型、入边数量和 target pseudo inference 异常类型与消息。
-- 只读诊断必须输出机器可读 JSON 和简短中文报告；不得创建优化器、更新调度器、保存新模型或修改模型参数。
+- 冻结 T5-base、seed=1000、optimizer（优化器）、LR（学习率）、epoch（轮数）、batch（批大小）、checkpoint selection（检查点选择）、pseudo decoding/filtering（伪标签解码/过滤）、pseudo weight=0.75、DANN=0.03、generator/augmentation 配方、k=1 和 final ASTE 架构；不做参数搜索。
+- Phase A 输出 `phase_a_summary.json`、`phase_a_result_CN.md`、`stage_status.json`、`control_identity_audit.json`、配置快照、Git 身份、父运行身份和文件哈希，并支持 `--resume` 与长阶段进度条。
+- 本轮只运行必要 CPU（中央处理器）测试和静态检查，不启动 GPU（图形处理器）、正式训练、正式伪标签实验或目标测试；正式实验命令由用户运行。
 
-## 验收要求
+## 当前实现完成状态
 
-- 每个张量记录 dtype、shape、finite/nan/正无穷/负无穷计数、min/max、max_abs、mean/std，以及首个非有限位置。
-- CPU 合成测试覆盖全阶段有限、人工溢出首阶段定位、参数不变和异常不静默吞掉。
-- 报告记录 `optimizer_updates=0`、`scheduler_steps=0`，并明确区分 FP32 与 FP16 结果；不得用 `nan_to_num`、梯度裁剪、关闭图模块或改成 FP32 掩盖异常。
-
-## 禁止事项
-
-- 不修改模型公式、训练逻辑、实验参数、DANN 系数、图层数、头数或隐藏维度。
-- 不运行正式训练，不读取 target test，不保存新的目标伪标签，不由执行器启动 GPU（图形处理器）诊断；GPU 命令仅由用户运行。
-- 不修改数据增强、生成器、NLI（自然语言推断）、最终 ASTE 或实验索引。
-
-## 研究边界
-
-本任务仅限 FP32/FP16 数值追踪、CPU 合成测试和只读报告，不改变既有句法图、DANN（领域对抗网络）或训练方案。target pseudo inference（目标伪标签推理）只允许记录异常，不得产生新的实验伪标签。
+- Phase A 专用入口、固定配方、Control 身份审计、A1-A4 门控、断点恢复和硬停止已实现；实际 Phase A 运行尚未启动。
+- RED（失败先行）证据：入口测试在实现前因模块不存在而失败；GREEN（修复后）证据：新增 Phase A 测试 6 项通过，全部 M1 相关 CPU 测试共 85 项通过，AST（抽象语法树）检查和 `git diff --check`（差异格式检查）通过。
+- 当前仍未运行 GPU（图形处理器）、正式训练、正式伪标签实验或目标测试；Phase B 仍为 `NOT APPROVED`，M1 不得提前标记为最终通过，正式实验索引暂不更新。
 
 ## 前置核验状态
 

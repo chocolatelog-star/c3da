@@ -7,6 +7,7 @@ import math
 import os
 import random
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -1351,13 +1352,36 @@ def add_task_special_tokens(tokenizer, model, rows: list[dict]) -> None:
         print(f"initialized {token} from {init_word}")
 
 
+_PHASE_A_GRAPH_TRAINING_AUTHORIZED = False
+
+
 def enforce_graph_training_boundary(use_syntactic_graph_adapter: bool) -> None:
-    """Keep the graph training entry closed until the approved audit passes."""
-    if use_syntactic_graph_adapter:
+    """Keep direct graph training closed; only the Phase A API may authorize it."""
+    if use_syntactic_graph_adapter and not _PHASE_A_GRAPH_TRAINING_AUTHORIZED:
         raise RuntimeError(
             "syntactic graph training is not approved; run "
-            "m1_syntactic_graph_entry_audit.py for zero-update audit only"
+            "m1_syntactic_graph_entry_audit.py for zero-update audit only, or use the approved "
+            "m1_syntactic_rgat_pseudo_quick_ablation.py Phase A entry"
         )
+
+
+def run_phase_a_training(argv: list[str]) -> None:
+    """Run the existing trainer through a narrow in-process Phase A entry.
+
+    The direct ``t5_absa_train.py`` command never sets the private authorization
+    flag, so its graph-training hard stop remains active. The dedicated Phase A
+    runner calls this API only after validating its frozen recipe and identities.
+    """
+    global _PHASE_A_GRAPH_TRAINING_AUTHORIZED
+    previous_argv = sys.argv
+    previous_authorization = _PHASE_A_GRAPH_TRAINING_AUTHORIZED
+    sys.argv = ["t5_absa_train.py", *argv]
+    _PHASE_A_GRAPH_TRAINING_AUTHORIZED = True
+    try:
+        main()
+    finally:
+        sys.argv = previous_argv
+        _PHASE_A_GRAPH_TRAINING_AUTHORIZED = previous_authorization
 
 
 def main() -> None:

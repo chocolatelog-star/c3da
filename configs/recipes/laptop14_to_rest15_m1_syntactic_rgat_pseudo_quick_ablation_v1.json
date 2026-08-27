@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "task_id": "M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1",
+  "recipe_id": "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v1",
+  "source_dataset": "laptop14",
+  "target_dataset": "rest15",
+  "seed": 1000,
+  "research_status": "APPROVED_FOR_PHASE_A_IMPLEMENTATION",
+  "training_status": "PHASE_A_ONLY_NOT_RUN",
+  "models": {
+    "t5_base": "J:\\nlp\\models\\t5-base-py"
+  },
+  "external_inputs": {
+    "source_train": {"path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\train.txt"},
+    "source_dev": {"path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\dev.txt"},
+    "target_unlabeled": {"path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\rest15\\train.txt"},
+    "target_test_access": false
+  },
+  "training": {
+    "num_train_epochs": 25,
+    "checkpoint_selection": "last",
+    "extractor_train_batch_size": 1,
+    "extractor_eval_batch_size": 2,
+    "gradient_accumulation_steps": 16,
+    "learning_rate": 0.0003,
+    "fp16": true,
+    "gradient_checkpointing": true,
+    "lambda_domain_adv": 0.03,
+    "target_unlabeled_dann": {"source_batch_size": 1, "target_batch_size": 1},
+    "target_pseudo_batch_size": 1,
+    "max_source_length": 128,
+    "max_target_length": 96
+  },
+  "pseudo": {
+    "base_weight": 0.75,
+    "num_beams": 1,
+    "max_new_tokens": 128,
+    "high_precision_max_triplets": 1,
+    "high_precision_max_token_distance": 5,
+    "constrained_decoding": false
+  },
+  "variants": {
+    "control": {"graph_enabled": false},
+    "treatment": {
+      "graph_enabled": true,
+      "graph_layers": 1,
+      "graph_hidden_size": 256,
+      "graph_attention_heads": 4,
+      "graph_head_size": 64,
+      "graph_use_dependency": true,
+      "graph_use_reverse_dependency": true,
+      "graph_use_pos_neighbor": true,
+      "graph_use_self_loop": true,
+      "graph_external_word_embeddings": false,
+      "graph_sentiment_embedding": false
+    }
+  },
+  "data_boundary": {
+    "graph_cache_splits": ["source_train", "source_dev", "target_unlabeled"],
+    "target_test_access": false,
+    "generator": false,
+    "augmentation": false,
+    "nli": false,
+    "selector": false,
+    "final_aste": false,
+    "phase_b": false
+  }
+}
