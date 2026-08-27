@@ -1,6 +1,13 @@
 # 协作决策日志
 
-> 更新时间：2026-08-26 22:59（北京时间）
+> 更新时间：2026-08-27 10:53（北京时间）
+
+## 2026-08-27 10:53：完成全量词—子词对齐只读预检入口，等待实际 GPU 预检
+
+- 新增独立 `m1_alignment_preflight.py` 和 8 项 CPU 测试；按 source_train、source_dev、target_unlabeled 逐行扫描，行级失败写入可疑清单后继续，不请求 target_test。
+- 预检复用 Stanza English EWT、T5 fast tokenizer（T5 快速分词器）和 `overlap-contiguous-sharing-v2`；检测未对齐、字符覆盖、非连续/跨空格/跨句共享、越界、合法连续共享、异常多子词、子词多词和截断未覆盖。
+- 输出目录固定为 summary JSON、suspicious JSONL 和中文 Markdown（标记文档）三文件；进度按数据划分显示，恢复硬校验 Git commit、输入 SHA256、解析器/分词器身份、策略版本和 `max_source_length=128`。
+- 新增测试 8 项、M1 图相关回归 56 项、AST 解析和 `git diff --check` 通过；本轮不运行 GPU 预检、正式训练、伪标签或目标测试，不更新正式实验索引，待实际预检结果后统一记录。
 
 ## 2026-08-26 22:59：补齐审计配方参数硬校验与显式批次协议，等待最终验收
 
