@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import copy
+from types import SimpleNamespace
 from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
-from transformers import T5Config, T5ForConditionalGeneration, Seq2SeqTrainingArguments
+from transformers import TrainerCallback, T5Config, T5ForConditionalGeneration, Seq2SeqTrainingArguments
 
 from m1_syntactic_rgat_pseudo_quick_ablation import (
     PHASE_A_STOP_CODE,
@@ -24,9 +26,21 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     validate_stage_status_shape,
     validate_external_control_dann_audit,
     _validate_control_treatment_dann_reports,
+    _read_dann_batch_audit,
+    _model_hashes,
+    _training_argv,
+    validate_initialization_pair,
+    _validate_recipe,
     validate_input_split,
 )
-from t5_absa_train import PairedDomainBatchSampler, WeightedSeq2SeqTrainer
+from syntactic_graph_adapter import load_seq2seq_model
+from t5_absa_train import (
+    PairedDomainBatchSampler,
+    WeightedSeq2SeqTrainer,
+    build_initialization_audit,
+    find_latest_complete_dann_checkpoint,
+    initialize_domain_adversarial_head,
+)
 
 
 def _metrics():
@@ -57,6 +71,32 @@ def test_phase_a_four_gates_pass_and_request_phase_b_only():
     assert decision["status"] == "PASS"
     assert decision["next_action"] == PHASE_B_REQUEST_CODE
     assert decision["hard_stop"] is False
+
+
+def test_a4_zero_control_multi_denominator_is_undefined_and_blocked():
+    metrics = _metrics()
+    metrics["target_unlabeled_pseudo"]["control"]["qualified_multi_rows"] = 0
+    result = evaluate_phase_a_gates(metrics)
+    gate = result["gates"]["A4"]
+    assert gate["status"] == "FAIL"
+    assert gate["actual"]["multi_ratio"] is None
+    assert gate["matches"]["multi_ratio"] is False
+    assert decide_phase_a(result)["status"] == "BLOCKED"
+
+
+def test_a4_integer_boundary_keeps_nonzero_ratio_thresholds():
+    metrics = _metrics()
+    metrics["target_unlabeled_pseudo"]["control"] = {
+        "qualified_total_rows": 20,
+        "qualified_multi_rows": 20,
+    }
+    metrics["target_unlabeled_pseudo"]["treatment"] = {
+        "qualified_total_rows": 18,
+        "qualified_multi_rows": 21,
+    }
+    assert evaluate_phase_a_gates(metrics)["gates"]["A4"]["status"] == "FAIL"
+    metrics["target_unlabeled_pseudo"]["treatment"]["qualified_total_rows"] = 20
+    assert evaluate_phase_a_gates(metrics)["gates"]["A4"]["status"] == "PASS"
 
 
 def test_each_phase_a_gate_failure_hard_stops_upstream():
@@ -296,6 +336,198 @@ def test_trainer_dataloader_preserves_the_complete_paired_domain_batch():
     assert batch["domain_weight"].tolist() == [1.0, 0.0]
 
 
+def test_paired_dann_generation_loss_matches_source_only_loss():
+    config = T5Config(
+        vocab_size=16,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=2,
+        dropout_rate=0.0,
+        pad_token_id=0,
+        eos_token_id=1,
+        decoder_start_token_id=0,
+    )
+    source_model = T5ForConditionalGeneration(config).eval()
+    paired_model = T5ForConditionalGeneration(config).eval()
+    paired_model.load_state_dict(source_model.state_dict())
+    source_args = Seq2SeqTrainingArguments(
+        output_dir=tempfile.mkdtemp(),
+        per_device_train_batch_size=1,
+        no_cuda=True,
+        report_to=[],
+    )
+    paired_args = Seq2SeqTrainingArguments(
+        output_dir=tempfile.mkdtemp(),
+        per_device_train_batch_size=1,
+        no_cuda=True,
+        report_to=[],
+    )
+    source_trainer = WeightedSeq2SeqTrainer(model=source_model, args=source_args)
+    paired_trainer = WeightedSeq2SeqTrainer(
+        model=paired_model,
+        args=paired_args,
+        dann_batch_sampler=PairedDomainBatchSampler(
+            1,
+            1,
+            source_batch_size=1,
+            target_batch_size=1,
+            seed=1000,
+        ),
+    )
+    source_batch = {
+        "input_ids": torch.tensor([[2, 3, 4, 5]]),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        "labels": torch.tensor([[1, 2, 3]]),
+        "sample_weight": torch.tensor([1.0]),
+        "domain_weight": torch.tensor([1.0]),
+    }
+    paired_batch = {
+        "input_ids": torch.tensor([[2, 3, 4, 5], [6, 7, 8, 9]]),
+        "attention_mask": torch.ones(2, 4, dtype=torch.long),
+        "labels": torch.tensor([[1, 2, 3], [-100, -100, -100]]),
+        "sample_weight": torch.tensor([1.0, 0.0]),
+        "domain_weight": torch.tensor([1.0, 0.0]),
+    }
+    source_loss = source_trainer.compute_loss(source_model, source_batch)
+    paired_loss = paired_trainer.compute_loss(paired_model, paired_batch)
+    assert torch.allclose(source_loss, paired_loss, atol=1e-7, rtol=1e-7)
+    assert not torch.allclose(paired_loss, source_loss * 0.5, atol=1e-7, rtol=1e-7)
+
+
+def test_real_tiny_t5_control_treatment_initialization_audit_isolated(tmp_path):
+    base_dir = tmp_path / "base-t5"
+    config = T5Config(
+        vocab_size=16,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=2,
+        dropout_rate=0.0,
+        pad_token_id=0,
+        eos_token_id=1,
+        decoder_start_token_id=0,
+    )
+    T5ForConditionalGeneration(config).save_pretrained(base_dir)
+    torch.manual_seed(1000)
+    control = load_seq2seq_model(str(base_dir), use_syntactic_graph_adapter=False)
+    treatment = load_seq2seq_model(str(base_dir), use_syntactic_graph_adapter=True, relation_vocab_size=8)
+    initialize_domain_adversarial_head(control, hidden_size=8, classifier_hidden_size=8, seed=1001)
+    initialize_domain_adversarial_head(treatment, hidden_size=8, classifier_hidden_size=8, seed=1001)
+    control_audit = build_initialization_audit(control, variant="control", seed=1000)
+    treatment_audit = build_initialization_audit(treatment, variant="treatment", seed=1000)
+    assert control_audit["shared_t5_parameter_sha256"] == treatment_audit["shared_t5_parameter_sha256"]
+    assert control_audit["dann_head_parameter_sha256"] == treatment_audit["dann_head_parameter_sha256"]
+    assert control_audit["parameter_groups"]["syntactic_graph_adapter"]["parameter_names"] == []
+    assert treatment_audit["parameter_groups"]["syntactic_graph_adapter"]["parameter_names"]
+    assert all(item["finite"] for item in treatment_audit["graph_parameter_stats"])
+    assert treatment_audit["graph_parameter_initialization"]["initialized_from_base_checkpoint"] is True
+    control_audit_path = base_dir.parent / "control-init.json"
+    treatment_audit_path = base_dir.parent / "treatment-init.json"
+    control_audit_path.write_text(json.dumps(control_audit), encoding="utf-8")
+    treatment_audit_path.write_text(json.dumps(treatment_audit), encoding="utf-8")
+    assert validate_initialization_pair(control_audit_path, treatment_audit_path)["status"] == "matched"
+
+
+def test_domain_head_initialization_restores_training_rng_state():
+    model = T5ForConditionalGeneration(T5Config(vocab_size=8, d_model=8, d_kv=4, d_ff=16, num_layers=1, num_decoder_layers=1, num_heads=2, pad_token_id=0, eos_token_id=1, decoder_start_token_id=0))
+    torch.manual_seed(1234)
+    before = torch.get_rng_state()
+    initialize_domain_adversarial_head(model, hidden_size=8, classifier_hidden_size=8, seed=1001)
+    after = torch.get_rng_state()
+    assert torch.equal(before, after)
+
+
+def test_phase_a_recipe_rejects_all_frozen_boundary_and_parameter_mutations():
+    recipe_path = Path(__file__).parent / "configs" / "recipes" / "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v1.json"
+    base = json.loads(recipe_path.read_text(encoding="utf-8"))
+    mutations = (
+        lambda value: value["external_inputs"].__setitem__("target_test_access", True),
+        lambda value: value["data_boundary"].__setitem__("generator", True),
+        lambda value: value["variants"]["control"].__setitem__("graph_enabled", True),
+        lambda value: value["external_inputs"]["source_train"].__setitem__("path", "changed.txt"),
+        lambda value: value["pseudo"].__setitem__("constrained_decoding", True),
+        lambda value: value["variants"]["treatment"].__setitem__("graph_layers", 2),
+        lambda value: value["models"].__setitem__("t5_base", "changed-model"),
+        lambda value: value["training"].__setitem__("lambda_domain_adv", 0.04),
+        lambda value: value["training"].__setitem__("extractor_train_batch_size", 2),
+        lambda value: value["training"].__setitem__("max_source_length", 127),
+        lambda value: value["training"].__setitem__("pairing_temperature", 0.2),
+        lambda value: value["training"].__setitem__("multi_triplet_loss_gain", 0.1),
+        lambda value: value["pseudo"].__setitem__("length_penalty", 1.2),
+        lambda value: value["models"].__setitem__("generator", "changed-model"),
+        lambda value: value["external_inputs"]["source_train"].__setitem__("sha256", "changed"),
+    )
+    for mutate in mutations:
+        changed = copy.deepcopy(base)
+        mutate(changed)
+        try:
+            _validate_recipe(changed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("frozen recipe mutation must hard-fail")
+
+
+def test_phase_a_recipe_is_accepted_and_training_argv_has_explicit_lengths():
+    recipe_path = Path(__file__).parent / "configs" / "recipes" / "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v1.json"
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    _validate_recipe(recipe)
+    args = SimpleNamespace(
+        recipe_data=recipe,
+        model_path=recipe["models"]["t5_base"],
+        graph_cache_dir="graph-cache",
+        parser_dir="parser",
+        cuda="0",
+    )
+    argv = _training_argv(args, Path("variant"), True)
+    assert "--max_source_length" in argv and argv[argv.index("--max_source_length") + 1] == "128"
+    assert "--max_target_length" in argv and argv[argv.index("--max_target_length") + 1] == "96"
+    assert argv[argv.index("--lambda_domain_adv") + 1] == "0.03"
+
+
+def test_t5_model_identity_includes_all_loaded_files():
+    hashes = _model_hashes(Path(r"J:\nlp\models\t5-base-py"))
+    assert {"config.json", "pytorch_model.bin", "generation_config.json", "spiece.model", "tokenizer.json"}.issubset(hashes)
+
+
+def test_dann_audit_validates_real_counts_ids_coverage_and_epochs():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        control_dir = root / "control"
+        treatment_dir = root / "treatment"
+        control_dir.mkdir()
+        treatment_dir.mkdir()
+        rows = {
+            "source_train": [{"id": "s1"}, {"id": "s2"}],
+            "target_unlabeled": [{"id": "t1"}, {"id": "t2"}],
+        }
+        for variant_dir in (control_dir, treatment_dir):
+            for name, values in rows.items():
+                (variant_dir / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in values), encoding="utf-8")
+        sampler = PairedDomainBatchSampler(2, 2, source_batch_size=1, target_batch_size=1, seed=1000, source_row_ids=["s1", "s2"], target_row_ids=["t1", "t2"])
+        list(sampler)
+        sampler.set_epoch(1)
+        list(sampler)
+        report_text = json.dumps(sampler.audit_report())
+        (control_dir / "dann_batch_audit.json").write_text(report_text, encoding="utf-8")
+        (treatment_dir / "dann_batch_audit.json").write_text(report_text, encoding="utf-8")
+        result = _validate_control_treatment_dann_reports(
+            {"control": control_dir, "treatment": treatment_dir},
+            {"dann_batch_audit_path": str(control_dir / "dann_batch_audit.json"), "dann_batch_audit_sha256": hashlib.sha256(report_text.encode()).hexdigest()},
+            expected_epochs=2,
+            expected_source_count=2,
+            expected_target_count=2,
+            expected_source_row_ids=["s1", "s2"],
+            expected_target_row_ids=["t1", "t2"],
+        )
+        assert result["status"] == "matched"
+
+
 def test_stage_identity_records_and_validates_artifact_hashes():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -376,6 +608,8 @@ def test_training_stage_identity_covers_dann_audit_and_rejects_change():
         (model_dir / "config.json").write_text("{}", encoding="utf-8")
         audit = root / "dann_batch_audit.json"
         audit.write_text(json.dumps({"seed": 1000, "epochs": [{"epoch": 0}]}), encoding="utf-8")
+        initialization = root / "phase_a_initialization_audit.json"
+        initialization.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
         input_file = root / "source_train.jsonl"
         input_file.write_text("source", encoding="utf-8")
         recipe_file = root / "recipe.json"
@@ -389,9 +623,9 @@ def test_training_stage_identity_covers_dann_audit_and_rejects_change():
             model_dir,
             "commit-a",
             recipe_path=recipe_file,
-            output_artifacts={"extractor_best": model_dir, "dann_batch_audit": audit},
+            output_artifacts={"extractor_best": model_dir, "dann_batch_audit": audit, "phase_a_initialization_audit": initialization},
         )
-        assert set(record["output_artifacts"]) == {"extractor_best", "dann_batch_audit"}
+        assert set(record["output_artifacts"]) == {"extractor_best", "dann_batch_audit", "phase_a_initialization_audit"}
         audit.write_text(json.dumps({"seed": 1000, "epochs": [{"epoch": 1}]}), encoding="utf-8")
         try:
             validate_stage_identity(record)
@@ -430,13 +664,23 @@ def test_control_and_treatment_dann_row_ids_or_order_must_match():
         control_dir.mkdir()
         treatment_dir.mkdir()
         control_report = {
+            "schema_version": 1,
             "seed": 1000,
+            "source_count": 1,
+            "target_count": 1,
+            "source_row_ids": ["s1"],
+            "target_row_ids": ["t1"],
             "epochs": [{
                 "epoch": 0,
                 "source_batch_size": 1,
                 "target_batch_size": 1,
+                "source_rows": 1,
+                "target_rows": 1,
+                "source_unique_rows": 1,
+                "target_unique_rows": 1,
+                "logical_batches": 1,
                 "incomplete_batches": 0,
-                "batches": [{"source_count": 1, "target_count": 1, "source_row_ids": ["s1"], "target_row_ids": ["t1"]}],
+                "batches": [{"logical_batch_id": 0, "source_indices": [0], "target_indices": [1], "source_count": 1, "target_count": 1, "source_row_ids": ["s1"], "target_row_ids": ["t1"]}],
             }],
         }
         treatment_report = json.loads(json.dumps(control_report))
@@ -447,11 +691,203 @@ def test_control_and_treatment_dann_row_ids_or_order_must_match():
             _validate_control_treatment_dann_reports(
                 {"control": control_dir, "treatment": treatment_dir},
                 {"dann_batch_audit_path": str(control_dir / "dann_batch_audit.json")},
+                expected_source_count=1,
+                expected_target_count=1,
+                expected_source_row_ids=["s1"],
+                expected_target_row_ids=["t1"],
             )
         except RuntimeError as exc:
             assert "batch" in str(exc).lower()
         else:
             raise AssertionError("different DANN row IDs must hard-fail")
+
+
+def test_two_identical_but_wrong_dann_reports_fail_against_real_input_identity():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        control_dir = root / "control"
+        treatment_dir = root / "treatment"
+        control_dir.mkdir()
+        treatment_dir.mkdir()
+        report = {
+            "schema_version": 1,
+            "seed": 1000,
+            "source_batch_size": 1,
+            "target_batch_size": 1,
+            "source_count": 1,
+            "target_count": 1,
+            "source_row_ids": ["wrong-source"],
+            "target_row_ids": ["wrong-target"],
+            "epochs": [{
+                "epoch": 0,
+                "source_batch_size": 1,
+                "target_batch_size": 1,
+                "source_rows": 1,
+                "target_rows": 1,
+                "source_unique_rows": 1,
+                "target_unique_rows": 1,
+                "logical_batches": 1,
+                "incomplete_batches": 0,
+                "batches": [{
+                    "logical_batch_id": 0,
+                    "source_indices": [0],
+                    "target_indices": [1],
+                    "source_row_ids": ["wrong-source"],
+                    "target_row_ids": ["wrong-target"],
+                    "source_count": 1,
+                    "target_count": 1,
+                }],
+            }],
+        }
+        for path in (control_dir / "dann_batch_audit.json", treatment_dir / "dann_batch_audit.json"):
+            path.write_text(json.dumps(report), encoding="utf-8")
+        with (control_dir / "dann_batch_audit.json").open("rb") as handle:
+            control_hash = hashlib.sha256(handle.read()).hexdigest()
+        try:
+            _validate_control_treatment_dann_reports(
+                {"control": control_dir, "treatment": treatment_dir},
+                {
+                    "dann_batch_audit_path": str(control_dir / "dann_batch_audit.json"),
+                    "dann_batch_audit_sha256": control_hash,
+                },
+                expected_epochs=1,
+                expected_source_count=2,
+                expected_target_count=2,
+                expected_source_row_ids=["source-1", "source-2"],
+                expected_target_row_ids=["target-1", "target-2"],
+            )
+        except RuntimeError as exc:
+            assert "identity" in str(exc).lower() or "row" in str(exc).lower()
+        else:
+            raise AssertionError("identical but incorrect DANN reports must fail")
+
+
+class _TinyPairedDataset(Dataset):
+    def __init__(self):
+        self.items = [
+            {"input_ids": [2, 3, 4, 5], "labels": [1, 2, 3], "sample_weight": 1.0, "domain_weight": 1.0},
+            {"input_ids": [3, 4, 5, 6], "labels": [1, 2, 3], "sample_weight": 1.0, "domain_weight": 1.0},
+            {"input_ids": [7, 8, 9, 10], "labels": [-100, -100, -100], "sample_weight": 0.0, "domain_weight": 0.0},
+            {"input_ids": [8, 9, 10, 11], "labels": [-100, -100, -100], "sample_weight": 0.0, "domain_weight": 0.0},
+        ]
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+
+def _tiny_pair_collator(features):
+    return {
+        "input_ids": torch.tensor([item["input_ids"] for item in features], dtype=torch.long),
+        "attention_mask": torch.ones(len(features), 4, dtype=torch.long),
+        "labels": torch.tensor([item["labels"] for item in features], dtype=torch.long),
+        "sample_weight": torch.tensor([item["sample_weight"] for item in features]),
+        "domain_weight": torch.tensor([item["domain_weight"] for item in features]),
+    }
+
+
+def _run_tiny_paired_trainer(output_dir, epochs, checkpoint=None, stop_after_epoch=None):
+    config = T5Config(
+        vocab_size=16,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=2,
+        dropout_rate=0.0,
+        pad_token_id=0,
+        eos_token_id=1,
+        decoder_start_token_id=0,
+    )
+    if checkpoint is None:
+        torch.manual_seed(1000)
+        model = T5ForConditionalGeneration(config)
+    else:
+        model = T5ForConditionalGeneration.from_pretrained(checkpoint)
+    sampler = PairedDomainBatchSampler(
+        2,
+        2,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["s1", "s2"],
+        target_row_ids=["t1", "t2"],
+    )
+    args = Seq2SeqTrainingArguments(
+        output_dir=str(output_dir),
+        overwrite_output_dir=True,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=1,
+        no_cuda=True,
+        gradient_accumulation_steps=1,
+        learning_rate=1e-3,
+        evaluation_strategy="no",
+        save_strategy="epoch",
+        save_total_limit=5,
+        logging_strategy="no",
+        report_to=[],
+        remove_unused_columns=False,
+        disable_tqdm=True,
+        save_safetensors=False,
+        seed=1000,
+        data_seed=1000,
+    )
+    callbacks = []
+    if stop_after_epoch is not None:
+        class StopAfterEpoch(TrainerCallback):
+            def on_epoch_end(self, args, state, control, **kwargs):
+                if state.epoch >= stop_after_epoch:
+                    control.should_training_stop = True
+                return control
+        callbacks.append(StopAfterEpoch())
+    trainer = WeightedSeq2SeqTrainer(
+        model=model,
+        args=args,
+        train_dataset=_TinyPairedDataset(),
+        data_collator=_tiny_pair_collator,
+        dann_batch_sampler=sampler,
+        callbacks=callbacks,
+    )
+    if checkpoint is not None:
+        trainer.load_dann_batch_sampler_state(checkpoint)
+    trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint is not None else None)
+    return trainer
+
+
+def test_real_trainer_three_epoch_resume_matches_continuous_run(tmp_path):
+    continuous = _run_tiny_paired_trainer(tmp_path / "continuous", 3)
+    interrupted = _run_tiny_paired_trainer(tmp_path / "interrupted", 3, stop_after_epoch=1)
+    checkpoint = find_latest_complete_dann_checkpoint(tmp_path / "interrupted", interrupted.dann_batch_sampler)
+    resumed = _run_tiny_paired_trainer(tmp_path / "interrupted", 3, checkpoint=checkpoint)
+    assert resumed.get_dann_batch_audit() == continuous.get_dann_batch_audit()
+    continuous_state = continuous.model.state_dict()
+    resumed_state = resumed.model.state_dict()
+    assert continuous_state.keys() == resumed_state.keys()
+    assert all(torch.equal(continuous_state[name], resumed_state[name]) for name in continuous_state)
+
+
+def test_corrupt_latest_dann_checkpoint_falls_back_to_previous_complete_checkpoint(tmp_path):
+    trainer = _run_tiny_paired_trainer(tmp_path / "run", 2)
+    latest = find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
+    assert latest.name == "checkpoint-4"
+    (latest / "dann_checkpoint_state.json").write_text("{}", encoding="utf-8")
+    fallback = find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
+    assert fallback.name == "checkpoint-2"
+
+
+def test_missing_custom_checkpoint_audit_cannot_be_resumed(tmp_path):
+    trainer = _run_tiny_paired_trainer(tmp_path / "run", 1)
+    checkpoint = find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
+    (checkpoint / "dann_batch_audit.json").write_text("{}", encoding="utf-8")
+    try:
+        find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
+    except RuntimeError as exc:
+        assert "no complete" in str(exc).lower()
+    else:
+        raise AssertionError("checkpoint without a valid custom audit must not resume")
 
 
 def test_external_control_stage_identity_uses_resolved_model_path():

@@ -83,6 +83,61 @@ FROZEN_RECIPE = {
     "high_precision_max_token_distance": 5,
     "max_source_length": 128,
     "max_target_length": 96,
+    "constrained_decoding": False,
+    "source_weight": 1.0,
+    "pseudo_weight": 0.75,
+    "augment_weight": 0.2,
+    "lambda_structure_loss": 0.0,
+    "lambda_consistency_loss": 0.0,
+    "lambda_pairing_loss": 0.0,
+    "domain_adv_grl_lambda": 1.0,
+    "domain_adv_hidden_size": 256,
+    "domain_adv_exclude_augment": True,
+    "paired_domain_batches": True,
+    "force_domain_weights": False,
+    "pairing_temperature": 0.1,
+    "pairing_source_only": False,
+    "multi_triplet_loss_gain": 0.0,
+    "neutral_loss_gain": 0.0,
+    "max_effective_weight": 1.0,
+    "neutral_generation_loss_gain": 0.0,
+    "neutral_generation_max_effective_weight": 0.0,
+    "max_pairing_triplets": 4,
+    "min_pairing_triplets": 2,
+    "min_pairing_sample_weight": 0.65,
+}
+FROZEN_PSEUDO_RECIPE = {
+    "length_penalty": 1.0,
+    "max_target_unlabeled": 0,
+    "pseudo_model_variant": "best",
+    "pseudo_source_tag": "",
+    "fixed_changed_min_score": 0.65,
+    "fixed_changed_weight": 0.35,
+    "use_task_prefix": False,
+}
+
+FROZEN_PHASE_A_DATA_BOUNDARY = {
+    "graph_cache_splits": ["source_train", "source_dev", "target_unlabeled"],
+    "target_test_access": False,
+    "generator": False,
+    "augmentation": False,
+    "nli": False,
+    "selector": False,
+    "final_aste": False,
+    "phase_b": False,
+}
+FROZEN_PHASE_A_TREATMENT_GRAPH = {
+    "graph_enabled": True,
+    "graph_layers": 1,
+    "graph_hidden_size": 256,
+    "graph_attention_heads": 4,
+    "graph_head_size": 64,
+    "graph_use_dependency": True,
+    "graph_use_reverse_dependency": True,
+    "graph_use_pos_neighbor": True,
+    "graph_use_self_loop": True,
+    "graph_external_word_embeddings": False,
+    "graph_sentiment_embedding": False,
 }
 
 
@@ -379,18 +434,20 @@ def evaluate_phase_a_gates(metrics: dict) -> dict:
             "note": "aspect_absence and opinion_absence may overlap; no independent causal claim",
         },
         "A4": {
-            "status": "PASS" if t_pseudo["qualified_multi_rows"] >= c_pseudo["qualified_multi_rows"] * 1.05 and t_pseudo["qualified_total_rows"] >= c_pseudo["qualified_total_rows"] * 0.95 else "FAIL",
+            "status": "PASS" if c_pseudo["qualified_multi_rows"] > 0 and c_pseudo["qualified_total_rows"] > 0 and t_pseudo["qualified_multi_rows"] >= c_pseudo["qualified_multi_rows"] * 1.05 and t_pseudo["qualified_total_rows"] >= c_pseudo["qualified_total_rows"] * 0.95 else "FAIL",
             "metric": "target_unlabeled_qualified_pseudo_supply",
             "actual": {
                 "control": c_pseudo,
                 "treatment": t_pseudo,
                 "multi_ratio": (t_pseudo["qualified_multi_rows"] / c_pseudo["qualified_multi_rows"]) if c_pseudo["qualified_multi_rows"] else None,
                 "total_ratio": (t_pseudo["qualified_total_rows"] / c_pseudo["qualified_total_rows"]) if c_pseudo["qualified_total_rows"] else None,
+                "multi_ratio_status": "defined" if c_pseudo["qualified_multi_rows"] else "undefined",
+                "total_ratio_status": "defined" if c_pseudo["qualified_total_rows"] else "undefined",
             },
             "threshold": {"multi_ratio": 1.05, "total_ratio": 0.95},
             "matches": {
-                "multi_ratio": t_pseudo["qualified_multi_rows"] >= c_pseudo["qualified_multi_rows"] * 1.05,
-                "total_ratio": t_pseudo["qualified_total_rows"] >= c_pseudo["qualified_total_rows"] * 0.95,
+                "multi_ratio": c_pseudo["qualified_multi_rows"] > 0 and t_pseudo["qualified_multi_rows"] >= c_pseudo["qualified_multi_rows"] * 1.05,
+                "total_ratio": c_pseudo["qualified_total_rows"] > 0 and t_pseudo["qualified_total_rows"] >= c_pseudo["qualified_total_rows"] * 0.95,
             },
             "target_test_access": False,
         },
@@ -450,10 +507,15 @@ def validate_stage_status_shape(state: dict, stages: tuple[str, ...]) -> None:
 
 
 def _validate_recipe(recipe: dict) -> None:
-    if recipe.get("task_id") != TASK_ID:
+    if not isinstance(recipe, dict) or recipe.get("task_id") != TASK_ID:
         raise ValueError(f"recipe task_id must be {TASK_ID}")
     training = recipe.get("training", {})
     pseudo = recipe.get("pseudo", {})
+    if not isinstance(training, dict) or not isinstance(pseudo, dict):
+        raise ValueError("Phase A recipe training and pseudo sections must be mappings")
+    dann = training.get("target_unlabeled_dann", {})
+    if not isinstance(dann, dict):
+        raise ValueError("Phase A recipe target_unlabeled_dann must be a mapping")
     actual = {
         "source_dataset": recipe.get("source_dataset"),
         "target_dataset": recipe.get("target_dataset"),
@@ -462,8 +524,8 @@ def _validate_recipe(recipe: dict) -> None:
         "checkpoint_selection": training.get("checkpoint_selection"),
         "extractor_train_batch_size": training.get("extractor_train_batch_size"),
         "extractor_eval_batch_size": training.get("extractor_eval_batch_size"),
-        "dann_source_batch_size": training.get("target_unlabeled_dann", {}).get("source_batch_size"),
-        "dann_target_batch_size": training.get("target_unlabeled_dann", {}).get("target_batch_size"),
+        "dann_source_batch_size": dann.get("source_batch_size"),
+        "dann_target_batch_size": dann.get("target_batch_size"),
         "target_pseudo_batch_size": training.get("target_pseudo_batch_size"),
         "gradient_accumulation_steps": training.get("gradient_accumulation_steps"),
         "learning_rate": training.get("learning_rate"),
@@ -477,8 +539,77 @@ def _validate_recipe(recipe: dict) -> None:
         "high_precision_max_token_distance": pseudo.get("high_precision_max_token_distance"),
         "max_source_length": training.get("max_source_length"),
         "max_target_length": training.get("max_target_length"),
+        "constrained_decoding": pseudo.get("constrained_decoding"),
+        "source_weight": training.get("source_weight"),
+        "pseudo_weight": training.get("pseudo_weight"),
+        "augment_weight": training.get("augment_weight"),
+        "lambda_structure_loss": training.get("lambda_structure_loss"),
+        "lambda_consistency_loss": training.get("lambda_consistency_loss"),
+        "lambda_pairing_loss": training.get("lambda_pairing_loss"),
+        "domain_adv_grl_lambda": training.get("domain_adv_grl_lambda"),
+        "domain_adv_hidden_size": training.get("domain_adv_hidden_size"),
+        "domain_adv_exclude_augment": training.get("domain_adv_exclude_augment"),
+        "paired_domain_batches": training.get("paired_domain_batches"),
+        "force_domain_weights": training.get("force_domain_weights"),
+        "pairing_temperature": training.get("pairing_temperature"),
+        "pairing_source_only": training.get("pairing_source_only"),
+        "multi_triplet_loss_gain": training.get("multi_triplet_loss_gain"),
+        "neutral_loss_gain": training.get("neutral_loss_gain"),
+        "max_effective_weight": training.get("max_effective_weight"),
+        "neutral_generation_loss_gain": training.get("neutral_generation_loss_gain"),
+        "neutral_generation_max_effective_weight": training.get("neutral_generation_max_effective_weight"),
+        "max_pairing_triplets": training.get("max_pairing_triplets"),
+        "min_pairing_triplets": training.get("min_pairing_triplets"),
+        "min_pairing_sample_weight": training.get("min_pairing_sample_weight"),
+    }
+    actual_pseudo = {
+        "length_penalty": pseudo.get("length_penalty"),
+        "max_target_unlabeled": pseudo.get("max_target_unlabeled"),
+        "pseudo_model_variant": pseudo.get("pseudo_model_variant"),
+        "pseudo_source_tag": pseudo.get("pseudo_source_tag"),
+        "fixed_changed_min_score": pseudo.get("fixed_changed_min_score"),
+        "fixed_changed_weight": pseudo.get("fixed_changed_weight"),
+        "use_task_prefix": pseudo.get("use_task_prefix"),
     }
     mismatches = {key: {"actual": actual[key], "expected": expected} for key, expected in FROZEN_RECIPE.items() if actual[key] != expected}
+    mismatches.update({f"pseudo.{key}": {"actual": actual_pseudo[key], "expected": expected} for key, expected in FROZEN_PSEUDO_RECIPE.items() if actual_pseudo[key] != expected})
+    expected_model_path = Path(r"J:\nlp\models\t5-base-py").resolve()
+    models = recipe.get("models")
+    actual_model_path = models.get("t5_base") if isinstance(models, dict) else None
+    if actual_model_path is None or Path(actual_model_path).resolve() != expected_model_path:
+        mismatches["models.t5_base"] = {"actual": actual_model_path, "expected": str(expected_model_path)}
+    if not isinstance(models, dict) or set(models) != {"t5_base"}:
+        mismatches["models.keys"] = {"actual": sorted(models) if isinstance(models, dict) else models, "expected": ["t5_base"]}
+
+    expected_inputs = {
+        "source_train": (DATASETS["laptop14"] / "train.txt").resolve(),
+        "source_dev": (DATASETS["laptop14"] / "dev.txt").resolve(),
+        "target_unlabeled": (DATASETS["rest15"] / "train.txt").resolve(),
+    }
+    external_inputs = recipe.get("external_inputs")
+    if not isinstance(external_inputs, dict):
+        mismatches["external_inputs"] = {"actual": external_inputs, "expected": "three declared inputs plus target_test_access=false"}
+    else:
+        for name, expected_path in expected_inputs.items():
+            entry = external_inputs.get(name)
+            actual_path = entry.get("path") if isinstance(entry, dict) else None
+            if actual_path is None or Path(actual_path).resolve() != expected_path:
+                mismatches[f"external_inputs.{name}.path"] = {"actual": actual_path, "expected": str(expected_path)}
+            if not isinstance(entry, dict) or set(entry) != {"path"}:
+                mismatches[f"external_inputs.{name}.keys"] = {"actual": sorted(entry) if isinstance(entry, dict) else entry, "expected": ["path"]}
+        if external_inputs.get("target_test_access") is not False:
+            mismatches["external_inputs.target_test_access"] = {"actual": external_inputs.get("target_test_access"), "expected": False}
+        unexpected_inputs = sorted(set(external_inputs) - set(expected_inputs) - {"target_test_access"})
+        if unexpected_inputs:
+            mismatches["external_inputs.unexpected"] = {"actual": unexpected_inputs, "expected": []}
+
+    if recipe.get("data_boundary") != FROZEN_PHASE_A_DATA_BOUNDARY:
+        mismatches["data_boundary"] = {"actual": recipe.get("data_boundary"), "expected": FROZEN_PHASE_A_DATA_BOUNDARY}
+    variants = recipe.get("variants")
+    if not isinstance(variants, dict) or variants.get("control") != {"graph_enabled": False}:
+        mismatches["variants.control"] = {"actual": variants.get("control") if isinstance(variants, dict) else variants, "expected": {"graph_enabled": False}}
+    if not isinstance(variants, dict) or variants.get("treatment") != FROZEN_PHASE_A_TREATMENT_GRAPH:
+        mismatches["variants.treatment"] = {"actual": variants.get("treatment") if isinstance(variants, dict) else variants, "expected": FROZEN_PHASE_A_TREATMENT_GRAPH}
     if mismatches:
         raise ValueError("frozen Phase A recipe mismatch: " + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
 
@@ -498,10 +629,25 @@ def _git_identity(project_root: Path) -> dict:
     }
 
 
-def _build_input_rows(source_dataset: str, target_dataset: str) -> dict[str, list[dict]]:
-    source_train_raw = read_bgca_aste_file(DATASETS[source_dataset] / "train.txt")
-    source_dev_raw = read_bgca_aste_file(DATASETS[source_dataset] / "dev.txt")
-    target_raw = read_bgca_aste_file(DATASETS[target_dataset] / "train.txt")
+def _build_input_rows(
+    source_dataset: str,
+    target_dataset: str,
+    external_inputs: dict | None = None,
+) -> dict[str, list[dict]]:
+    if external_inputs is None:
+        paths = {
+            "source_train": DATASETS[source_dataset] / "train.txt",
+            "source_dev": DATASETS[source_dataset] / "dev.txt",
+            "target_unlabeled": DATASETS[target_dataset] / "train.txt",
+        }
+    else:
+        paths = {
+            name: Path(external_inputs[name]["path"])
+            for name in ("source_train", "source_dev", "target_unlabeled")
+        }
+    source_train_raw = read_bgca_aste_file(paths["source_train"])
+    source_dev_raw = read_bgca_aste_file(paths["source_dev"])
+    target_raw = read_bgca_aste_file(paths["target_unlabeled"])
     return {
         "source_train": to_extract_rows(source_train_raw, use_task_prefix=False),
         "source_dev": to_extract_rows(source_dev_raw, use_task_prefix=False),
@@ -535,11 +681,93 @@ def _input_hashes(input_rows: dict[str, list[dict]], run_dir: Path) -> dict:
 
 
 def _model_hashes(model_path: Path) -> dict:
-    files = [model_path / name for name in ("config.json", "pytorch_model.bin", "spiece.model", "tokenizer.json")]
+    required_names = ("config.json", "pytorch_model.bin", "generation_config.json", "spiece.model", "tokenizer.json")
+    optional_names = ("tokenizer_config.json", "special_tokens_map.json")
+    files = [model_path / name for name in required_names]
+    files.extend(path for path in (model_path / name for name in optional_names) if path.exists())
     missing = [str(path) for path in files if not path.is_file()]
     if missing:
         raise FileNotFoundError("missing T5-base files: " + ", ".join(missing))
     return {str(path.name): sha256_file(path) for path in files}
+
+
+def _declared_input_hashes(recipe: dict) -> dict:
+    result = {}
+    for name in ("source_train", "source_dev", "target_unlabeled"):
+        path = Path(recipe["external_inputs"][name]["path"]).resolve()
+        result[name] = {"path": str(path), "sha256": sha256_file(path)}
+    return result
+
+
+def _read_initialization_audit(path: Path, expected_variant: str, expected_seed: int = 1000) -> dict:
+    if not Path(path).is_file():
+        raise RuntimeError(f"missing {expected_variant} initialization audit: {path}")
+    audit = _read_json(Path(path))
+    if not isinstance(audit, dict) or audit.get("schema_version") != 1:
+        raise RuntimeError(f"invalid {expected_variant} initialization audit: {path}")
+    if audit.get("variant") != expected_variant or audit.get("seed") != expected_seed:
+        raise RuntimeError(f"{expected_variant} initialization audit identity mismatch: {path}")
+    groups = audit.get("parameter_groups")
+    if not isinstance(groups, dict):
+        raise RuntimeError(f"{expected_variant} initialization audit has no parameter groups: {path}")
+    for group_name, top_level_name in (
+        ("shared_t5", "shared_t5_parameter_sha256"),
+        ("domain_adversarial_head", "dann_head_parameter_sha256"),
+        ("syntactic_graph_adapter", "graph_parameter_sha256"),
+    ):
+        group = groups.get(group_name)
+        if not isinstance(group, dict) or not isinstance(group.get("parameter_names"), list):
+            raise RuntimeError(f"{expected_variant} initialization audit missing group {group_name}: {path}")
+        if group.get("sha256") != audit.get(top_level_name):
+            raise RuntimeError(f"{expected_variant} initialization audit hash mismatch: {group_name}")
+        stats = group.get("parameter_stats")
+        if not isinstance(stats, list) or len(stats) != len(group["parameter_names"]):
+            raise RuntimeError(f"{expected_variant} initialization audit stats mismatch: {group_name}")
+        if any(item.get("finite") is not True for item in stats):
+            raise RuntimeError(f"{expected_variant} initialization audit contains non-finite parameters: {group_name}")
+        if group_name == "syntactic_graph_adapter" and any(
+            item.get("max_abs") is not None and float(item["max_abs"]) >= 1.0e6
+            for item in stats
+        ):
+            raise RuntimeError(f"{expected_variant} initialization audit contains implausibly large graph parameters: {path}")
+    return audit
+
+
+def validate_initialization_pair(
+    control_path: Path,
+    treatment_path: Path,
+    *,
+    expected_seed: int = 1000,
+) -> dict:
+    control = _read_initialization_audit(control_path, "control", expected_seed)
+    treatment = _read_initialization_audit(treatment_path, "treatment", expected_seed)
+    control_groups = control["parameter_groups"]
+    treatment_groups = treatment["parameter_groups"]
+    if control_groups["shared_t5"]["parameter_names"] != treatment_groups["shared_t5"]["parameter_names"]:
+        raise RuntimeError("Control/Treatment shared T5 parameter names differ")
+    if control_groups["shared_t5"]["sha256"] != treatment_groups["shared_t5"]["sha256"]:
+        raise RuntimeError("Control/Treatment shared T5 parameters differ before training")
+    if control_groups["domain_adversarial_head"]["parameter_names"] != treatment_groups["domain_adversarial_head"]["parameter_names"]:
+        raise RuntimeError("Control/Treatment DANN head parameter names differ")
+    if control_groups["domain_adversarial_head"]["sha256"] != treatment_groups["domain_adversarial_head"]["sha256"]:
+        raise RuntimeError("Control/Treatment DANN head parameters differ before training")
+    if control_groups["syntactic_graph_adapter"]["parameter_names"]:
+        raise RuntimeError("Control unexpectedly contains syntactic graph parameters")
+    if not treatment_groups["syntactic_graph_adapter"]["parameter_names"]:
+        raise RuntimeError("Treatment initialization audit has no syntactic graph parameters")
+    return {
+        "schema_version": 1,
+        "status": "matched",
+        "seed": expected_seed,
+        "control": control,
+        "treatment": treatment,
+        "matches": {
+            "shared_t5_parameters": True,
+            "dann_head_parameters": True,
+            "control_has_no_graph_parameters": True,
+            "treatment_has_graph_parameters": True,
+        },
+    }
 
 
 def _write_variant_inputs(variant_dir: Path, run_dir: Path, *, resume: bool = False) -> None:
@@ -559,6 +787,7 @@ def _training_argv(
     variant_dir: Path,
     graph_enabled: bool,
     dann_batch_audit_path: Path | None = None,
+    initialization_audit_path: Path | None = None,
 ) -> list[str]:
     recipe = args.recipe_data
     training = recipe["training"]
@@ -568,24 +797,32 @@ def _training_argv(
         "--dev_file", str(variant_dir / "source_dev.jsonl"),
         "--output_dir", str(variant_dir / "models" / "extractor"),
         "--num_train_epochs", str(training["num_train_epochs"]),
-        "--source_weight", "1.0",
-        "--pseudo_weight", str(FROZEN_RECIPE["pseudo_base_weight"]),
-        "--augment_weight", "0.2",
-        "--lambda_structure_loss", "0",
-        "--lambda_consistency_loss", "0",
-        "--lambda_pairing_loss", "0",
-        "--multi_triplet_loss_gain", "0",
-        "--neutral_loss_gain", "0",
+        "--source_weight", str(training["source_weight"]),
+        "--pseudo_weight", str(training["pseudo_weight"]),
+        "--augment_weight", str(training["augment_weight"]),
+        "--lambda_structure_loss", str(training["lambda_structure_loss"]),
+        "--lambda_consistency_loss", str(training["lambda_consistency_loss"]),
+        "--lambda_pairing_loss", str(training["lambda_pairing_loss"]),
+        "--multi_triplet_loss_gain", str(training["multi_triplet_loss_gain"]),
+        "--neutral_loss_gain", str(training["neutral_loss_gain"]),
         "--checkpoint_selection", training["checkpoint_selection"],
         "--resume_from_checkpoint", "auto",
         "--per_device_train_batch_size", str(training["extractor_train_batch_size"]),
         "--per_device_eval_batch_size", str(training["extractor_eval_batch_size"]),
+        "--max_source_length", str(training["max_source_length"]),
+        "--max_target_length", str(training["max_target_length"]),
         "--gradient_accumulation_steps", str(training["gradient_accumulation_steps"]),
         "--learning_rate", str(training["learning_rate"]),
         "--lambda_domain_adv", str(training["lambda_domain_adv"]),
-        "--domain_adv_grl_lambda", "1.0",
-        "--domain_adv_hidden_size", "256",
-        "--domain_adv_exclude_augment",
+        "--domain_adv_grl_lambda", str(training["domain_adv_grl_lambda"]),
+        "--domain_adv_hidden_size", str(training["domain_adv_hidden_size"]),
+        "--pairing_temperature", str(training["pairing_temperature"]),
+        "--max_effective_weight", str(training["max_effective_weight"]),
+        "--neutral_generation_loss_gain", str(training["neutral_generation_loss_gain"]),
+        "--neutral_generation_max_effective_weight", str(training["neutral_generation_max_effective_weight"]),
+        "--max_pairing_triplets", str(training["max_pairing_triplets"]),
+        "--min_pairing_triplets", str(training["min_pairing_triplets"]),
+        "--min_pairing_sample_weight", str(training["min_pairing_sample_weight"]),
         "--target_unlabeled_file", str(variant_dir / "target_unlabeled.jsonl"),
         "--paired_domain_batches",
         "--dann_source_batch_size", str(training["target_unlabeled_dann"]["source_batch_size"]),
@@ -601,8 +838,16 @@ def _training_argv(
             "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
             "--syntactic_graph_parser_dir", str(args.parser_dir),
         ])
+    if training["force_domain_weights"]:
+        argv.append("--force_domain_weights")
+    if training["pairing_source_only"]:
+        argv.append("--pairing_source_only")
+    if training["domain_adv_exclude_augment"]:
+        argv.append("--domain_adv_exclude_augment")
     if dann_batch_audit_path is not None:
         argv.extend(["--dann_batch_audit_path", str(dann_batch_audit_path)])
+    if initialization_audit_path is not None:
+        argv.extend(["--initialization_audit_path", str(initialization_audit_path)])
     return argv
 
 
@@ -615,6 +860,7 @@ def _run_training(args: argparse.Namespace, variant_dir: Path, graph_enabled: bo
             variant_dir,
             graph_enabled,
             variant_dir / "dann_batch_audit.json",
+            variant_dir / "phase_a_initialization_audit.json",
         )
     )
 
@@ -635,6 +881,7 @@ def _pipeline_argv(
             "--batch_size", str(args.recipe_data["training"]["extractor_eval_batch_size"]),
             "--num_beams", str(args.recipe_data["pseudo"]["num_beams"]),
             "--max_new_tokens", str(args.recipe_data["pseudo"]["max_new_tokens"]),
+            "--length_penalty", str(args.recipe_data["pseudo"]["length_penalty"]),
             "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
             "--output_tag", output_tag,
         ]
@@ -652,9 +899,15 @@ def _pipeline_argv(
             "--batch_size", str(args.recipe_data["training"]["target_pseudo_batch_size"]),
             "--num_beams", str(args.recipe_data["pseudo"]["num_beams"]),
             "--max_new_tokens", str(args.recipe_data["pseudo"]["max_new_tokens"]),
+            "--length_penalty", str(args.recipe_data["pseudo"]["length_penalty"]),
+            "--max_target_unlabeled", str(args.recipe_data["pseudo"]["max_target_unlabeled"]),
+            "--pseudo_model_variant", str(args.recipe_data["pseudo"]["pseudo_model_variant"]),
+            "--pseudo_source_tag", str(args.recipe_data["pseudo"]["pseudo_source_tag"]),
             "--pseudo_base_weight", str(args.recipe_data["pseudo"]["base_weight"]),
             "--high_precision_max_triplets", str(args.recipe_data["pseudo"]["high_precision_max_triplets"]),
             "--high_precision_max_token_distance", str(args.recipe_data["pseudo"]["high_precision_max_token_distance"]),
+            "--fixed_changed_min_score", str(args.recipe_data["pseudo"]["fixed_changed_min_score"]),
+            "--fixed_changed_weight", str(args.recipe_data["pseudo"]["fixed_changed_weight"]),
             "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
         ]
         if graph_enabled:
@@ -747,15 +1000,44 @@ def build_phase_a_pseudo_output_paths(variant_dir: Path) -> dict[str, Path]:
     return {name: Path(variant_dir) / name for name in names}
 
 
-def _read_dann_batch_audit(variant_dir: Path, expected_epochs: int | None = None) -> dict:
+def _read_dann_batch_audit(
+    variant_dir: Path,
+    expected_epochs: int | None = None,
+    *,
+    expected_seed: int = 1000,
+    expected_source_count: int | None = None,
+    expected_target_count: int | None = None,
+    expected_source_row_ids: list | None = None,
+    expected_target_row_ids: list | None = None,
+) -> dict:
     path = Path(variant_dir)
     if path.is_dir():
         path = path / "dann_batch_audit.json"
     if not path.is_file():
         raise RuntimeError(f"missing DANN batch audit report: {path}")
     report = _read_json(path)
-    if not isinstance(report, dict) or not isinstance(report.get("epochs"), list) or not report["epochs"]:
+    if not isinstance(report, dict) or report.get("schema_version") != 1 or not isinstance(report.get("epochs"), list) or not report["epochs"]:
         raise RuntimeError(f"invalid DANN batch audit report: {path}")
+    top_level = (
+        "seed", "source_batch_size", "target_batch_size", "source_count", "target_count",
+        "source_row_ids", "target_row_ids",
+    )
+    if any(field not in report for field in top_level):
+        raise RuntimeError(f"DANN batch audit is missing top-level identity fields: {path}")
+    if report["seed"] != expected_seed:
+        raise RuntimeError(f"DANN batch audit seed identity mismatch: {path}")
+    if report["source_batch_size"] != 1 or report["target_batch_size"] != 1:
+        raise RuntimeError(f"DANN batch audit requires source=1 and target=1: {path}")
+    if expected_source_count is not None and report["source_count"] != expected_source_count:
+        raise RuntimeError(f"DANN batch audit source count identity mismatch: {path}")
+    if expected_target_count is not None and report["target_count"] != expected_target_count:
+        raise RuntimeError(f"DANN batch audit target count identity mismatch: {path}")
+    if expected_source_row_ids is not None and report["source_row_ids"] != list(expected_source_row_ids):
+        raise RuntimeError(f"DANN batch audit source row identity mismatch: {path}")
+    if expected_target_row_ids is not None and report["target_row_ids"] != list(expected_target_row_ids):
+        raise RuntimeError(f"DANN batch audit target row identity mismatch: {path}")
+    if len(report["source_row_ids"]) != report["source_count"] or len(report["target_row_ids"]) != report["target_count"]:
+        raise RuntimeError(f"DANN batch audit row identity/count mismatch: {path}")
     if expected_epochs is not None and len(report["epochs"]) != expected_epochs:
         raise RuntimeError(f"DANN batch audit epoch count mismatch: {path}")
     seen_epochs = set()
@@ -767,6 +1049,12 @@ def _read_dann_batch_audit(variant_dir: Path, expected_epochs: int | None = None
         seen_epochs.add(epoch["epoch"])
         if not isinstance(epoch.get("batches"), list) or not epoch["batches"]:
             raise RuntimeError(f"DANN batch audit has an empty epoch: {path}")
+        if epoch.get("logical_batches") != len(epoch["batches"]):
+            raise RuntimeError(f"DANN batch audit logical batch count mismatch: {path}")
+        if epoch.get("source_rows") != len(epoch["batches"]) or epoch.get("target_rows") != len(epoch["batches"]):
+            raise RuntimeError(f"DANN batch audit domain row count mismatch: {path}")
+        if epoch.get("source_unique_rows") != report["source_count"] or epoch.get("target_unique_rows") != report["target_count"]:
+            raise RuntimeError(f"DANN batch audit coverage mismatch: {path}")
         if (
             epoch.get("source_batch_size") != 1
             or epoch.get("target_batch_size") != 1
@@ -777,7 +1065,30 @@ def _read_dann_batch_audit(variant_dir: Path, expected_epochs: int | None = None
             )
             ):
             raise RuntimeError(f"DANN batch audit contains an incomplete or non-1/1 epoch: {path}")
-    if expected_epochs is not None and sorted(seen_epochs) != list(range(expected_epochs)):
+        seen_source_indices = set()
+        seen_target_indices = set()
+        for expected_batch_id, batch in enumerate(epoch["batches"]):
+            if batch.get("logical_batch_id") != expected_batch_id:
+                raise RuntimeError(f"DANN batch audit logical batch IDs are not contiguous: {path}")
+            source_indices = batch.get("source_indices")
+            target_indices = batch.get("target_indices")
+            source_ids = batch.get("source_row_ids")
+            target_ids = batch.get("target_row_ids")
+            if not (isinstance(source_indices, list) and len(source_indices) == 1 and isinstance(source_indices[0], int) and isinstance(target_indices, list) and len(target_indices) == 1 and isinstance(target_indices[0], int)):
+                raise RuntimeError(f"DANN batch audit batch domain indices are not 1/1: {path}")
+            source_index = source_indices[0]
+            target_index = target_indices[0]
+            if not (0 <= source_index < report["source_count"] and isinstance(source_ids, list) and source_ids == [report["source_row_ids"][source_index]] and isinstance(target_ids, list)):
+                raise RuntimeError(f"DANN batch audit source index/ID mapping mismatch: {path}")
+            target_position = target_index - report["source_count"]
+            if not (0 <= target_position < report["target_count"] and target_ids == [report["target_row_ids"][target_position]]):
+                raise RuntimeError(f"DANN batch audit target index/ID mapping mismatch: {path}")
+            seen_source_indices.add(source_index)
+            seen_target_indices.add(target_position)
+        if seen_source_indices != set(range(report["source_count"])) or seen_target_indices != set(range(report["target_count"])):
+            raise RuntimeError(f"DANN batch audit row coverage is incomplete: {path}")
+    expected_epoch_numbers = list(range(expected_epochs)) if expected_epochs is not None else list(range(len(report["epochs"])))
+    if sorted(seen_epochs) != expected_epoch_numbers:
         raise RuntimeError(f"DANN batch audit epochs must be contiguous from zero: {path}")
     return report
 
@@ -790,17 +1101,55 @@ def validate_external_control_dann_audit(control_reuse_audit: dict, expected_epo
     actual_hash = sha256_file(path)
     if actual_hash != expected_hash:
         raise RuntimeError("external Control DANN batch audit hash changed; refusing reuse")
-    return _read_dann_batch_audit(path, expected_epochs=expected_epochs)
+    return _read_dann_batch_audit(
+        path,
+        expected_epochs=expected_epochs,
+        expected_seed=control_reuse_audit.get("expected_seed", 1000),
+        expected_source_count=control_reuse_audit.get("expected_source_count"),
+        expected_target_count=control_reuse_audit.get("expected_target_count"),
+        expected_source_row_ids=control_reuse_audit.get("expected_source_row_ids"),
+        expected_target_row_ids=control_reuse_audit.get("expected_target_row_ids"),
+    )
 
 
 def _validate_control_treatment_dann_reports(
     variant_dirs: dict[str, Path],
     control_reuse_audit: dict,
     expected_epochs: int | None = None,
+    *,
+    expected_seed: int = 1000,
+    expected_source_count: int | None = None,
+    expected_target_count: int | None = None,
+    expected_source_row_ids: list | None = None,
+    expected_target_row_ids: list | None = None,
 ) -> dict:
     treatment_path = variant_dirs["treatment"] / "dann_batch_audit.json"
+    if expected_source_row_ids is None:
+        expected_source_row_ids = [row.get("id") for row in read_jsonl(variant_dirs["treatment"] / "source_train.jsonl")]
+    if expected_target_row_ids is None:
+        expected_target_row_ids = [row.get("id") for row in read_jsonl(variant_dirs["treatment"] / "target_unlabeled.jsonl")]
+    if expected_source_count is None:
+        expected_source_count = len(expected_source_row_ids)
+    if expected_target_count is None:
+        expected_target_count = len(expected_target_row_ids)
+    control_reuse_audit = {
+        **control_reuse_audit,
+        "expected_seed": expected_seed,
+        "expected_source_count": expected_source_count,
+        "expected_target_count": expected_target_count,
+        "expected_source_row_ids": list(expected_source_row_ids),
+        "expected_target_row_ids": list(expected_target_row_ids),
+    }
     control_report = validate_external_control_dann_audit(control_reuse_audit, expected_epochs=expected_epochs)
-    treatment_report = _read_dann_batch_audit(treatment_path, expected_epochs=expected_epochs)
+    treatment_report = _read_dann_batch_audit(
+        treatment_path,
+        expected_epochs=expected_epochs,
+        expected_seed=expected_seed,
+        expected_source_count=expected_source_count,
+        expected_target_count=expected_target_count,
+        expected_source_row_ids=expected_source_row_ids,
+        expected_target_row_ids=expected_target_row_ids,
+    )
     comparable_fields = (
         "seed",
         "source_batch_size",
@@ -883,15 +1232,19 @@ def _stage_spec(
     *,
     execute_control_training: bool,
     control_dann_batch_audit_path: Path | None = None,
+    control_initialization_audit_path: Path | None = None,
 ) -> dict:
     control_dir = variant_dirs["control"]
     treatment_dir = variant_dirs["treatment"]
     if stage == "control_training":
         audit_path = control_dann_batch_audit_path or (control_dir / "dann_batch_audit.json")
+        initialization_path = control_initialization_audit_path or (control_dir / "phase_a_initialization_audit.json")
         if not execute_control_training and control_dann_batch_audit_path is None:
             raise RuntimeError("reused Control stage requires its resolved DANN batch audit path")
+        if not execute_control_training and control_initialization_audit_path is None:
+            raise RuntimeError("reused Control stage requires its resolved initialization audit path")
         if execute_control_training:
-            command = _training_argv(args, control_dir, False, audit_path)
+            command = _training_argv(args, control_dir, False, audit_path, initialization_path)
         else:
             command = [
                 "reuse_external_control",
@@ -901,17 +1254,26 @@ def _stage_spec(
             "command": command,
             "artifact_path": control_model_path,
             "model_path": control_model_path,
-            "output_artifacts": {"extractor_best": control_model_path, "dann_batch_audit": audit_path},
+            "output_artifacts": {
+                "extractor_best": control_model_path,
+                "dann_batch_audit": audit_path,
+                "phase_a_initialization_audit": initialization_path,
+            },
             "variant_dir": control_dir,
         }
     if stage == "treatment_training":
         model_path = treatment_dir / "models" / "extractor" / "best"
         audit_path = treatment_dir / "dann_batch_audit.json"
+        initialization_path = treatment_dir / "phase_a_initialization_audit.json"
         return {
-            "command": _training_argv(args, treatment_dir, True, audit_path),
+            "command": _training_argv(args, treatment_dir, True, audit_path, initialization_path),
             "artifact_path": model_path,
             "model_path": model_path,
-            "output_artifacts": {"extractor_best": model_path, "dann_batch_audit": audit_path},
+            "output_artifacts": {
+                "extractor_best": model_path,
+                "dann_batch_audit": audit_path,
+                "phase_a_initialization_audit": initialization_path,
+            },
             "variant_dir": treatment_dir,
         }
     if stage == "control_source_dev_evaluation":
@@ -993,28 +1355,31 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     )
     if parent_check.returncode != 0:
         raise RuntimeError(f"current code is not descended from approved parent identity {FIXED_PARENT_CODE_IDENTITY}")
-    input_rows = _build_input_rows(recipe["source_dataset"], recipe["target_dataset"])
+    declared_model_path = Path(recipe["models"]["t5_base"]).resolve()
+    if Path(args.model_path).resolve() != declared_model_path:
+        raise RuntimeError("--model_path differs from the frozen recipe models.t5_base")
+    input_rows = _build_input_rows(
+        recipe["source_dataset"],
+        recipe["target_dataset"],
+        recipe["external_inputs"],
+    )
     input_hashes = _input_hashes(input_rows, run_dir)
-    model_hashes = _model_hashes(Path(args.model_path))
+    declared_input_hashes = _declared_input_hashes(recipe)
+    input_identity_hashes = {"run_inputs": input_hashes, "declared_external_inputs": declared_input_hashes}
+    model_hashes = _model_hashes(declared_model_path)
     parser_identity = build_parser_identity(args.parser_dir)
     recipe_sha256 = sha256_file(Path(args.recipe))
-    actual_identity, identity_metadata = _build_identity(args, input_hashes, model_hashes, parser_identity, recipe_sha256, git_identity)
-    status_identity = {"task_id": TASK_ID, "code_commit": git_identity["commit"], "recipe_sha256": recipe_sha256, "input_hashes": input_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "scope": build_phase_a_scope()}
+    actual_identity, identity_metadata = _build_identity(args, input_identity_hashes, model_hashes, parser_identity, recipe_sha256, git_identity)
+    status_identity = {"task_id": TASK_ID, "code_commit": git_identity["commit"], "recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "scope": build_phase_a_scope()}
     state = load_or_initialize_stage_status(run_dir / "stage_status.json", status_identity, args.resume)
     if state is None:
         raise RuntimeError("resume identity mismatch; refusing to mix Phase A artifacts")
     state["status"] = "in_progress"
     _atomic_write_json(run_dir / "stage_status.json", state)
     _write_inputs(input_rows, run_dir)
-    _atomic_write_json(run_dir / "config_snapshot.json", {"task_id": TASK_ID, "recipe": recipe, "variant_configs": {"control": build_variant_config(False), "treatment": build_variant_config(True)}, "scope": build_phase_a_scope(), "identities": {"recipe_sha256": recipe_sha256, "input_hashes": input_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "git_commit": git_identity["commit"]}})
+    _atomic_write_json(run_dir / "config_snapshot.json", {"task_id": TASK_ID, "recipe": recipe, "variant_configs": {"control": build_variant_config(False), "treatment": build_variant_config(True)}, "scope": build_phase_a_scope(), "identities": {"recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "git_commit": git_identity["commit"]}})
     _atomic_write_json(run_dir / "git_identity.json", git_identity)
-    raw_input_hashes = {}
-    for name, entry in recipe.get("external_inputs", {}).items():
-        if name == "target_test_access" or not isinstance(entry, dict):
-            continue
-        raw_path = Path(entry["path"])
-        raw_input_hashes[name] = {"path": str(raw_path), "sha256": sha256_file(raw_path)}
-    _atomic_write_json(run_dir / "input_artifact_hashes.json", {"inputs": input_hashes, "raw_external_inputs": raw_input_hashes, "model": model_hashes, "parser": parser_identity, "recipe": {"path": str(args.recipe), "sha256": recipe_sha256}})
+    _atomic_write_json(run_dir / "input_artifact_hashes.json", {"inputs": input_hashes, "raw_external_inputs": declared_input_hashes, "model": model_hashes, "parser": parser_identity, "recipe": {"path": str(args.recipe), "sha256": recipe_sha256}})
     _atomic_write_json(run_dir / "parent_run_identity.json", {"parent_task_id": "M1_SYNTACTIC_RGAT_ZERO_UPDATE_ENTRY_AUDIT_V1", "required_entry_code_identity": FIXED_PARENT_CODE_IDENTITY, "current_code_commit": git_identity["commit"], "zero_update_entry_status": "15/15 PASS (provided by approved parent identity)"})
 
     variant_dirs = {name: run_dir / name for name in ("control", "treatment")}
@@ -1028,6 +1393,9 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     }
     control_model_path = variant_dirs["control"] / "models" / "extractor" / "best"
     control_dann_batch_audit_path: Path | None = None
+    control_initialization_audit_path: Path | None = None
+    expected_source_row_ids = [row.get("id") for row in input_rows["source_train"]]
+    expected_target_row_ids = [row.get("id") for row in input_rows["target_unlabeled"]]
     control_training_is_reuse = False
     existing_control_audit = run_dir / "control_identity_audit.json"
     if args.resume and "control_training" in state.get("completed_stages", []):
@@ -1043,7 +1411,22 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         saved_model_hash = saved_audit.get("model_tree_sha256")
         if not saved_model_hash or _hash_tree(control_model_path) != saved_model_hash:
             raise RuntimeError("saved Control model path or hash changed; refusing resume")
-        validate_external_control_dann_audit(saved_audit, expected_epochs=expected_dann_epochs)
+        saved_init_path = Path(saved_audit.get("phase_a_initialization_audit_path", ""))
+        saved_init_hash = saved_audit.get("phase_a_initialization_audit_sha256")
+        if not saved_init_path.is_file() or not saved_init_hash or sha256_file(saved_init_path) != saved_init_hash:
+            raise RuntimeError("saved Control initialization audit is missing or changed; refusing resume")
+        _read_initialization_audit(saved_init_path, "control", expected_seed=recipe["seed"])
+        validate_external_control_dann_audit(
+            {
+                **saved_audit,
+                "expected_seed": recipe["seed"],
+                "expected_source_count": len(expected_source_row_ids),
+                "expected_target_count": len(expected_target_row_ids),
+                "expected_source_row_ids": expected_source_row_ids,
+                "expected_target_row_ids": expected_target_row_ids,
+            },
+            expected_epochs=expected_dann_epochs,
+        )
         saved_actual = saved_audit.get("actual", saved_audit.get("identity", {}))
         expected_for_resume = dict(actual_identity)
         expected_for_resume["artifact_sha256"] = saved_model_hash
@@ -1051,6 +1434,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             raise RuntimeError("saved Control identity changed; refusing resume")
         control_reuse_audit = saved_audit
         control_dann_batch_audit_path = Path(saved_audit["dann_batch_audit_path"]).resolve()
+        control_initialization_audit_path = saved_init_path.resolve()
         control_training_is_reuse = saved_audit.get("source") not in {"fresh_phase_a_control", "resumed_phase_a_control"}
     if args.control_run_dir:
         control_source = Path(args.control_run_dir).resolve()
@@ -1073,7 +1457,20 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         prior_dann_hash = prior.get("dann_batch_audit_sha256")
         if not prior_dann_path.is_file() or not prior_dann_hash or sha256_file(prior_dann_path) != prior_dann_hash:
             raise RuntimeError("external Control DANN batch audit is missing or changed; refusing reuse")
-        _read_dann_batch_audit(prior_dann_path, expected_epochs=expected_dann_epochs)
+        prior_init_path = Path(prior.get("phase_a_initialization_audit_path", ""))
+        prior_init_hash = prior.get("phase_a_initialization_audit_sha256")
+        if not prior_init_path.is_file() or not prior_init_hash or sha256_file(prior_init_path) != prior_init_hash:
+            raise RuntimeError("external Control initialization audit is missing or changed; refusing reuse")
+        _read_initialization_audit(prior_init_path, "control", expected_seed=recipe["seed"])
+        _read_dann_batch_audit(
+            prior_dann_path,
+            expected_epochs=expected_dann_epochs,
+            expected_seed=recipe["seed"],
+            expected_source_count=len(expected_source_row_ids),
+            expected_target_count=len(expected_target_row_ids),
+            expected_source_row_ids=expected_source_row_ids,
+            expected_target_row_ids=expected_target_row_ids,
+        )
         expected = dict(actual_identity)
         expected["artifact_sha256"] = prior_model_hash
         identity_audit = audit_control_identity(expected, prior_actual)
@@ -1081,6 +1478,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             raise RuntimeError("external Control identity mismatch; refusing reuse")
         control_model_path = prior_model_path
         control_dann_batch_audit_path = prior_dann_path.resolve()
+        control_initialization_audit_path = prior_init_path.resolve()
         control_training_is_reuse = True
         control_reuse_audit = {
             **identity_audit,
@@ -1090,6 +1488,8 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             "model_tree_sha256": prior_model_hash,
             "dann_batch_audit_path": str(prior_dann_path.resolve()),
             "dann_batch_audit_sha256": prior_dann_hash,
+            "phase_a_initialization_audit_path": str(prior_init_path.resolve()),
+            "phase_a_initialization_audit_sha256": prior_init_hash,
         }
     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
 
@@ -1102,9 +1502,20 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         "treatment_target_pseudo_inference",
     )
     validate_stage_status_shape(state, stages)
+    initialization_pair_audit = None
     progress = tqdm(total=len(stages), desc="phase-a")
     try:
         for stage in stages:
+            if stage == "control_source_dev_evaluation":
+                if control_initialization_audit_path is None:
+                    raise RuntimeError("Control initialization audit path is unavailable before comparison")
+                treatment_initialization_audit_path = variant_dirs["treatment"] / "phase_a_initialization_audit.json"
+                initialization_pair_audit = validate_initialization_pair(
+                    control_initialization_audit_path,
+                    treatment_initialization_audit_path,
+                    expected_seed=recipe["seed"],
+                )
+                _atomic_write_json(run_dir / "phase_a_initialization_audit.json", initialization_pair_audit)
             execute = stage != "control_training" or not control_training_is_reuse
             spec = _stage_spec(
                 args,
@@ -1113,6 +1524,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 control_model_path,
                 execute_control_training=not control_training_is_reuse,
                 control_dann_batch_audit_path=control_dann_batch_audit_path,
+                control_initialization_audit_path=control_initialization_audit_path,
             )
             if stage in state.get("completed_stages", []):
                 saved_stage = state.get("stages", {}).get(stage)
@@ -1129,6 +1541,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                     _run_training(args, variant_dirs["control"], False)
                     control_model_path = variant_dirs["control"] / "models" / "extractor" / "best"
                     control_dann_batch_audit_path = (variant_dirs["control"] / "dann_batch_audit.json").resolve()
+                    control_initialization_audit_path = (variant_dirs["control"] / "phase_a_initialization_audit.json").resolve()
                     control_artifact = _hash_tree(control_model_path)
                     control_identity = dict(actual_identity)
                     control_identity["artifact_sha256"] = control_artifact
@@ -1144,6 +1557,8 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                         "model_tree_sha256": control_artifact,
                         "dann_batch_audit_path": str((variant_dirs["control"] / "dann_batch_audit.json").resolve()),
                         "dann_batch_audit_sha256": sha256_file(variant_dirs["control"] / "dann_batch_audit.json"),
+                        "phase_a_initialization_audit_path": str(control_initialization_audit_path),
+                        "phase_a_initialization_audit_sha256": sha256_file(control_initialization_audit_path),
                         "source": "fresh_phase_a_control",
                     }
                     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
@@ -1164,6 +1579,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 control_model_path,
                 execute_control_training=not control_training_is_reuse,
                 control_dann_batch_audit_path=control_dann_batch_audit_path,
+                control_initialization_audit_path=control_initialization_audit_path,
             )
             stage_record = _stage_record(args, stage, spec, recipe_sha256, git_identity["commit"])
             validate_stage_identity(stage_record)
@@ -1183,9 +1599,20 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             control_model_path,
             execute_control_training=not control_training_is_reuse,
             control_dann_batch_audit_path=control_dann_batch_audit_path,
+            control_initialization_audit_path=control_initialization_audit_path,
         )
         expected_stage = _stage_record(args, stage, spec, recipe_sha256, git_identity["commit"])
         validate_stage_identity(state["stages"][stage], expected_stage)
+
+    if initialization_pair_audit is None:
+        if control_initialization_audit_path is None:
+            raise RuntimeError("Control initialization audit path is unavailable for final comparison")
+        initialization_pair_audit = validate_initialization_pair(
+            control_initialization_audit_path,
+            variant_dirs["treatment"] / "phase_a_initialization_audit.json",
+            expected_seed=recipe["seed"],
+        )
+        _atomic_write_json(run_dir / "phase_a_initialization_audit.json", initialization_pair_audit)
 
     metrics = {
         "source_dev": {
@@ -1215,6 +1642,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         "gates": gate_result["gates"],
         "metrics": metrics,
         "dann_batch_audit": dann_batch_audit,
+        "phase_a_initialization_audit": initialization_pair_audit,
         "control_identity_audit": control_reuse_audit,
         "identity": identity_metadata,
         "scope": build_phase_a_scope(),

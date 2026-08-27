@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -85,6 +86,110 @@ def configure_reproducibility(seed: int, mode: str) -> dict:
         "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
         "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
     }
+
+
+def initialize_domain_adversarial_head(
+    model: nn.Module,
+    *,
+    hidden_size: int,
+    classifier_hidden_size: int,
+    seed: int,
+) -> nn.Module:
+    """Create the shared DANN head without consuming the training RNG stream."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(int(seed))
+        head = DomainAdversarialHead(
+            hidden_size=hidden_size,
+            classifier_hidden_size=classifier_hidden_size,
+        )
+    model.domain_adversarial_head = head
+    return head
+
+
+def _parameter_digest(parameters: list[tuple[str, torch.Tensor]]) -> tuple[str, list[str], list[dict]]:
+    digest = hashlib.sha256()
+    names = []
+    stats = []
+    for name, parameter in sorted(parameters, key=lambda item: item[0]):
+        value = parameter.detach().to(device="cpu").contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(repr(tuple(value.shape)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(value.view(torch.uint8).numpy().tobytes())
+        finite = torch.isfinite(value)
+        finite_count = int(finite.sum().item())
+        total_count = int(value.numel())
+        names.append(name)
+        stats.append(
+            {
+                "name": name,
+                "dtype": str(value.dtype),
+                "shape": list(value.shape),
+                "finite": finite_count == total_count,
+                "finite_count": finite_count,
+                "total_count": total_count,
+                "min": float(value[finite].min().item()) if finite_count else None,
+                "max": float(value[finite].max().item()) if finite_count else None,
+                "max_abs": float(value[finite].abs().max().item()) if finite_count else None,
+            }
+        )
+    return digest.hexdigest(), names, stats
+
+
+def build_initialization_audit(model: nn.Module, *, variant: str, seed: int) -> dict:
+    named_parameters = list(model.named_parameters())
+    graph_parameters = [
+        (name, parameter)
+        for name, parameter in named_parameters
+        if name.startswith("syntactic_graph_adapter.")
+    ]
+    dann_parameters = [
+        (name, parameter)
+        for name, parameter in named_parameters
+        if name.startswith("domain_adversarial_head.")
+    ]
+    shared_parameters = [
+        (name, parameter)
+        for name, parameter in named_parameters
+        if not name.startswith("syntactic_graph_adapter.")
+        and not name.startswith("domain_adversarial_head.")
+    ]
+    shared_hash, shared_names, shared_stats = _parameter_digest(shared_parameters)
+    dann_hash, dann_names, dann_stats = _parameter_digest(dann_parameters)
+    graph_hash, graph_names, graph_stats = _parameter_digest(graph_parameters)
+    graph_init = dict(getattr(model, "graph_parameter_initialization", {}))
+    return {
+        "schema_version": 1,
+        "variant": variant,
+        "seed": int(seed),
+        "shared_t5_parameter_sha256": shared_hash,
+        "dann_head_parameter_sha256": dann_hash,
+        "graph_parameter_sha256": graph_hash,
+        "parameter_groups": {
+            "shared_t5": {"parameter_names": shared_names, "sha256": shared_hash, "parameter_stats": shared_stats},
+            "domain_adversarial_head": {"parameter_names": dann_names, "sha256": dann_hash, "parameter_stats": dann_stats},
+            "syntactic_graph_adapter": {"parameter_names": graph_names, "sha256": graph_hash, "parameter_stats": graph_stats},
+        },
+        "graph_parameter_initialization": graph_init,
+        "graph_parameter_stats": graph_stats,
+    }
+
+
+def _atomic_write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as handle:
+        temporary = Path(handle.name)
+        json.dump(value, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _json_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 TASK_SPECIAL_TOKENS = ["<pos>", "<neg>", "<neu>", "<opinion>", "<aspect>"]
@@ -797,6 +902,7 @@ class PairedDomainBatchSampler:
             raise ValueError("DANN row-id lists must match their domain counts")
         self._epoch = 0
         self.epoch_reports: list[dict] = []
+        self._epoch_provider = None
 
     def __len__(self) -> int:
         source_batches = math.ceil(self.source_count / self.source_batch_size)
@@ -808,6 +914,10 @@ class PairedDomainBatchSampler:
         if epoch < 0:
             raise ValueError("DANN sampler epoch must be non-negative")
         self._epoch = epoch
+
+    def bind_epoch_provider(self, provider) -> None:
+        """Bind the Trainer's explicit epoch without changing standalone use."""
+        self._epoch_provider = provider
 
     def state_dict(self) -> dict:
         return {
@@ -844,7 +954,7 @@ class PairedDomainBatchSampler:
         self._epoch = epoch
 
     def load_audit_report(self, report: dict) -> None:
-        if not isinstance(report, dict) or not isinstance(report.get("epochs"), list):
+        if not isinstance(report, dict) or report.get("schema_version") != 1 or not isinstance(report.get("epochs"), list):
             raise ValueError("DANN sampler audit report is invalid")
         if report.get("seed") != self.seed:
             raise ValueError("DANN sampler audit report mismatch: seed")
@@ -862,14 +972,59 @@ class PairedDomainBatchSampler:
             raise ValueError("DANN sampler audit report mismatch: target_row_ids")
         epochs = report["epochs"]
         seen = set()
-        for epoch_report in epochs:
+        for expected_epoch, epoch_report in enumerate(epochs):
             epoch = epoch_report.get("epoch") if isinstance(epoch_report, dict) else None
-            if not isinstance(epoch, int) or epoch in seen:
+            if not isinstance(epoch, int) or epoch != expected_epoch or epoch in seen:
                 raise ValueError("DANN sampler audit report has duplicate or invalid epochs")
             seen.add(epoch)
+            batches = epoch_report.get("batches")
+            if (
+                epoch_report.get("source_batch_size") != self.source_batch_size
+                or epoch_report.get("target_batch_size") != self.target_batch_size
+                or epoch_report.get("incomplete_batches") != 0
+                or not isinstance(batches, list)
+                or epoch_report.get("logical_batches") != len(batches)
+                or epoch_report.get("source_rows") != len(batches)
+                or epoch_report.get("target_rows") != len(batches)
+                or epoch_report.get("source_unique_rows") != self.source_count
+                or epoch_report.get("target_unique_rows") != self.target_count
+            ):
+                raise ValueError("DANN sampler audit report has incomplete epoch accounting")
+            seen_source = set()
+            seen_target = set()
+            for batch_id, batch in enumerate(batches):
+                source_indices = batch.get("source_indices") if isinstance(batch, dict) else None
+                target_indices = batch.get("target_indices") if isinstance(batch, dict) else None
+                if (
+                    not isinstance(batch, dict)
+                    or batch.get("logical_batch_id") != batch_id
+                    or batch.get("source_count") != self.source_batch_size
+                    or batch.get("target_count") != self.target_batch_size
+                    or not isinstance(source_indices, list)
+                    or len(source_indices) != self.source_batch_size
+                    or not isinstance(target_indices, list)
+                    or len(target_indices) != self.target_batch_size
+                ):
+                    raise ValueError("DANN sampler audit report has an invalid 1/1 batch")
+                source_index = source_indices[0]
+                target_index = target_indices[0] - self.source_count if isinstance(target_indices[0], int) else None
+                if not (isinstance(source_index, int) and 0 <= source_index < self.source_count):
+                    raise ValueError("DANN sampler audit report has an invalid source index")
+                if not (isinstance(target_index, int) and 0 <= target_index < self.target_count):
+                    raise ValueError("DANN sampler audit report has an invalid target index")
+                if batch.get("source_row_ids") != [self.source_row_ids[source_index]] or batch.get("target_row_ids") != [self.target_row_ids[target_index]]:
+                    raise ValueError("DANN sampler audit report index/row identity mismatch")
+                seen_source.add(source_index)
+                seen_target.add(target_index)
+            if seen_source != set(range(self.source_count)) or seen_target != set(range(self.target_count)):
+                raise ValueError("DANN sampler audit report does not cover both domains")
         self.epoch_reports = list(epochs)
 
     def __iter__(self):
+        if self._epoch_provider is not None:
+            provided_epoch = self._epoch_provider()
+            if provided_epoch is not None:
+                self.set_epoch(int(provided_epoch))
         epoch = self._epoch
         source_order = list(range(self.source_count))
         target_order = list(range(self.target_count))
@@ -925,6 +1080,7 @@ class PairedDomainBatchSampler:
 
     def audit_report(self) -> dict:
         return {
+            "schema_version": 1,
             "source_batch_size": self.source_batch_size,
             "target_batch_size": self.target_batch_size,
             "seed": self.seed,
@@ -935,6 +1091,97 @@ class PairedDomainBatchSampler:
             "target_row_ids": list(self.target_row_ids),
             "epochs": list(self.epoch_reports),
         }
+
+
+def _checkpoint_step(path: Path) -> int | None:
+    try:
+        return int(Path(path).name.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _read_complete_dann_checkpoint(checkpoint_dir: Path, sampler: PairedDomainBatchSampler) -> dict:
+    checkpoint_dir = Path(checkpoint_dir)
+    manifest_path = checkpoint_dir / "dann_checkpoint_state.json"
+    sampler_path = checkpoint_dir / "dann_batch_sampler_state.json"
+    audit_path = checkpoint_dir / "dann_batch_audit.json"
+    trainer_state_path = checkpoint_dir / "trainer_state.json"
+    model_files = [checkpoint_dir / "pytorch_model.bin", checkpoint_dir / "model.safetensors"]
+    required = (manifest_path, sampler_path, audit_path, trainer_state_path)
+    missing = [str(path) for path in required if not path.is_file()]
+    if not any(path.is_file() for path in model_files):
+        missing.append(f"{checkpoint_dir}/pytorch_model.bin|model.safetensors")
+    if missing:
+        raise RuntimeError(f"incomplete DANN checkpoint {checkpoint_dir}: missing {missing}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        sampler_state = json.loads(sampler_path.read_text(encoding="utf-8"))
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        trainer_state = json.loads(trainer_state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid DANN checkpoint JSON in {checkpoint_dir}: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("complete") is not True:
+        raise RuntimeError(f"DANN checkpoint is not marked complete: {checkpoint_dir}")
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError(f"unsupported DANN checkpoint schema: {checkpoint_dir}")
+    if manifest.get("sampler_state_sha256") != _json_sha256(sampler_path):
+        raise RuntimeError(f"DANN checkpoint sampler state hash mismatch: {checkpoint_dir}")
+    if manifest.get("audit_sha256") != _json_sha256(audit_path):
+        raise RuntimeError(f"DANN checkpoint audit hash mismatch: {checkpoint_dir}")
+    if manifest.get("trainer_state_sha256") != _json_sha256(trainer_state_path):
+        raise RuntimeError(f"DANN checkpoint trainer state hash mismatch: {checkpoint_dir}")
+    model_path = next(path for path in model_files if path.is_file())
+    if manifest.get("model_artifact") != model_path.name or manifest.get("model_artifact_sha256") != _json_sha256(model_path):
+        raise RuntimeError(f"DANN checkpoint model hash mismatch: {checkpoint_dir}")
+    sampler.load_state_dict(sampler_state)
+    sampler.load_audit_report(audit)
+    epochs = audit.get("epochs") if isinstance(audit, dict) else None
+    expected_epochs = [item.get("epoch") for item in epochs] if isinstance(epochs, list) else []
+    if manifest.get("completed_epochs") != expected_epochs:
+        raise RuntimeError(f"DANN checkpoint completed epoch identity mismatch: {checkpoint_dir}")
+    if manifest.get("completed_epoch_count") != len(expected_epochs):
+        raise RuntimeError(f"DANN checkpoint completed epoch count mismatch: {checkpoint_dir}")
+    if manifest.get("seed") != sampler.seed:
+        raise RuntimeError(f"DANN checkpoint seed mismatch: {checkpoint_dir}")
+    for field, expected in (
+        ("source_count", sampler.source_count),
+        ("target_count", sampler.target_count),
+        ("source_batch_size", sampler.source_batch_size),
+        ("target_batch_size", sampler.target_batch_size),
+        ("source_row_ids", sampler.source_row_ids),
+        ("target_row_ids", sampler.target_row_ids),
+    ):
+        if manifest.get(field) != expected:
+            raise RuntimeError(f"DANN checkpoint {field} mismatch: {checkpoint_dir}")
+    if not isinstance(trainer_state, dict) or "global_step" not in trainer_state:
+        raise RuntimeError(f"DANN checkpoint trainer state is incomplete: {checkpoint_dir}")
+    return {
+        "checkpoint_dir": checkpoint_dir,
+        "manifest": manifest,
+        "sampler_state": sampler_state,
+        "audit": audit,
+        "trainer_state": trainer_state,
+    }
+
+
+def find_latest_complete_dann_checkpoint(
+    output_dir: str | Path,
+    sampler: PairedDomainBatchSampler,
+) -> Path:
+    candidates = []
+    for path in Path(output_dir).glob("checkpoint-*"):
+        if path.is_dir() and _checkpoint_step(path) is not None:
+            candidates.append(path)
+    candidates.sort(key=lambda path: _checkpoint_step(path) or -1, reverse=True)
+    errors = []
+    for candidate in candidates:
+        try:
+            _read_complete_dann_checkpoint(candidate, sampler)
+            return candidate
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"{candidate.name}: {exc}")
+    detail = "; ".join(errors) if errors else "no checkpoint candidates"
+    raise RuntimeError(f"no complete identity-valid paired DANN checkpoint found: {detail}")
 
 
 class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
@@ -989,6 +1236,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.sentiment_contrastive_temperature = sentiment_contrastive_temperature
         self.sentiment_contrastive_class_weights = sentiment_contrastive_class_weights
         self.dann_batch_sampler = dann_batch_sampler
+        if self.dann_batch_sampler is not None:
+            self.dann_batch_sampler.bind_epoch_provider(
+                lambda: int(self.state.epoch) if self.state.epoch is not None else 0
+            )
         self._component_sums: dict[str, float] = {}
         self._component_counts: dict[str, int] = {}
         self._component_reductions: dict[str, str] = {}
@@ -1021,10 +1272,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
     def load_dann_batch_sampler_state(self, checkpoint_dir: str | Path) -> None:
         if self.dann_batch_sampler is None:
             return
-        state_path = Path(checkpoint_dir) / "dann_batch_sampler_state.json"
-        if not state_path.is_file():
-            raise RuntimeError(f"missing DANN sampler state in checkpoint: {state_path}")
-        self.dann_batch_sampler.load_state_dict(json.loads(state_path.read_text(encoding="utf-8")))
+        _read_complete_dann_checkpoint(Path(checkpoint_dir), self.dann_batch_sampler)
 
     def _save_checkpoint(self, model, trial, metrics=None):
         super()._save_checkpoint(model, trial, metrics=metrics)
@@ -1032,9 +1280,41 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             return
         checkpoint_dir = Path(self._get_output_dir(trial=trial)) / f"checkpoint-{self.state.global_step}"
         state_path = checkpoint_dir / "dann_batch_sampler_state.json"
-        state_path.write_text(
-            json.dumps(self.dann_batch_sampler.state_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        audit_path = checkpoint_dir / "dann_batch_audit.json"
+        sampler_state = self.dann_batch_sampler.state_dict()
+        audit = self.dann_batch_sampler.audit_report()
+        _atomic_write_json(state_path, sampler_state)
+        _atomic_write_json(audit_path, audit)
+        _atomic_write_json(
+            checkpoint_dir / "dann_checkpoint_state.json",
+            {
+                "schema_version": 1,
+                "complete": True,
+                "seed": self.dann_batch_sampler.seed,
+                "source_count": self.dann_batch_sampler.source_count,
+                "target_count": self.dann_batch_sampler.target_count,
+                "source_batch_size": self.dann_batch_sampler.source_batch_size,
+                "target_batch_size": self.dann_batch_sampler.target_batch_size,
+                "source_row_ids": list(self.dann_batch_sampler.source_row_ids),
+                "target_row_ids": list(self.dann_batch_sampler.target_row_ids),
+                "completed_epochs": [item["epoch"] for item in audit["epochs"]],
+                "completed_epoch_count": len(audit["epochs"]),
+                "sampler_state_sha256": _json_sha256(state_path),
+                "audit_sha256": _json_sha256(audit_path),
+                "trainer_state_sha256": _json_sha256(checkpoint_dir / "trainer_state.json"),
+                "model_artifact": next(
+                    path.name
+                    for path in (checkpoint_dir / "pytorch_model.bin", checkpoint_dir / "model.safetensors")
+                    if path.is_file()
+                ),
+                "model_artifact_sha256": _json_sha256(
+                    next(
+                        path
+                        for path in (checkpoint_dir / "pytorch_model.bin", checkpoint_dir / "model.safetensors")
+                        if path.is_file()
+                    )
+                ),
+            },
         )
 
     @classmethod
@@ -1114,6 +1394,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         per_sample_loss = token_loss.sum(dim=1) / token_mask.sum(dim=1).clamp_min(1)
         if domain_weight is not None:
             domain_weights = domain_weight.to(per_sample_loss.device, dtype=per_sample_loss.dtype)
+            paired_dann_normalization = getattr(self, "dann_batch_sampler", None) is not None
             if structure_weight is not None:
                 structure_weights = structure_weight.to(per_sample_loss.device, dtype=per_sample_loss.dtype)
                 loss = joint_weighted_loss(
@@ -1121,9 +1402,14 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
                     domain_weights,
                     structure_weights,
                     self.lambda_structure_loss,
+                    normalize_by_active_weight=paired_dann_normalization,
                 )
             else:
-                loss = weighted_loss_mean(per_sample_loss, domain_weights)
+                loss = weighted_loss_mean(
+                    per_sample_loss,
+                    domain_weights,
+                    normalize_by_active_weight=paired_dann_normalization,
+                )
         else:
             loss = per_sample_loss.mean()
         generation_loss = loss
@@ -1200,8 +1486,16 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         return (loss, outputs) if return_outputs else loss
 
 
-def weighted_loss_mean(per_sample_loss: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    return (per_sample_loss * weights).mean()
+def weighted_loss_mean(
+    per_sample_loss: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    normalize_by_active_weight: bool = False,
+) -> torch.Tensor:
+    weighted = per_sample_loss * weights
+    if normalize_by_active_weight:
+        return weighted.sum() / weights.sum().clamp_min(1.0)
+    return weighted.mean()
 
 
 def joint_weighted_loss(
@@ -1209,11 +1503,21 @@ def joint_weighted_loss(
     domain_weights: torch.Tensor,
     structure_weights: torch.Tensor,
     lambda_structure: float,
+    *,
+    normalize_by_active_weight: bool = False,
 ) -> torch.Tensor:
-    domain_loss = weighted_loss_mean(per_sample_loss, domain_weights)
+    domain_loss = weighted_loss_mean(
+        per_sample_loss,
+        domain_weights,
+        normalize_by_active_weight=normalize_by_active_weight,
+    )
     if lambda_structure <= 0:
         return domain_loss
-    structure_loss = weighted_loss_mean(per_sample_loss, structure_weights)
+    structure_loss = weighted_loss_mean(
+        per_sample_loss,
+        structure_weights,
+        normalize_by_active_weight=normalize_by_active_weight,
+    )
     return domain_loss + lambda_structure * structure_loss
 
 
@@ -1636,6 +1940,7 @@ def main() -> None:
     parser.add_argument("--dann_source_batch_size", type=int, default=1)
     parser.add_argument("--dann_target_batch_size", type=int, default=1)
     parser.add_argument("--dann_batch_audit_path", default="")
+    parser.add_argument("--initialization_audit_path", default="")
     parser.add_argument("--source_weight", type=float, default=1.0)
     parser.add_argument("--pseudo_weight", type=float, default=0.5)
     parser.add_argument("--augment_weight", type=float, default=0.2)
@@ -1685,6 +1990,7 @@ def main() -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
     reproducibility_mode = "deterministic" if args.deterministic else "legacy"
     reproducibility_config = configure_reproducibility(args.seed, reproducibility_mode)
+    initialization_rng_state = torch.get_rng_state()
     print("reproducibility:", reproducibility_config)
     output_dir = Path(args.output_dir)
     checkpoint_dirs = (
@@ -1782,17 +2088,26 @@ def main() -> None:
             )
     elif args.paired_domain_batches:
         raise ValueError("paired DANN batches require --target_unlabeled_file and positive lambda_domain_adv")
+    if resume_from_checkpoint and dann_batch_sampler is not None:
+        latest_checkpoint = find_latest_complete_dann_checkpoint(output_dir, dann_batch_sampler)
     model = load_seq2seq_model(
         args.model_path,
         use_syntactic_graph_adapter=args.use_syntactic_graph_adapter,
         relation_vocab_size=graph_relation_vocab_size,
     )
+    # Graph-only construction is deliberately outside the shared training RNG
+    # stream.  Restore the stream before common token initialization so
+    # Control and Treatment receive identical shared T5 state and training
+    # randomness under the same seed.
+    torch.set_rng_state(initialization_rng_state)
     add_task_special_tokens(tokenizer, model, train_rows + dev_rows)
     if args.lambda_domain_adv > 0:
         hidden_size = int(getattr(model.config, "d_model", model.get_input_embeddings().embedding_dim))
-        model.domain_adversarial_head = DomainAdversarialHead(
+        initialize_domain_adversarial_head(
+            model,
             hidden_size=hidden_size,
             classifier_hidden_size=args.domain_adv_hidden_size,
+            seed=args.seed + 1,
         )
     if args.lambda_sentiment_contrastive > 0:
         hidden_size = int(getattr(model.config, "d_model", model.get_input_embeddings().embedding_dim))
@@ -1814,6 +2129,15 @@ def main() -> None:
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
+    training_rng_state = torch.get_rng_state()
+    torch.set_rng_state(training_rng_state)
+
+    if args.initialization_audit_path:
+        variant = "treatment" if args.use_syntactic_graph_adapter else "control"
+        _atomic_write_json(
+            Path(args.initialization_audit_path),
+            build_initialization_audit(model, variant=variant, seed=args.seed),
+        )
 
     print(
         "sample weights:",
@@ -1963,10 +2287,6 @@ def main() -> None:
         if latest_checkpoint is None:
             raise RuntimeError("paired DANN resume requested without a checkpoint")
         trainer.load_dann_batch_sampler_state(latest_checkpoint)
-        audit_path = Path(args.dann_batch_audit_path)
-        if not audit_path.is_file():
-            raise RuntimeError(f"missing prior DANN audit for sampler resume: {audit_path}")
-        dann_batch_sampler.load_audit_report(json.loads(audit_path.read_text(encoding="utf-8")))
     if resume_from_checkpoint:
         print(f"resuming from latest checkpoint in {output_dir}")
     trainer.train(
@@ -1976,8 +2296,7 @@ def main() -> None:
         if dann_batch_sampler is None:
             raise RuntimeError("DANN batch audit requested without a paired DANN sampler")
         audit_path = Path(args.dann_batch_audit_path)
-        audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_path.write_text(json.dumps(trainer.get_dann_batch_audit(), ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_json(audit_path, trainer.get_dann_batch_audit())
     best_dir = output_dir / "best"
     if best_dir.exists():
         shutil.rmtree(best_dir)
