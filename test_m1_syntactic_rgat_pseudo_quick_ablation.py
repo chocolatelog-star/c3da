@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import torch
+import pytest
 from torch.utils.data import Dataset
 from transformers import TrainerCallback, T5Config, T5ForConditionalGeneration, Seq2SeqTrainingArguments
 
@@ -39,8 +40,10 @@ from t5_absa_train import (
     PairedDomainBatchSampler,
     WeightedSeq2SeqTrainer,
     build_initialization_audit,
+    compute_dann_expected_max_steps,
     find_latest_complete_dann_checkpoint,
     initialize_domain_adversarial_head,
+    recover_dann_audit_journal,
 )
 
 
@@ -287,7 +290,7 @@ def test_dann_sampler_records_each_physical_traversal_without_epoch_overwrite(tm
     list(sampler)
     list(sampler)
 
-    report = json.loads(audit_path.read_text(encoding="utf-8"))
+    report = recover_dann_audit_journal(audit_path.with_suffix(".journal.jsonl"))
     assert [item["physical_traversal_index"] for item in report["epochs"]] == [0, 1]
     assert [item["sampling_epoch"] for item in report["epochs"]] == [0, 1]
     assert all(item["completion"] == "complete" for item in report["epochs"])
@@ -306,11 +309,12 @@ def test_dann_sampler_persists_last_partial_traversal_before_generator_cleanup(t
     iterator = iter(sampler)
     next(iterator)
 
-    report = json.loads(audit_path.read_text(encoding="utf-8"))
+    report = recover_dann_audit_journal(audit_path.with_suffix(".journal.jsonl"))
     partial = report["epochs"][-1]
     assert partial["completion"] == "partial"
     assert partial["planned_batches"] == 3
-    assert partial["consumed_batches"] == 1
+    assert partial["issued_batches"] == 1
+    assert partial["processed_batches"] == 0
     assert partial["optimizer_global_step_start"] is None
     assert partial["optimizer_global_step_end"] is None
 
@@ -344,6 +348,119 @@ def test_dann_sampler_restore_keeps_physical_traversal_identity_monotonic(tmp_pa
     report = restored.audit_report()
     assert [item["physical_traversal_index"] for item in report["epochs"]] == [0, 1]
     assert [item["sampling_epoch"] for item in report["epochs"]] == [0, 1]
+
+
+def test_dann_sampling_order_keeps_legacy_trainer_epoch_semantics_at_real_boundary():
+    labels = list(range(7)) + [6] + list(range(8, 15)) + [14] + list(range(16, 23)) + [22, 22]
+    assert sorted(set(labels)) == list(range(7)) + list(range(8, 15)) + list(range(16, 23))
+    assert compute_dann_expected_max_steps(
+        source_count=906,
+        target_count=906,
+        source_batch_size=1,
+        target_batch_size=1,
+        gradient_accumulation_steps=16,
+        num_train_epochs=25,
+    ) == 1400
+
+    sampler = PairedDomainBatchSampler(
+        906,
+        906,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+    )
+    remaining = iter(labels)
+    sampler.bind_sampling_epoch_provider(lambda: next(remaining))
+    observed = []
+    expected = []
+    for label in labels:
+        batches = list(sampler)
+        observed.append(hashlib.sha256(json.dumps(batches, separators=(",", ":")).encode()).hexdigest())
+        source_order = list(range(906))
+        target_order = list(range(906))
+        import random
+        random.Random(1000 + label).shuffle(source_order)
+        random.Random(1000 + label).shuffle(target_order)
+        expected.append(hashlib.sha256(json.dumps(
+            [[source_order[i], 906 + target_order[i]] for i in range(906)],
+            separators=(",", ":"),
+        ).encode()).hexdigest())
+    assert observed == expected
+    report = sampler.audit_report()
+    assert [item["physical_traversal_index"] for item in report["epochs"]] == list(range(25))
+    assert [item["sampling_epoch"] for item in report["epochs"]] == labels
+
+
+def test_dann_audit_journal_is_append_only_and_recovers_crash_between_issue_and_ack(tmp_path):
+    audit_path = tmp_path / "dann_batch_audit.json"
+    sampler = PairedDomainBatchSampler(
+        3,
+        3,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        audit_path=audit_path,
+    )
+    iterator = iter(sampler)
+    next(iterator)
+    sampler.flush_audit_snapshot()
+    journal_path = audit_path.with_suffix(".journal.jsonl")
+    assert journal_path.is_file()
+    stats = sampler.audit_io_stats()
+    assert stats["journal_write_count"] <= 4
+    assert stats["snapshot_write_count"] <= 1
+    recovered = recover_dann_audit_journal(journal_path)
+    partial = recovered["epochs"][-1]
+    assert partial["issued_batches"] == 1
+    assert partial["processed_batches"] == 0
+    assert partial["completion"] == "partial"
+    assert stats["journal_bytes"] < stats["snapshot_bytes"] * 4
+
+
+def test_dann_audit_ack_is_distinct_from_issued_batches():
+    state = {"global_step": 0, "max_steps": 1}
+    sampler = PairedDomainBatchSampler(2, 2, source_batch_size=1, target_batch_size=1, seed=1000)
+    sampler.bind_training_state_provider(lambda: state)
+    iterator = iter(sampler)
+    next(iterator)
+    assert sampler.audit_report()["epochs"][-1]["issued_batches"] == 1
+    assert sampler.audit_report()["epochs"][-1]["processed_batches"] == 0
+    sampler.acknowledge_next_batch()
+    assert sampler.audit_report()["epochs"][-1]["processed_batches"] == 1
+
+
+def test_dann_validator_rejects_non_integer_or_non_contiguous_optimizer_step_ranges(tmp_path):
+    state = {"global_step": 0, "max_steps": 1}
+    sampler = PairedDomainBatchSampler(2, 2, source_batch_size=1, target_batch_size=1, seed=1000)
+    sampler.bind_training_state_provider(lambda: state)
+    iterator = iter(sampler)
+    next(iterator)
+    sampler.acknowledge_next_batch()
+    state["global_step"] = 1
+    report = sampler.audit_report()
+    report["epochs"][0]["optimizer_global_step_start"] = "0"
+    report_text = json.dumps(report)
+    control_dir = tmp_path / "control"
+    treatment_dir = tmp_path / "treatment"
+    control_dir.mkdir()
+    treatment_dir.mkdir()
+    for directory in (control_dir, treatment_dir):
+        (directory / "dann_batch_audit.json").write_text(report_text, encoding="utf-8")
+    try:
+        _validate_control_treatment_dann_reports(
+            {"control": control_dir, "treatment": treatment_dir},
+            {"dann_batch_audit_path": str(control_dir / "dann_batch_audit.json"), "dann_batch_audit_sha256": hashlib.sha256(report_text.encode()).hexdigest()},
+            expected_source_count=2,
+            expected_target_count=2,
+            expected_source_row_ids=[0, 1],
+            expected_target_row_ids=[0, 1],
+            require_training_state=True,
+            expected_max_steps=1,
+        )
+    except RuntimeError as exc:
+        assert "step" in str(exc).lower() or "optimizer" in str(exc).lower()
+    else:
+        raise AssertionError("invalid optimizer step range must be rejected")
 
 
 def test_control_treatment_alignment_rejects_partial_physical_traversal(tmp_path):
@@ -407,6 +524,7 @@ def test_terminal_partial_traversal_is_formal_only_when_trainer_reached_max_step
     sampler.bind_training_state_provider(lambda: training_state)
     iterator = iter(sampler)
     next(iterator)
+    sampler.acknowledge_next_batch()
     training_state["global_step"] = 1
     report_text = json.dumps(sampler.audit_report())
     for directory in (control_dir, treatment_dir):
@@ -423,10 +541,62 @@ def test_terminal_partial_traversal_is_formal_only_when_trainer_reached_max_step
         expected_source_row_ids=["s1", "s2", "s3"],
         expected_target_row_ids=["t1", "t2", "t3"],
         require_training_state=True,
+        expected_max_steps=1,
     )
 
     assert result["status"] == "matched"
     assert result["treatment"]["epochs"][-1]["completion"] == "partial"
+
+
+def test_terminal_partial_checkpoint_is_resume_valid_only_with_processed_equals_issued(tmp_path):
+    checkpoint = tmp_path / "checkpoint-1"
+    checkpoint.mkdir()
+    state = {"global_step": 0, "max_steps": 1}
+    sampler = PairedDomainBatchSampler(3, 3, source_batch_size=1, target_batch_size=1, seed=1000)
+    sampler.bind_training_state_provider(lambda: state)
+    iterator = iter(sampler)
+    next(iterator)
+    sampler.acknowledge_next_batch()
+    state["global_step"] = 1
+    audit = sampler.audit_report()
+    sampler_state = sampler.state_dict()
+    trainer_state = {"global_step": 1}
+    model_path = checkpoint / "pytorch_model.bin"
+    model_path.write_bytes(b"cpu-test-model")
+    sampler_path = checkpoint / "dann_batch_sampler_state.json"
+    audit_path = checkpoint / "dann_batch_audit.json"
+    trainer_state_path = checkpoint / "trainer_state.json"
+    sampler_path.write_text(json.dumps(sampler_state), encoding="utf-8")
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    trainer_state_path.write_text(json.dumps(trainer_state), encoding="utf-8")
+    manifest = {
+        "schema_version": 3,
+        "complete": True,
+        "resume_complete": True,
+        "training_terminal_partial": True,
+        "audit_protocol": "physical_dataloader_traversal_v2",
+        "seed": 1000,
+        "source_count": 3,
+        "target_count": 3,
+        "source_batch_size": 1,
+        "target_batch_size": 1,
+        "source_row_ids": [0, 1, 2],
+        "target_row_ids": [0, 1, 2],
+        "completed_epochs": [],
+        "completed_epoch_count": 0,
+        "completed_physical_traversals": [],
+        "audit_traversal_count": 1,
+        "trainer_global_step": 1,
+        "trainer_max_steps": 1,
+        "last_traversal_completion": "partial",
+        "sampler_state_sha256": hashlib.sha256(sampler_path.read_bytes()).hexdigest(),
+        "audit_sha256": hashlib.sha256(audit_path.read_bytes()).hexdigest(),
+        "trainer_state_sha256": hashlib.sha256(trainer_state_path.read_bytes()).hexdigest(),
+        "model_artifact": "pytorch_model.bin",
+        "model_artifact_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
+    }
+    (checkpoint / "dann_checkpoint_state.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert find_latest_complete_dann_checkpoint(tmp_path, sampler) == checkpoint
 
 
 def test_legacy_dann_audit_cannot_be_formal_phase_a_pass(tmp_path):
@@ -1107,13 +1277,113 @@ def test_real_trainer_three_epoch_resume_matches_continuous_run(tmp_path):
     assert all(torch.equal(continuous_state[name], resumed_state[name]) for name in continuous_state)
 
 
+class _NonDivisiblePairedDataset(Dataset):
+    def __init__(self):
+        self.items = []
+        for index in range(5):
+            self.items.append({"input_ids": [2 + index, 3, 4, 5], "labels": [1, 2, 3], "sample_weight": 1.0, "domain_weight": 1.0})
+        for index in range(5):
+            self.items.append({"input_ids": [7 + index, 8, 9, 10], "labels": [-100, -100, -100], "sample_weight": 0.0, "domain_weight": 0.0})
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+
+def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_epoch=None):
+    config = T5Config(
+        vocab_size=32,
+        d_model=8,
+        d_kv=4,
+        d_ff=16,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=2,
+        dropout_rate=0.0,
+        pad_token_id=0,
+        eos_token_id=1,
+        decoder_start_token_id=0,
+    )
+    if checkpoint is None:
+        torch.manual_seed(1000)
+        model = T5ForConditionalGeneration(config)
+    else:
+        model = T5ForConditionalGeneration.from_pretrained(checkpoint)
+    sampler = PairedDomainBatchSampler(5, 5, source_batch_size=1, target_batch_size=1, seed=1000)
+    args = Seq2SeqTrainingArguments(
+        output_dir=str(output_dir),
+        overwrite_output_dir=True,
+        num_train_epochs=3,
+        max_steps=2,
+        per_device_train_batch_size=1,
+        no_cuda=True,
+        gradient_accumulation_steps=2,
+        learning_rate=1e-3,
+        evaluation_strategy="no",
+        save_strategy="epoch",
+        save_steps=2,
+        save_total_limit=5,
+        logging_strategy="no",
+        report_to=[],
+        remove_unused_columns=False,
+        disable_tqdm=True,
+        save_safetensors=False,
+        seed=1000,
+        data_seed=1000,
+    )
+    callbacks = []
+    class StopAtTerminalStep(TrainerCallback):
+        def on_step_end(self, args, state, control, **kwargs):
+            if state.global_step >= 2:
+                control.should_training_stop = True
+            return control
+    callbacks.append(StopAtTerminalStep())
+    if stop_after_epoch is not None:
+        class StopAfterEpoch(TrainerCallback):
+            def on_epoch_end(self, args, state, control, **kwargs):
+                if state.epoch >= stop_after_epoch:
+                    control.should_training_stop = True
+                return control
+        callbacks.append(StopAfterEpoch())
+    trainer = WeightedSeq2SeqTrainer(
+        model=model,
+        args=args,
+        train_dataset=_NonDivisiblePairedDataset(),
+        data_collator=_tiny_pair_collator,
+        dann_batch_sampler=sampler,
+        callbacks=callbacks,
+    )
+    if checkpoint is not None:
+        trainer.load_dann_batch_sampler_state(checkpoint)
+    trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint is not None else None)
+    return trainer
+
+
+def test_real_trainer_nondivisible_terminal_processing_gap_is_rejected(tmp_path):
+    continuous = _run_non_divisible_paired_trainer(tmp_path / "continuous")
+    interrupted = _run_non_divisible_paired_trainer(tmp_path / "interrupted", stop_after_epoch=1)
+    continuous_audit = continuous.get_dann_batch_audit()
+    assert continuous_audit["trainer_global_step"] == 2
+    assert continuous_audit["epochs"][-1]["issued_batches"] == 5
+    assert continuous_audit["epochs"][-1]["processed_batches"] == 4
+    with pytest.raises(RuntimeError, match="complete|terminal|acknowledged"):
+        find_latest_complete_dann_checkpoint(tmp_path / "interrupted", interrupted.dann_batch_sampler)
+    assert continuous.state.epoch != int(continuous.state.epoch)
+
+
 def test_corrupt_latest_dann_checkpoint_falls_back_to_previous_complete_checkpoint(tmp_path):
     trainer = _run_tiny_paired_trainer(tmp_path / "run", 2)
     latest = find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
-    assert latest.name == "checkpoint-4"
+    assert latest.name == "checkpoint-2"
     (latest / "dann_checkpoint_state.json").write_text("{}", encoding="utf-8")
-    fallback = find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
-    assert fallback.name == "checkpoint-2"
+    try:
+        find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
+    except RuntimeError as exc:
+        assert "no complete" in str(exc).lower()
+    else:
+        raise AssertionError("corrupting the only identity-valid checkpoint must hard-fail")
 
 
 def test_missing_custom_checkpoint_audit_cannot_be_resumed(tmp_path):
