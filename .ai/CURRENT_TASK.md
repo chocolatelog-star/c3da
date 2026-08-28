@@ -1,16 +1,32 @@
 # 当前任务
 
-> 更新时间：2026-08-28（北京时间）
+> 更新时间：2026-08-28 17:16（北京时间）
 
-- 任务编号：M1_SYNTACTIC_RGAT_DANN_AUDIT_RECOVERY_FIX_V3
-- 任务类型：PHASE A DANN 审计与恢复工程修复
+- 任务编号：M1_PHASE_A_LIVE_REPLAY_CONTAMINATION_FIX_V4
+- 任务类型：P0 训练恢复与审计污染修复
 - 方向：laptop14 -> rest15
 - 随机种子：1000
-- 入口身份：保留 M1 句法 RGAT zero-update（零更新）入口审计身份；本修复分支提交后由新代码身份承担
-- 状态：APPROVED（修复实施范围已批准；验收与实验仍 BLOCKED（阻塞））
-- 当前实现范围：仅修复 Phase A 成对 DANN 的物理遍历审计、原子持久化、检查点恢复、Control/Treatment（对照组/实验组）对齐和 legacy diagnostic（旧版诊断）降级；不运行实验
-- 最早失效阶段：Phase A target-unlabeled DANN 审计及其真实下游；必须在新目录从头验证，旧运行不晋级正式证据
+- 入口身份：M1 句法 RGAT zero-update（零更新）入口身份保持不变
+- 状态：APPROVED（代码修复和 CPU 验证完成，等待 Codex Sol（高级工程模型）最终只读复审）
+- 当前功能分支：codex/m1-syntactic-rgat-entry-audit-v1
+- 修复基线：231d9150bbc45b7dc21552b2855e56b1c269ffa6
+- 污染运行：v3 已标记 INVALID_REPLAY_CONTAMINATED，不得恢复或用于任何实验结论
 - Phase B（下游阶段）执行状态：NOT APPROVED（未批准）；本轮不实现或运行 Phase B
+
+## 本轮 P0 修复范围
+
+- `remainder=0` 时检查点的 `resume_replay_batch_ids` 和 `resume_reissue_batch_ids` 严格为空；保存检查点只构造序列化副本，不修改 live sampler（运行中采样器）。
+- 累积余数来自独立的实际微批计数器，不再由跨轮 `global_step` 与单轮 `processed_batches` 推导。
+- 非整除轮末依据 Accelerate（加速训练框架）的 `end_of_dataloader`（数据遍历结束）信号完成真实尾部更新，epoch（轮次）检查点不得带未完成累积。
+- fresh run（全新运行）不得产生 `batch_replayed`；显式检查点恢复才允许重放，并记录检查点路径、哈希和恢复批次身份。
+- Phase A 最终门控必须读取 DANN journal（领域批次日志），验证 fresh Control/Treatment（全新对照组/实验组）的 `replay_count=0`。
+
+## 当前验证与边界
+
+- RED（失败先行）已复现：原实现中 `[-0:]` 会重放完整历史，且保存检查点会污染 live sampler；新增状态接口和 906/16/25 边界测试在修复前失败。
+- GREEN（修复后）：M1 相关 CPU 回归 `141 passed, 0 failed`；未启动 GPU（图形处理器）、正式训练、伪标签实验或 target_test（目标测试集）。
+- 不修改句法图公式、图结构、DANN 公式或 `lambda_domain_adv=0.03`，不修改数据、标签、训练参数、伪标签规则和研究范围。
+- 修复后正式运行必须使用全新 v4 目录，并等待 Codex Sol 复审通过及用户明确启动；未经再次授权不得删除 v3。
 
 ## 本任务批准范围
 

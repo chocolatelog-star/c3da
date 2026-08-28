@@ -304,6 +304,41 @@ def recover_dann_audit_journal(path: str | Path) -> dict:
     }
 
 
+def read_dann_audit_journal(path: str | Path) -> dict:
+    """Read journal replay events for the formal fresh/resume audit gate."""
+    journal_path = Path(path)
+    records = _read_dann_audit_journal_records(journal_path)
+    replay_events = []
+    for record in records:
+        if record.get("event") != "batch_replayed":
+            continue
+        payload = record.get("payload") or {}
+        if not isinstance(payload.get("checkpoint_path"), str) or not payload.get("checkpoint_path"):
+            raise ValueError("DANN replay event is missing checkpoint_path")
+        if not isinstance(payload.get("checkpoint_sha256"), str) or not payload.get("checkpoint_sha256"):
+            raise ValueError("DANN replay event is missing checkpoint_sha256")
+        batch_identity = payload.get("recovery_batch_identity")
+        if (
+            not isinstance(batch_identity, dict)
+            or not isinstance(batch_identity.get("physical_traversal_index"), int)
+            or not isinstance(batch_identity.get("logical_batch_id"), int)
+        ):
+            raise ValueError("DANN replay event is missing recovery batch identity")
+        replay_events.append(
+            {
+                "checkpoint_path": payload["checkpoint_path"],
+                "checkpoint_sha256": payload["checkpoint_sha256"],
+                "recovery_batch_identity": dict(batch_identity),
+            }
+        )
+    return {
+        "journal_path": str(journal_path),
+        "record_count": len(records),
+        "replay_count": len(replay_events),
+        "replay_events": replay_events,
+    }
+
+
 TASK_SPECIAL_TOKENS = ["<pos>", "<neg>", "<neu>", "<opinion>", "<aspect>"]
 CSA_AUGMENT_CHANNELS = {
     "aspect_channel",
@@ -1029,6 +1064,7 @@ class PairedDomainBatchSampler:
         self._pending_acks: list[tuple[int, int, bool]] = []
         self._resume_replay_batch_ids: list[tuple[int, int]] = []
         self._resume_reissue_batch_ids: list[tuple[int, int]] = []
+        self._resume_checkpoint_identity: dict | None = None
         self._journal_last_hash = ""
         self._journal_write_count = 0
         self._journal_bytes = 0
@@ -1161,6 +1197,34 @@ class PairedDomainBatchSampler:
             "resume_reissue_batch_ids": [list(item) for item in self._resume_reissue_batch_ids],
         }
 
+    def build_checkpoint_state(self, *, accumulation_remainder: int) -> dict:
+        """Build future-resume state without changing the live sampler."""
+        if not isinstance(accumulation_remainder, int) or accumulation_remainder < 0:
+            raise ValueError("DANN checkpoint accumulation remainder must be a non-negative integer")
+        state = self.state_dict()
+        state["resume_replay_batch_ids"] = []
+        state["resume_reissue_batch_ids"] = []
+        if not self.epoch_reports:
+            return state
+        report = self.epoch_reports[-1]
+        batches = report.get("batches", [])
+        processed_batches = report.get("processed_batches", 0)
+        issued_batches = report.get("issued_batches", 0)
+        if not isinstance(processed_batches, int) or not isinstance(issued_batches, int) or not 0 <= processed_batches <= issued_batches:
+            raise ValueError("DANN checkpoint cannot serialize invalid issued/processed accounting")
+        if accumulation_remainder > processed_batches:
+            raise ValueError("DANN checkpoint accumulation remainder exceeds processed batches")
+        if accumulation_remainder:
+            state["resume_replay_batch_ids"] = [
+                [report["physical_traversal_index"], batch["logical_batch_id"]]
+                for batch in batches[-accumulation_remainder:]
+            ]
+        state["resume_reissue_batch_ids"] = [
+            [report["physical_traversal_index"], batch["logical_batch_id"]]
+            for batch in batches[processed_batches:issued_batches]
+        ]
+        return state
+
     def load_state_dict(self, state: dict) -> None:
         if not isinstance(state, dict):
             raise ValueError("DANN sampler state must be a mapping")
@@ -1199,9 +1263,20 @@ class PairedDomainBatchSampler:
         if not isinstance(reissue_ids, list) or any(not isinstance(item, list) or len(item) != 2 or not all(isinstance(value, int) and value >= 0 for value in item) for item in reissue_ids):
             raise ValueError("DANN sampler state has invalid reissue batch identities")
         self._resume_reissue_batch_ids = [tuple(item) for item in reissue_ids]
-        # A state-only restore remains replayable for callers that do not load
-        # the audit.  Loading the audit below advances it to the next identity.
+        self._resume_checkpoint_identity = None
+        # Replay/reissue is enabled only after the complete checkpoint loader
+        # supplies the checkpoint path and hash.  A raw state-only restore is
+        # intentionally not sufficient to consume recovery batches.
         self._explicit_epoch = True
+
+    def set_resume_checkpoint_identity(self, checkpoint_dir: str | Path, checkpoint_sha256: str) -> None:
+        checkpoint_path = Path(checkpoint_dir).resolve()
+        if not checkpoint_path.is_dir() or not isinstance(checkpoint_sha256, str) or not checkpoint_sha256:
+            raise ValueError("DANN resume checkpoint identity is invalid")
+        self._resume_checkpoint_identity = {
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_sha256": checkpoint_sha256,
+        }
 
     def load_audit_report(self, report: dict) -> None:
         if not isinstance(report, dict) or report.get("schema_version") != self.AUDIT_SCHEMA_VERSION or report.get("audit_protocol") != self.AUDIT_PROTOCOL or not isinstance(report.get("epochs"), list):
@@ -1303,7 +1378,11 @@ class PairedDomainBatchSampler:
     def __iter__(self):
         if self._training_has_reached_max_steps():
             return
+        if self._resume_reissue_batch_ids and self._resume_checkpoint_identity is None:
+            raise RuntimeError("DANN reissue requires an explicit checkpoint load")
         if self._resume_replay_batch_ids:
+            if self._resume_checkpoint_identity is None:
+                raise RuntimeError("DANN replay requires an explicit checkpoint load")
             replay_ids = list(self._resume_replay_batch_ids)
             self._resume_replay_batch_ids.clear()
             for physical_index, batch_id in replay_ids:
@@ -1314,7 +1393,19 @@ class PairedDomainBatchSampler:
                     raise RuntimeError("DANN checkpoint replay identity mismatch")
                 batch = report["batches"][batch_id]
                 self._pending_acks.append((physical_index, batch_id, True))
-                self._append_journal_event("batch_replayed", {"physical_traversal_index": physical_index, "batch": batch})
+                self._append_journal_event(
+                    "batch_replayed",
+                    {
+                        "checkpoint_path": self._resume_checkpoint_identity["checkpoint_path"],
+                        "checkpoint_sha256": self._resume_checkpoint_identity["checkpoint_sha256"],
+                        "recovery_batch_identity": {
+                            "physical_traversal_index": physical_index,
+                            "logical_batch_id": batch_id,
+                        },
+                        "physical_traversal_index": physical_index,
+                        "batch": batch,
+                    },
+                )
                 yield batch["source_indices"] + batch["target_indices"]
                 if not self._acknowledgement_required:
                     self.acknowledge_next_batch()
@@ -1467,29 +1558,18 @@ class PairedDomainBatchSampler:
         )
         self._finalize_report_if_complete(report)
 
-    def prepare_resume_replay(self, gradient_accumulation_steps: int) -> None:
-        if not self.epoch_reports or self._training_state_provider is None:
-            self._resume_replay_batch_ids = []
-            self._resume_reissue_batch_ids = []
-            return
-        state = self._training_state()
-        global_step = state.get("global_step")
-        if not isinstance(global_step, int):
-            self._resume_replay_batch_ids = []
-            self._resume_reissue_batch_ids = []
-            return
-        report = self.epoch_reports[-1]
-        processed_batches = report.get("processed_batches", 0)
-        issued_batches = report.get("issued_batches", 0)
-        remainder = max(0, processed_batches - global_step * int(gradient_accumulation_steps))
-        self._resume_replay_batch_ids = [
-            (report["physical_traversal_index"], batch["logical_batch_id"])
-            for batch in report.get("batches", [])[-remainder:]
-        ]
-        self._resume_reissue_batch_ids = [
-            (report["physical_traversal_index"], batch["logical_batch_id"])
-            for batch in report.get("batches", [])[processed_batches:issued_batches]
-        ]
+    def prepare_resume_replay(
+        self,
+        gradient_accumulation_steps: int,
+        *,
+        accumulation_remainder: int | None = None,
+    ) -> dict:
+        """Return checkpoint-only replay state; never mutate the live sampler."""
+        if not isinstance(gradient_accumulation_steps, int) or gradient_accumulation_steps <= 0:
+            raise ValueError("DANN gradient accumulation steps must be positive")
+        if accumulation_remainder is None:
+            raise ValueError("DANN checkpoint replay requires the actual accumulation remainder")
+        return self.build_checkpoint_state(accumulation_remainder=accumulation_remainder)
 
     def audit_report(self) -> dict:
         training_state = self._training_state()
@@ -1649,6 +1729,7 @@ class _DANNGradientRestoreCallback(TrainerCallback):
             parameter.grad = None if gradient is None else gradient.to(device=parameter.device, dtype=parameter.dtype).clone()
         self.trainer._dann_resume_gradient_pending = bool(gradients)
         self.trainer._dann_resume_gradient_accumulation_steps = int(args.gradient_accumulation_steps)
+        self.trainer._dann_microbatches_since_optimizer_step = int(gradient_state.get("accumulation_remainder", 0))
         self.trainer.accelerator.step = int(gradient_state.get("accumulation_remainder", 0))
         self.trainer._pending_dann_gradient_state = None
         return control
@@ -1657,6 +1738,21 @@ class _DANNGradientRestoreCallback(TrainerCallback):
         if getattr(self.trainer, "_dann_resume_gradient_pending", False):
             self.trainer.args.gradient_accumulation_steps = self.trainer._dann_resume_gradient_accumulation_steps
             self.trainer._dann_resume_gradient_pending = False
+        return control
+
+
+class _DANNAccumulationCounterCallback(TrainerCallback):
+    """Reset the independent microbatch counter after a real optimizer step."""
+
+    def __init__(self, trainer):
+        self.trainer = trainer
+
+    def on_step_end(self, args, state, control, **kwargs):
+        restore_steps = getattr(self.trainer, "_dann_restore_gradient_accumulation_steps", None)
+        if restore_steps is not None:
+            args.gradient_accumulation_steps = int(restore_steps)
+            self.trainer._dann_restore_gradient_accumulation_steps = None
+        self.trainer._dann_microbatches_since_optimizer_step = 0
         return control
 
 
@@ -1712,6 +1808,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.sentiment_contrastive_temperature = sentiment_contrastive_temperature
         self.sentiment_contrastive_class_weights = sentiment_contrastive_class_weights
         self.dann_batch_sampler = dann_batch_sampler
+        self._dann_microbatches_since_optimizer_step = 0
         if self.dann_batch_sampler is not None:
             # Paired checkpoints are written only at epoch boundaries.  A
             # checkpoint restored at such a boundary must not trigger
@@ -1729,6 +1826,7 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             self.dann_batch_sampler.bind_sampling_epoch_provider(
                 lambda: int(self.state.epoch or 0)
             )
+            self.add_callback(_DANNAccumulationCounterCallback(self))
         self._component_sums: dict[str, float] = {}
         self._component_counts: dict[str, int] = {}
         self._component_reductions: dict[str, str] = {}
@@ -1759,7 +1857,40 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         return self.dann_batch_sampler.audit_report() if self.dann_batch_sampler is not None else None
 
     def training_step(self, model, inputs, *args, **kwargs):
+        force_tail_update = False
+        if self.dann_batch_sampler is not None:
+            accumulation_steps = int(self.args.gradient_accumulation_steps)
+            is_dataloader_tail = bool(
+                getattr(getattr(self.accelerator, "gradient_state", None), "end_of_dataloader", False)
+            )
+            if (
+                is_dataloader_tail
+                and (self._dann_microbatches_since_optimizer_step + 1) % accumulation_steps != 0
+            ):
+                # The Accelerate dataloader state is the authoritative signal
+                # for a non-divisible epoch tail.  Set the sync flag before
+                # backward and make the outer Trainer commit this real tail
+                # update; do not infer it from global_step or a physical-pass
+                # counter after the fact.
+                force_tail_update = True
+                self._dann_restore_gradient_accumulation_steps = accumulation_steps
+                self.accelerator.gradient_state._set_sync_gradients(True)
+                self.args.gradient_accumulation_steps = 1
         result = super().training_step(model, inputs, *args, **kwargs)
+        if self.dann_batch_sampler is not None:
+            self._dann_microbatches_since_optimizer_step += 1
+            accumulation_steps = int(self.args.gradient_accumulation_steps)
+            if (
+                not force_tail_update
+                and self.accelerator.sync_gradients
+                and self._dann_microbatches_since_optimizer_step % accumulation_steps != 0
+            ):
+                # Accelerate marks the final physical batch of a dataloader,
+                # including a non-divisible tail, as synchronized.  Tell the
+                # outer Trainer loop to commit that real tail update so an
+                # epoch checkpoint has no in-flight accumulation remainder.
+                self._dann_restore_gradient_accumulation_steps = accumulation_steps
+                self.args.gradient_accumulation_steps = 1
         if getattr(self, "_dann_resume_gradient_pending", False):
             # Trainer's local batch counter restarts at zero on resume, while
             # the restored gradient already represents the prior partial
@@ -1771,10 +1902,24 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
             self.dann_batch_sampler.acknowledge_next_batch()
         return result
 
+    def checkpoint_accumulation_remainder(self) -> int:
+        """Return the independently tracked in-flight microbatch count."""
+        if self.dann_batch_sampler is None:
+            return 0
+        remainder = getattr(self, "_dann_microbatches_since_optimizer_step", 0)
+        if not isinstance(remainder, int) or remainder < 0:
+            raise RuntimeError("DANN accumulation counter is invalid")
+        return remainder
+
     def load_dann_batch_sampler_state(self, checkpoint_dir: str | Path) -> None:
         if self.dann_batch_sampler is None:
             return
         checkpoint = _read_complete_dann_checkpoint(Path(checkpoint_dir), self.dann_batch_sampler)
+        checkpoint_state_path = Path(checkpoint["checkpoint_dir"]) / "dann_checkpoint_state.json"
+        self.dann_batch_sampler.set_resume_checkpoint_identity(
+            checkpoint["checkpoint_dir"],
+            _json_sha256(checkpoint_state_path),
+        )
         self._pending_dann_gradient_state = checkpoint["gradient_state"]
         self.add_callback(_DANNGradientRestoreCallback(self))
 
@@ -1783,14 +1928,13 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         if self.dann_batch_sampler is None or not self.args.should_save:
             return
         checkpoint_dir = Path(self._get_output_dir(trial=trial)) / f"checkpoint-{self.state.global_step}"
+        accumulation_remainder = self.checkpoint_accumulation_remainder()
+        save_strategy = getattr(self.args.save_strategy, "value", self.args.save_strategy)
+        if save_strategy == "epoch" and accumulation_remainder != 0:
+            raise RuntimeError("epoch checkpoint must have zero DANN accumulation remainder")
         gradient_state = {
             "schema_version": 1,
-            "accumulation_remainder": (
-                self.dann_batch_sampler.epoch_reports[-1].get("processed_batches", 0)
-                % int(self.args.gradient_accumulation_steps)
-                if self.dann_batch_sampler.epoch_reports
-                else 0
-            ),
+            "accumulation_remainder": accumulation_remainder,
             "gradients": {
                 name: parameter.grad.detach().cpu().clone()
                 for name, parameter in model.named_parameters()
@@ -1801,8 +1945,9 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         _atomic_torch_save(gradient_state_path, gradient_state)
         state_path = checkpoint_dir / "dann_batch_sampler_state.json"
         audit_path = checkpoint_dir / "dann_batch_audit.json"
-        self.dann_batch_sampler.prepare_resume_replay(self.args.gradient_accumulation_steps)
-        sampler_state = self.dann_batch_sampler.state_dict()
+        sampler_state = self.dann_batch_sampler.build_checkpoint_state(
+            accumulation_remainder=accumulation_remainder,
+        )
         audit = self.dann_batch_sampler.audit_report()
         self.dann_batch_sampler.flush_audit_snapshot()
         audit = self.dann_batch_sampler.audit_report()

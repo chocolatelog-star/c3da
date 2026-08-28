@@ -31,7 +31,11 @@ from t5_aste_data import (
     to_extract_rows,
 )
 from t5_aste_pipeline import DATASETS
-from t5_absa_train import compute_dann_expected_max_steps, compute_dann_planned_batches
+from t5_absa_train import (
+    compute_dann_expected_max_steps,
+    compute_dann_planned_batches,
+    read_dann_audit_journal,
+)
 
 
 TASK_ID = "M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1"
@@ -1052,6 +1056,8 @@ def _read_dann_batch_audit(
     expected_max_steps: int | None = None,
     expected_planned_batches: int | None = None,
     allow_legacy: bool = True,
+    require_journal: bool = False,
+    require_fresh_replay_free: bool = False,
 ) -> dict:
     path = Path(variant_dir)
     if path.is_dir():
@@ -1203,6 +1209,22 @@ def _read_dann_batch_audit(
                 raise RuntimeError(f"DANN batch audit contains a non-final or non-terminal partial traversal: {path}")
     elif any(item.get("completion") == "partial" for item in report["epochs"]):
         raise RuntimeError(f"DANN batch audit partial traversal is not formal evidence without Trainer state: {path}")
+    journal_path = path.with_suffix(".journal.jsonl")
+    journal_audit = None
+    if require_journal or journal_path.is_file():
+        if not journal_path.is_file():
+            raise RuntimeError(f"missing DANN audit journal: {journal_path}")
+        try:
+            journal_audit = read_dann_audit_journal(journal_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"invalid DANN audit journal: {journal_path}") from exc
+        if require_fresh_replay_free and journal_audit["replay_count"] != 0:
+            raise RuntimeError(f"fresh DANN run contains batch_replayed events: {journal_path}")
+    if journal_audit is not None:
+        report["journal_audit"] = journal_audit
+        report["replay_count"] = journal_audit["replay_count"]
+    elif require_fresh_replay_free:
+        raise RuntimeError(f"fresh DANN run has no auditable journal: {journal_path}")
     return report
 
 
@@ -1214,6 +1236,8 @@ def validate_external_control_dann_audit(
     expected_max_steps: int | None = None,
     expected_planned_batches: int | None = None,
     allow_legacy: bool = True,
+    require_journal: bool = False,
+    require_fresh_replay_free: bool = False,
 ) -> dict:
     path = Path(control_reuse_audit.get("dann_batch_audit_path", ""))
     expected_hash = control_reuse_audit.get("dann_batch_audit_sha256")
@@ -1234,6 +1258,8 @@ def validate_external_control_dann_audit(
         expected_max_steps=expected_max_steps,
         expected_planned_batches=expected_planned_batches,
         allow_legacy=allow_legacy,
+        require_journal=require_journal,
+        require_fresh_replay_free=require_fresh_replay_free,
     )
 
 
@@ -1251,6 +1277,8 @@ def _validate_control_treatment_dann_reports(
     expected_max_steps: int | None = None,
     expected_planned_batches: int | None = None,
     allow_legacy: bool = True,
+    require_journal: bool = False,
+    require_fresh_replay_free: bool = False,
 ) -> dict:
     treatment_path = variant_dirs["treatment"] / "dann_batch_audit.json"
     if expected_source_row_ids is None:
@@ -1276,6 +1304,8 @@ def _validate_control_treatment_dann_reports(
         expected_max_steps=expected_max_steps,
         expected_planned_batches=expected_planned_batches,
         allow_legacy=allow_legacy,
+        require_journal=require_journal,
+        require_fresh_replay_free=require_fresh_replay_free,
     )
     treatment_report = _read_dann_batch_audit(
         treatment_path,
@@ -1289,6 +1319,8 @@ def _validate_control_treatment_dann_reports(
         expected_max_steps=expected_max_steps,
         expected_planned_batches=expected_planned_batches,
         allow_legacy=allow_legacy,
+        require_journal=require_journal,
+        require_fresh_replay_free=require_fresh_replay_free,
     )
     comparable_fields = (
         "seed",
@@ -1846,6 +1878,8 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         expected_max_steps=expected_dann_max_steps,
         expected_planned_batches=expected_dann_planned_batches,
         allow_legacy=False,
+        require_journal=True,
+        require_fresh_replay_free=not args.resume,
     )
     gate_result = evaluate_phase_a_gates(metrics)
     decision = decide_phase_a(gate_result)

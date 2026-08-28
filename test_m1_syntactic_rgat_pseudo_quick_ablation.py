@@ -489,6 +489,9 @@ def test_dann_resume_reissues_issued_but_unprocessed_batch(tmp_path):
     restored.bind_training_state_provider(lambda: state)
     restored.load_state_dict(snapshot)
     restored.load_audit_report(report)
+    checkpoint_dir = tmp_path / "checkpoint-1"
+    checkpoint_dir.mkdir()
+    restored.set_resume_checkpoint_identity(checkpoint_dir, "checkpoint-hash")
     replayed = next(iter(restored))
     assert replayed == original_batch
     assert restored.audit_report()["epochs"][-1]["processed_batches"] == 0
@@ -1372,7 +1375,16 @@ class _NonDivisiblePairedDataset(Dataset):
         return self.items[index]
 
 
-def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_epoch=None, max_steps=2, paired_count=5, paired_batch_size=1):
+def _run_non_divisible_paired_trainer(
+    output_dir,
+    checkpoint=None,
+    stop_after_epoch=None,
+    max_steps=2,
+    paired_count=5,
+    paired_batch_size=1,
+    audit_path=None,
+    count_training_steps=False,
+):
     config = T5Config(
         vocab_size=32,
         d_model=8,
@@ -1391,7 +1403,14 @@ def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_ep
         model = T5ForConditionalGeneration(config)
     else:
         model = T5ForConditionalGeneration.from_pretrained(checkpoint)
-    sampler = PairedDomainBatchSampler(paired_count, paired_count, source_batch_size=paired_batch_size, target_batch_size=paired_batch_size, seed=1000)
+    sampler = PairedDomainBatchSampler(
+        paired_count,
+        paired_count,
+        source_batch_size=paired_batch_size,
+        target_batch_size=paired_batch_size,
+        seed=1000,
+        audit_path=audit_path,
+    )
     args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
         overwrite_output_dir=True,
@@ -1435,10 +1454,166 @@ def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_ep
         dann_batch_sampler=sampler,
         callbacks=callbacks,
     )
+    step_counter = {"count": 0}
+    if count_training_steps:
+        original_training_step = trainer.training_step
+
+        def counting_training_step(*args, **kwargs):
+            step_counter["count"] += 1
+            return original_training_step(*args, **kwargs)
+
+        trainer.training_step = counting_training_step
     if checkpoint is not None:
         trainer.load_dann_batch_sampler_state(checkpoint)
     trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint is not None else None)
+    if count_training_steps:
+        trainer.training_step_call_count = step_counter["count"]
     return trainer
+
+
+def test_fresh_nondivisible_three_epoch_training_has_zero_replay_and_expected_training_steps(tmp_path):
+    audit_path = tmp_path / "fresh" / "dann_batch_audit.json"
+    trainer = _run_non_divisible_paired_trainer(
+        tmp_path / "fresh",
+        max_steps=9,
+        paired_count=5,
+        audit_path=audit_path,
+        count_training_steps=True,
+    )
+    journal_path = audit_path.with_suffix(".journal.jsonl")
+    events = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    replay_events = [event for event in events if event["event"] == "batch_replayed"]
+    assert replay_events == []
+    assert trainer.training_step_call_count == 15
+    assert trainer.state.global_step == 9
+
+
+def test_phase_a_dann_gate_reads_journal_and_rejects_fresh_replay(tmp_path):
+    audit_path = tmp_path / "run" / "dann_batch_audit.json"
+    sampler = PairedDomainBatchSampler(1, 1, source_batch_size=1, target_batch_size=1, seed=1000, audit_path=audit_path)
+    list(sampler)
+    checkpoint_dir = tmp_path / "checkpoint-1"
+    checkpoint_dir.mkdir()
+    sampler.set_resume_checkpoint_identity(checkpoint_dir, "checkpoint-hash")
+    sampler._resume_replay_batch_ids = [(0, 0)]
+    iterator = iter(sampler)
+    next(iterator)
+    sampler.flush_audit_snapshot()
+    try:
+        _read_dann_batch_audit(
+            audit_path,
+            require_journal=True,
+            require_fresh_replay_free=True,
+        )
+    except RuntimeError as exc:
+        assert "fresh" in str(exc).lower()
+    else:
+        raise AssertionError("fresh Phase A DANN audit must reject journal replay events")
+
+
+def test_checkpoint_state_with_zero_remainder_is_empty_and_does_not_mutate_live_sampler():
+    sampler = PairedDomainBatchSampler(5, 5, source_batch_size=1, target_batch_size=1, seed=1000)
+    list(sampler)
+    live_before = sampler.state_dict()
+    audit_before = copy.deepcopy(sampler.audit_report())
+    checkpoint_state = sampler.build_checkpoint_state(accumulation_remainder=0)
+    assert checkpoint_state["resume_replay_batch_ids"] == []
+    assert checkpoint_state["resume_reissue_batch_ids"] == []
+    assert sampler.state_dict() == live_before
+    assert sampler.audit_report() == audit_before
+    assert sampler.state_dict()["resume_replay_batch_ids"] == []
+
+
+def test_checkpoint_replay_state_isolated_until_explicit_restore():
+    sampler = PairedDomainBatchSampler(5, 5, source_batch_size=1, target_batch_size=1, seed=1000)
+    list(sampler)
+    live_before = sampler.state_dict()
+    audit_before = copy.deepcopy(sampler.audit_report())
+    checkpoint_state = sampler.build_checkpoint_state(accumulation_remainder=2)
+    assert checkpoint_state["resume_replay_batch_ids"] == [[0, 3], [0, 4]]
+    assert sampler.state_dict() == live_before
+    assert sampler.audit_report() == audit_before
+
+    restored = PairedDomainBatchSampler(5, 5, source_batch_size=1, target_batch_size=1, seed=1000)
+    restored.load_state_dict(checkpoint_state)
+    assert restored.state_dict() == checkpoint_state
+
+
+def test_replay_and_reissue_require_explicit_checkpoint_identity():
+    sampler = PairedDomainBatchSampler(1, 1, source_batch_size=1, target_batch_size=1, seed=1000)
+    for field in ("resume_replay_batch_ids", "resume_reissue_batch_ids"):
+        state = sampler.state_dict()
+        state[field] = [[0, 0]]
+        restored = PairedDomainBatchSampler(1, 1, source_batch_size=1, target_batch_size=1, seed=1000)
+        restored.load_state_dict(state)
+        try:
+            next(iter(restored))
+        except RuntimeError as exc:
+            assert "explicit checkpoint" in str(exc)
+        else:
+            raise AssertionError(f"{field} must require explicit checkpoint identity")
+
+
+def test_checkpoint_remainder_uses_explicit_microbatch_counter_not_global_step():
+    model = T5ForConditionalGeneration(
+        T5Config(
+            vocab_size=16,
+            d_model=8,
+            d_kv=4,
+            d_ff=16,
+            num_layers=1,
+            num_decoder_layers=1,
+            num_heads=2,
+            dropout_rate=0.0,
+            pad_token_id=0,
+            eos_token_id=1,
+            decoder_start_token_id=0,
+        )
+    )
+    trainer = WeightedSeq2SeqTrainer(
+        model=model,
+        args=Seq2SeqTrainingArguments(
+            output_dir=tempfile.mkdtemp(),
+            per_device_train_batch_size=1,
+            no_cuda=True,
+            gradient_accumulation_steps=16,
+            report_to=[],
+        ),
+        dann_batch_sampler=PairedDomainBatchSampler(1, 1, source_batch_size=1, target_batch_size=1, seed=1000),
+    )
+    trainer.state.global_step = 999
+    trainer._dann_microbatches_since_optimizer_step = 0
+    assert trainer.checkpoint_accumulation_remainder() == 0
+    trainer._dann_microbatches_since_optimizer_step = 3
+    assert trainer.checkpoint_accumulation_remainder() == 3
+
+
+def test_906_16_25_boundary_has_no_fresh_replay_and_expected_terminal_traversal():
+    state = {"global_step": 0, "max_steps": 1400, "gradient_accumulation_steps": 16}
+    sampler = PairedDomainBatchSampler(906, 906, source_batch_size=1, target_batch_size=1, seed=1000)
+    sampler.bind_training_state_provider(lambda: state)
+    for epoch in range(25):
+        sampler.set_epoch(epoch)
+        microbatches = 0
+        for _batch in sampler:
+            sampler.acknowledge_next_batch()
+            microbatches += 1
+            is_full_update = microbatches % 16 == 0
+            is_tail_update = microbatches == 906
+            if is_full_update or is_tail_update:
+                state["global_step"] += 1
+            if state["global_step"] >= state["max_steps"]:
+                break
+    report = sampler.audit_report()
+    assert len(report["epochs"]) == 25
+    assert [item["sampling_epoch"] for item in report["epochs"]] == list(range(25))
+    assert [item["issued_batches"] for item in report["epochs"][:-1]] == [906] * 24
+    assert report["epochs"][-1]["issued_batches"] == 512
+    assert state["global_step"] == 1400
+    live_before = sampler.state_dict()
+    checkpoint_state = sampler.build_checkpoint_state(accumulation_remainder=0)
+    assert checkpoint_state["resume_replay_batch_ids"] == []
+    assert sampler.state_dict() == live_before
 
 
 def test_real_trainer_nondivisible_terminal_partial_is_formally_resumable(tmp_path):
@@ -1498,14 +1673,10 @@ def test_real_trainer_nondivisible_continuous_resume_matches_all_states_and_batc
 def test_corrupt_latest_dann_checkpoint_falls_back_to_previous_complete_checkpoint(tmp_path):
     trainer = _run_tiny_paired_trainer(tmp_path / "run", 2)
     latest = find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
-    assert latest.name == "checkpoint-2"
+    assert latest.name == "checkpoint-4"
     (latest / "dann_checkpoint_state.json").write_text("{}", encoding="utf-8")
-    try:
-        find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
-    except RuntimeError as exc:
-        assert "no complete" in str(exc).lower()
-    else:
-        raise AssertionError("corrupting the only identity-valid checkpoint must hard-fail")
+    fallback = find_latest_complete_dann_checkpoint(tmp_path / "run", trainer.dann_batch_sampler)
+    assert fallback.name == "checkpoint-2"
 
 
 def test_missing_custom_checkpoint_audit_cannot_be_resumed(tmp_path):
