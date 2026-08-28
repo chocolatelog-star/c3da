@@ -1456,16 +1456,35 @@ def test_real_trainer_nondivisible_terminal_partial_is_formally_resumable(tmp_pa
 
 
 def test_real_trainer_nondivisible_continuous_resume_matches_all_states_and_batches(tmp_path):
-    continuous = _run_non_divisible_paired_trainer(tmp_path / "continuous", max_steps=5, paired_count=7, paired_batch_size=2)
-    interrupted = _run_non_divisible_paired_trainer(tmp_path / "interrupted", max_steps=5, stop_after_epoch=0.5, paired_count=7, paired_batch_size=2)
+    # Formal boundary: five physical batches with accumulation two, so the
+    # planned traversal is deliberately non-divisible by the accumulation
+    # window and the terminal traversal is partial.
+    continuous = _run_non_divisible_paired_trainer(tmp_path / "continuous", max_steps=6, paired_count=5, paired_batch_size=1)
+    interrupted = _run_non_divisible_paired_trainer(tmp_path / "interrupted", max_steps=6, stop_after_epoch=1.5, paired_count=5, paired_batch_size=1)
     checkpoint = find_latest_complete_dann_checkpoint(
         tmp_path / "interrupted", interrupted.dann_batch_sampler
     )
     resumed = _run_non_divisible_paired_trainer(
-        tmp_path / "interrupted", checkpoint=checkpoint, max_steps=5, paired_count=7, paired_batch_size=2
+        tmp_path / "interrupted", checkpoint=checkpoint, max_steps=6, paired_count=5, paired_batch_size=1
     )
-    assert continuous.state.global_step == resumed.state.global_step == 5
-    assert continuous.get_dann_batch_audit() == resumed.get_dann_batch_audit()
+    continuous_audit = continuous.get_dann_batch_audit()
+    resumed_audit = resumed.get_dann_batch_audit()
+    assert continuous.dann_batch_sampler.epoch_reports[0]["planned_batches"] == 5
+    assert resumed.dann_batch_sampler.epoch_reports[0]["planned_batches"] == 5
+    assert continuous.args.gradient_accumulation_steps == resumed.args.gradient_accumulation_steps == 2
+    assert continuous.state.global_step == resumed.state.global_step == 6
+    continuous_processed = [
+        batch["logical_batch_id"]
+        for epoch in continuous_audit["epochs"]
+        for batch in epoch["batches"][:epoch["processed_batches"]]
+    ]
+    resumed_processed = [
+        batch["logical_batch_id"]
+        for epoch in resumed_audit["epochs"]
+        for batch in epoch["batches"][:epoch["processed_batches"]]
+    ]
+    assert continuous_processed == resumed_processed
+    assert continuous_audit == resumed_audit
     assert continuous.model.state_dict().keys() == resumed.model.state_dict().keys()
     assert all(torch.equal(continuous.model.state_dict()[name], resumed.model.state_dict()[name]) for name in continuous.model.state_dict())
     continuous_optimizer_buffer = io.BytesIO()
