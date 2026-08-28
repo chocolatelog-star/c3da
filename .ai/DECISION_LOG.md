@@ -1,6 +1,19 @@
 # 协作决策日志
 
-> 更新时间：2026-08-28 17:16（北京时间）
+> 更新时间：2026-08-28 20:40（北京时间）
+
+## 2026-08-28 20:40：完成 M1 显存归因诊断工具实现
+
+- 新增独立只读 `m1_vram_attribution_audit.py` 和 CPU 合成测试；诊断固定使用真实 T5-base/图缓存、source=1/target=1、FP16、梯度检查点和 DANN=0.03，但只在用户手动运行 GPU 命令后执行。
+- 记录模型加载、优化器、批次搬运、T5 编码器、词池化、节点/边投影、注意力、关系消息/聚合、图融合、解码、反向和清理后的显存与张量元数据，并比较三次 zero-update 的 Control/Treatment 峰值。
+- 未改变模型、图传播、损失、数据、配方、训练参数或实验范围；GPU 诊断、正式训练、正式伪标签、Phase B、最终 ASTE 和 target_test 均未运行。V4 仍为 `INCOMPLETE_VRAM_THRASHING`，不得恢复或用于实验结论。
+
+## 2026-08-28 20:17：批准 M1 显存归因专项诊断
+
+- 任务 `M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1` 已由用户批准，方向为 `laptop14 -> rest15`，父代码身份为 `8f165cf50ac30bcdee1a4173af54813087194f6c`。
+- V4 运行因 Treatment（实验组）显存压力/抖动在约 134/1400 处不完整，状态标记为 `INCOMPLETE_VRAM_THRASHING`；不得恢复、删除或用于任何实验结论。
+- 本轮只实现独立显存归因与入口审计：同一 source=1/target=1 批次、真实 T5-base、真实图缓存、FP16、梯度检查点和 DANN=0.03；记录 Control/Treatment 各调用点显存和张量信息，并执行至少三次 zero-update（零更新）诊断。
+- 只运行 CPU（中央处理器）测试和静态检查；不运行 GPU（图形处理器）诊断、完整训练、正式伪标签、Phase B、最终 ASTE 或 target_test，不实施优化方案，不改变模型、图传播、损失、配方、训练参数或研究范围。
 
 ## 2026-08-28 17:16：V4 修复 live replay 污染（等待最终复审）
 
