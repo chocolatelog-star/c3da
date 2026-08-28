@@ -1,10 +1,10 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-28（北京时间）
+> 更新时间：2026-08-28 17:16（北京时间）
 
 ## 当前工程修复状态
 
-`M1_SYNTACTIC_RGAT_DANN_AUDIT_RECOVERY_FIX_V3`（Phase A DANN 审计与恢复修复）当前为“修复实施范围已批准、验收与实验 BLOCKED（阻塞）”。不得把提交 `63fd1a6` 称为验收通过。修复只影响成对 DANN 的审计身份、原子落盘、检查点恢复、缓存预检和正式验证，不改变模型公式、图传播、损失、DANN=0.03、数据、优化器、调度器、训练参数或采样顺序。旧入口的采样顺序语义保持：`sampling_epoch=int(Trainer.state.epoch)` 仍只用于 `seed+sampling_epoch` 洗牌，独立的 `physical_traversal_index` 不参与洗牌。
+当前工程状态为：M1 Phase A 的 v3 运行已确认被 live sampler（运行中采样器）重放污染，状态标记为 `INVALID_REPLAY_CONTAMINATED`，不得恢复或用于任何实验结论。当前任务 `M1_PHASE_A_LIVE_REPLAY_CONTAMINATION_FIX_V4` 已批准，正在等待 Codex Sol（高级工程模型）最终只读复审；代码修复只影响成对 DANN 的检查点重放与审计，不改变模型公式、图传播、损失、DANN=0.03、数据、优化器、调度器、训练参数或研究范围。
 
 - `PairedDomainBatchSampler`（成对领域批次采样器）现在独立记录物理 DataLoader（数据加载器）遍历序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数、完整/部分遍历和 Trainer（训练器）global step（全局步数）身份；物理序号不参与洗牌。
 - 审计协议升级为 schema 3（模式3）：每批只追加带完整行校验和哈希链的 journal（日志），遍历边界、检查点和正常结束时才原子压缩快照；崩溃后可从完整日志行恢复，且不会把 issued 冒充 processed。
@@ -12,6 +12,7 @@
 - Phase A 验证器不再固定要求 `len(epochs)==num_train_epochs`；独立依据冻结配方和实际成对 DataLoader 长度计算 max_steps，并严格校验每次遍历的 optimizer step 区间、单调性、边界连续性、最终 global step 和 Control/Treatment（对照组/处理组）逐批对齐。
 - 旧运行只能通过显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）写入 `legacy_diagnostic_migration.json`（旧版迁移报告）；该路径保留旧提交和产物哈希、拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
 - TDD（测试驱动开发）新增边界覆盖重复采样轮次、906/16/25→1400 采样哈希、追加日志规模、落盘后未确认崩溃、恢复重放、步区间、终止部分遍历、Control/Treatment 对齐和 legacy 不得正式 PASS（通过）。M1 六个测试文件共97项通过；完整项目回归以最终命令输出为准。
+- V4 修复新增独立实际微批计数器；检查点状态由 `build_checkpoint_state` 复制构造，不写入 live sampler；`remainder=0` 不产生 replay/reissue（重放/重签）列表，fresh run 的 journal replay_count 必须为 0。
 
 ### V3 复审修复边界
 
@@ -22,7 +23,7 @@
 
 ## 当前任务状态
 
-`M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1`（laptop14 -> rest15）当前为 `APPROVED`（已批准），固定种子为 1000，入口前置 zero-update 审计为 15/15 PASS（通过），父代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`。本轮只实现 Phase A（上游阶段）快速消融入口；实际 GPU（图形处理器）运行、正式训练、正式伪标签实验和目标测试读取尚未执行，Phase B（下游阶段）仍未批准。
+`M1_PHASE_A_LIVE_REPLAY_CONTAMINATION_FIX_V4`（laptop14 -> rest15）当前为 `APPROVED`（已批准），固定种子为 1000，父代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`。本轮只修复 Phase A（上游阶段）成对 DANN 的 live/checkpoint 状态隔离、非整除尾部更新、fresh replay 审计和恢复门控；GPU（图形处理器）运行、正式训练、正式伪标签实验和目标测试读取尚未执行，Phase B（下游阶段）仍未批准。
 
 ## 当前 Phase A 实现状态
 
@@ -31,6 +32,13 @@
 - 当前只完成 CPU（中央处理器）/静态实现验证，未运行 Phase A 实验，因此不能写成 Phase A 或 M1 已通过；正式实验索引暂不更新，等待用户实际运行结果。
 - 本轮最终整体验收修复已完成：成对 DANN 生成损失按有效源域权重归一化；Control/Treatment 初始化隔离并输出 `phase_a_initialization_audit.json`；完整检查点原子保存采样器状态、已完成轮次审计和身份清单；恢复校验支持损坏点安全回退；配方、真实输入、T5 文件、DANN 审计和 A4 零分母均硬校验。
 - 本轮修复不改变句法图传播公式、图结构、DANN=0.03、Gate、伪标签规则、Phase B 或最终 ASTE（方面级情感三元组抽取）研究范围。
+- v3 污染运行仅保留作无效审计现场，不得恢复、不得进入正式父运行；v4 必须使用全新目录，正式运行前等待 Codex Sol 复审和用户明确启动。
+
+## V4 修复验证状态
+
+- RED（失败先行）：已复现 `[-0:]` 在余数为零时重放完整历史，以及保存检查点修改 live sampler 的污染路径；新增余数、隔离和 906/16/25 边界测试在修复前失败。
+- GREEN（修复后）：M1 相关 CPU 回归共 `141 passed, 0 failed`，包括 fresh 三轮非整除训练的 `replay_count=0`、检查点隔离、显式恢复、损坏检查点回退和边界采样验证。
+- 本轮未启动 GPU、正式训练、伪标签、生成器、增强、Phase B、最终 ASTE 或 target_test（目标测试集）；正式实验索引暂不更新。
 
 ## 当前任务边界
 
