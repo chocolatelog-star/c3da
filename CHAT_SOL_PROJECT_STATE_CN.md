@@ -4,14 +4,14 @@
 
 ## 当前工程修复状态
 
-`M1_DANN_AUDIT_RESUME_FIX_V1`（Phase A DANN 审计与恢复修复）已按批准范围完成代码实现和 CPU（中央处理器）验证，状态为 `APPROVED`（已批准实施，未批准运行实验）。修复只影响成对 DANN 的审计身份、原子落盘、检查点恢复和正式验证，不改变模型公式、图传播、损失、DANN=0.03、数据、采样顺序、优化器、调度器或训练参数。
+`M1_SYNTACTIC_RGAT_DANN_AUDIT_RECOVERY_FIX_V3`（Phase A DANN 审计与恢复修复）当前为修复实施已批准、验收与实验 `BLOCKED`（阻塞）；不得把 `63fd1a6` 称为验收通过。终止边界阻止多签发，complete 强制 issued=processed=planned，恢复重签 issued-but-unprocessed（已签发未处理）批次并保存梯度累积快照；入口启动前预检 manifest、relation vocabulary 和三个 split 文件身份。既有采样顺序保持，未运行 GPU、正式实验、伪标签或 target_test。
 
-- `PairedDomainBatchSampler`（成对领域批次采样器）现在独立记录物理 DataLoader（数据加载器）遍历序号、采样轮次、计划/消费批次数、完整/部分遍历和 Trainer（训练器）global step（全局步数）身份；不再使用浮点 `state.epoch`（轮次状态）取整。
-- 每个实际产生的成对批次和遍历边界均通过原子 JSON（结构化）写入；最后一个批次在训练器立即停止时也能标记完整，未耗尽的遍历保留为部分报告，不依赖生成器尾部清理。
-- 成对检查点只接受 schema 2（模式2）物理遍历审计、完整且哈希一致的模型/训练器/采样器/报告；恢复时拒绝部分报告、旧 schema、身份倒退和额外数据跳过遍历。
+- `PairedDomainBatchSampler`（成对领域批次采样器）独立记录 physical traversal（物理遍历）序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数；physical ID 不参与洗牌。
+- 每批追加式 journal（日志）避免 O(N²) 全量快照；终止边界在签发前检查 Trainer 状态，`complete` 强制 issued=processed=planned。
+- 成对检查点保存并哈希校验梯度累积快照/偏移、采样器状态和审计；issued-but-unprocessed 批次从 processed 位置重签，无法证明安全的旧点硬拒绝。
 - Phase A 验证器不再固定要求 `len(epochs)==num_train_epochs`；正式证据依据实际 `max_steps`（最大步数）、global step、遍历完成度和 Control/Treatment（对照组/处理组）逐批对齐。末尾部分遍历只有在 Trainer 已到达 max_steps 时才可作为终止证据。
-- 旧运行只能通过显式 `legacy_diagnostic_resume`（旧版诊断续跑）写入 `legacy_diagnostic_migration.json`（旧版迁移报告）；该路径保留旧提交和产物哈希、拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
-- TDD（测试驱动开发）新增边界覆盖重复轮次、部分遍历持久化、恢复单调性、Control/Treatment 对齐、终止部分遍历和 legacy 不得正式 PASS（通过）。相关 M1 CPU 测试69项、全项目顶层 CPU 测试244项均已通过，详见本轮决策日志。
+- 旧运行只能通过显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）写入迁移报告；拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
+- V3 六个 M1 测试文件 CPU 回归为 `103 passed`；未运行 GPU、正式实验、伪标签或 target_test，当前验收仍 BLOCKED。
 
 ## 当前任务状态
 
