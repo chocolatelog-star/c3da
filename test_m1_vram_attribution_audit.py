@@ -13,7 +13,10 @@ from m1_vram_attribution_audit import (
     TRACE_TO_CALLPOINT,
     analyze_memory_attribution,
     audit_python_container_tensors,
+    build_v2_report_gates,
     count_autograd_nodes,
+    materialize_adamw_state_for_audit,
+    record_lifecycle_event,
     run_zero_update_optimizer_step,
 )
 
@@ -199,3 +202,150 @@ def test_control_model_call_does_not_receive_graph_trace_keyword():
     assert 'model_kwargs["graph_trace"] = graph_trace' in source
     assert "if graph_enabled:" in source
     assert "graph_trace=graph_trace" not in source
+
+
+def test_batch_counts_use_real_project_collator_graph_fields():
+    from t5_absa_train import DataCollatorForSeq2SeqWithPairing
+
+    class BaseCollator:
+        def __call__(self, features):
+            return {
+                "input_ids": torch.tensor([[1, 2], [3, 4]]),
+                "attention_mask": torch.ones((2, 2), dtype=torch.long),
+                "labels": torch.tensor([[1, 2], [-100, -100]]),
+                "sample_weight": torch.tensor([1.0, 0.0]),
+                "domain_weight": torch.tensor([1.0, 0.0]),
+                "domain_label": torch.tensor([0, 1]),
+            }
+
+    def feature(offset):
+        return {
+            "input_ids": [offset + 1, offset + 2],
+            "labels": [1, 2] if offset == 0 else [-100, -100],
+            "sample_weight": 1.0 if offset == 0 else 0.0,
+            "domain_weight": 1.0 if offset == 0 else 0.0,
+            "domain_label": offset,
+            "word_to_subword": [[0]] * 27,
+            "word_mask": [True] * 27,
+            "edge_src": [0] * 131,
+            "edge_dst": [0] * 131,
+            "relation_id": [0] * 131,
+            "dependency_relation_id": [0] * 131,
+            "pos_pair_id": [0] * 131,
+            "edge_mask": [True] * 131,
+        }
+
+    batch = DataCollatorForSeq2SeqWithPairing(BaseCollator())([feature(0), feature(1)])
+    counts = audit._batch_counts(batch)
+    assert tuple(batch["graph_word_mask"].shape) == (2, 27)
+    assert tuple(batch["graph_edge_mask"].shape) == (2, 131)
+    assert counts["nodes"] == 27
+    assert counts["edges"] == 131
+
+
+def test_v2_report_gate_blocks_zero_graph_counts_and_requires_trace_match():
+    blocked = build_v2_report_gates(
+        control_result={"graph_stage_count": 0, "parameter_hashes_match": True, "optimizer_updates": 0, "scheduler_steps": 0, "parameter_updates": 0},
+        treatment_result={"graph_stage_count": 0, "parameter_hashes_match": True, "optimizer_updates": 0, "scheduler_steps": 0, "parameter_updates": 0, "graph_counts_match_trace": True},
+        batch_counts={"nodes": 0, "edges": 0},
+        target_test_access=False,
+    )
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["gates"]["treatment_graph_counts_positive"] is False
+
+    passed = build_v2_report_gates(
+        control_result={"graph_stage_count": 0, "parameter_hashes_match": True, "optimizer_updates": 0, "scheduler_steps": 0, "parameter_updates": 0},
+        treatment_result={"graph_stage_count": 1, "parameter_hashes_match": True, "optimizer_updates": 0, "scheduler_steps": 0, "parameter_updates": 0, "graph_counts_match_trace": True},
+        batch_counts={"nodes": 27, "edges": 131},
+        target_test_access=False,
+    )
+    assert passed["status"] == "PASS"
+    assert all(passed["gates"].values())
+
+
+def test_materialize_adamw_state_for_audit_does_not_change_formal_model():
+    model = torch.nn.Linear(3, 2)
+    before = audit._parameter_state_sha256(model)
+    result = materialize_adamw_state_for_audit(
+        model,
+        device=torch.device("cpu"),
+        learning_rate=0.001,
+    )
+    assert result["optimizer_state_bytes"] > 0
+    assert result["formal_model_hash_before"] == before
+    assert result["formal_model_hash_after"] == before
+    assert result["formal_model_unchanged"] is True
+
+
+def test_lifecycle_event_records_live_cuda_and_control_reachability_fields():
+    backend = SyntheticMemoryBackend(
+        allocated=[10], reserved=[20], peak_allocated=[10], peak_reserved=[20]
+    )
+    recorder = MemoryRecorder(backend, device=torch.device("cpu"))
+    model = torch.nn.Linear(2, 2)
+    event = record_lifecycle_event(
+        recorder,
+        "control_model_loaded",
+        model=model,
+        trainer=None,
+        optimizer=None,
+    )
+    assert isinstance(event["lifecycle"]["live_cuda_tensor_count"], int)
+    assert event["lifecycle"]["live_cuda_tensor_count"] >= 0
+    assert event["lifecycle"]["control_model_reachable"] is True
+    assert event["lifecycle"]["control_trainer_reachable"] is False
+    assert "live_cuda_tensor_bytes" in event["lifecycle"]
+
+
+def test_trace_shape_counts_match_fixed_real_graph_batch():
+    events = [
+        {
+            "trace_stage": "pooled_word_hidden",
+            "tensor": {"shape": [2, 27, 768]},
+        },
+        {
+            "trace_stage": "edge_query",
+            "tensor": {"shape": [2, 131, 4, 64]},
+        },
+    ]
+    counts = audit._trace_shape_counts(events)
+    assert counts["observed"] is True
+    assert counts["consistent"] is True
+    assert counts["nodes"] == 27
+    assert counts["edges"] == 131
+
+
+def test_v2_report_gate_blocks_trace_shape_mismatch_even_with_positive_batch_counts():
+    result = build_v2_report_gates(
+        control_result={"graph_stage_count": 0, "parameter_hashes_all_match": True, "optimizer_updates": 0, "scheduler_steps": 0, "parameter_updates": 0},
+        treatment_result={"graph_stage_count": 1, "parameter_hashes_all_match": True, "optimizer_updates": 0, "scheduler_steps": 0, "parameter_updates": 0, "graph_counts_match_trace": False},
+        batch_counts={"nodes": 27, "edges": 131},
+        target_test_access=False,
+    )
+    assert result["status"] == "BLOCKED"
+    assert result["gates"]["batch_counts_match_trace"] is False
+
+
+def test_lifecycle_pre_registered_rule_classifies_control_cleanup_drop():
+    events = [
+        {
+            "callpoint": "control_diagnostic_end_before_locals_exit",
+            "memory": {"allocated_bytes": 2 * 1024**3, "reserved_bytes": 2 * 1024**3},
+        },
+        {
+            "callpoint": "cuda_empty_cache_after",
+            "memory": {"allocated_bytes": 0, "reserved_bytes": 0},
+            "lifecycle": {
+                "control_model_reachable": False,
+                "control_optimizer_reachable": False,
+                "control_trainer_reachable": False,
+            },
+        },
+    ]
+    result = audit.classify_lifecycle_attribution(
+        events,
+        isolated_treatment_steady_allocated_bytes=100,
+        total_memory_bytes=8 * 1024**3,
+    )
+    assert result["classification"] == "CONTROL_LIFECYCLE_RETENTION_IDENTIFIED"
+    assert result["control_cleanup_allocated_drop_bytes"] > 1024**3

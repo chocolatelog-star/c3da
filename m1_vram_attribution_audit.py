@@ -1,4 +1,4 @@
-"""M1 read-only VRAM attribution diagnostic.
+"""M1 V2 read-only VRAM attribution diagnostic.
 
 The GPU entry is intentionally isolated from training.  It loads one fixed
 source/target pair from an existing V4 input/cache directory, records memory
@@ -11,12 +11,14 @@ changed or read.
 from __future__ import annotations
 
 import argparse
+import copy
 import gc
 import hashlib
 import json
 import os
 import subprocess
 import time
+import weakref
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -24,8 +26,8 @@ from typing import Any
 import torch
 
 
-DIAGNOSTIC_ID = "M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1"
-SCHEMA_VERSION = 1
+DIAGNOSTIC_ID = "M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2"
+SCHEMA_VERSION = 2
 DEFAULT_SOURCE_ROW_ID = "408"
 DEFAULT_TARGET_ROW_ID = "456"
 DEFAULT_STEPS = 3
@@ -292,6 +294,138 @@ class MemoryRecorder:
         }
         self.events.append(event)
         return event
+
+
+def _live_cuda_tensor_audit() -> dict[str, Any]:
+    """Count CUDA tensors still owned by tracked Python objects at a callpoint."""
+    count = 0
+    total_bytes = 0
+    samples: list[dict[str, Any]] = []
+    for obj in gc.get_objects():
+        try:
+            if not torch.is_tensor(obj) or obj.device.type != "cuda":
+                continue
+            count += 1
+            bytes_used = int(obj.numel() * obj.element_size())
+            total_bytes += bytes_used
+            if len(samples) < 20:
+                samples.append(
+                    {
+                        "shape": [int(size) for size in obj.shape],
+                        "dtype": str(obj.dtype),
+                        "bytes": bytes_used,
+                    }
+                )
+        except (ReferenceError, RuntimeError, AttributeError):
+            continue
+    return {"live_cuda_tensor_count": count, "live_cuda_tensor_bytes": total_bytes, "samples": samples}
+
+
+def _reachable_from_gc(obj: Any, reference: weakref.ReferenceType | None = None) -> tuple[bool, int]:
+    if obj is not None:
+        try:
+            return True, len(gc.get_referrers(obj))
+        except (ReferenceError, RuntimeError):
+            return True, 0
+    if reference is None:
+        return False, 0
+    target = reference()
+    if target is None:
+        return False, 0
+    try:
+        return True, len(gc.get_referrers(target))
+    except (ReferenceError, RuntimeError):
+        return True, 0
+
+
+def record_lifecycle_event(
+    recorder: MemoryRecorder,
+    callpoint: str,
+    *,
+    model: torch.nn.Module | None = None,
+    trainer: Any = None,
+    optimizer: torch.optim.Optimizer | None = None,
+    control_model_ref: weakref.ReferenceType | None = None,
+    control_optimizer_ref: weakref.ReferenceType | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict:
+    """Record allocator state and object reachability without retaining model objects."""
+    model_reachable, model_referrers = _reachable_from_gc(model, control_model_ref)
+    trainer_reachable, trainer_referrers = _reachable_from_gc(trainer)
+    optimizer_reachable, optimizer_referrers = _reachable_from_gc(optimizer, control_optimizer_ref)
+    lifecycle = {
+        **_live_cuda_tensor_audit(),
+        "control_model_reachable": model_reachable,
+        "control_model_gc_referrer_count": int(model_referrers),
+        "control_trainer_reachable": trainer_reachable,
+        "control_trainer_gc_referrer_count": int(trainer_referrers),
+        "control_optimizer_reachable": optimizer_reachable,
+        "control_optimizer_gc_referrer_count": int(optimizer_referrers),
+    }
+    event = recorder.mark(callpoint, extra=extra)
+    event["lifecycle"] = lifecycle
+    return event
+
+
+def materialize_adamw_state_for_audit(
+    model: torch.nn.Module,
+    *,
+    device: torch.device,
+    learning_rate: float,
+    recorder: MemoryRecorder | None = None,
+    stage_name: str | None = None,
+) -> dict[str, Any]:
+    """Build AdamW state on a disposable model copy and prove the formal model is unchanged."""
+    formal_before = _parameter_state_sha256(model)
+    temporary_model = copy.deepcopy(model)
+    temporary_model.to(device)
+    temporary_optimizer = torch.optim.AdamW(temporary_model.parameters(), lr=float(learning_rate))
+    for parameter in temporary_model.parameters():
+        if parameter.requires_grad:
+            parameter.grad = torch.zeros_like(parameter)
+    if recorder is not None and stage_name:
+        record_lifecycle_event(
+            recorder,
+            f"{stage_name}_gradients_created",
+            model=temporary_model,
+            optimizer=temporary_optimizer,
+            extra={"temporary_model": True, "gradient_bytes": _sum_gradient_bytes(temporary_model)},
+        )
+    temporary_optimizer.step()
+    state_bytes = _sum_optimizer_state_bytes(temporary_optimizer)
+    result = {
+        "optimizer": "AdamW",
+        "optimizer_state_bytes": int(state_bytes),
+        "parameter_bytes": _sum_parameter_bytes(temporary_model),
+        "gradient_bytes": _sum_gradient_bytes(temporary_model),
+        "formal_model_hash_before": formal_before,
+        "formal_model_hash_after": _parameter_state_sha256(model),
+        "formal_model_unchanged": formal_before == _parameter_state_sha256(model),
+        "temporary_model_discarded": False,
+    }
+    if recorder is not None and stage_name:
+        record_lifecycle_event(
+            recorder,
+            stage_name,
+            model=temporary_model,
+            optimizer=temporary_optimizer,
+            extra={
+                "temporary_model": True,
+                "optimizer_state_bytes": int(state_bytes),
+                "gradient_bytes": result["gradient_bytes"],
+            },
+        )
+    del temporary_optimizer, temporary_model
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    result["temporary_model_discarded"] = True
+    result["formal_model_hash_after_discard"] = _parameter_state_sha256(model)
+    result["formal_model_unchanged"] = bool(
+        result["formal_model_unchanged"]
+        and result["formal_model_hash_after_discard"] == formal_before
+    )
+    return result
 
 
 class MemoryTrace:
@@ -613,11 +747,130 @@ def _cache_identity(cache_dir: Path) -> dict:
 
 
 def _batch_counts(batch: dict) -> dict[str, int]:
-    def count(key: str) -> int:
+    def token_count(key: str) -> int:
         value = batch.get(key)
         return int(value.sum().item()) if torch.is_tensor(value) else 0
 
-    return {"tokens": count("attention_mask"), "nodes": count("word_mask"), "edges": count("edge_mask")}
+    def graph_width(key: str) -> int:
+        value = batch.get(key)
+        if not torch.is_tensor(value):
+            return 0
+        if value.ndim < 2:
+            return int(value.sum().item())
+        return int(value.shape[1])
+
+    return {
+        "tokens": token_count("attention_mask"),
+        "nodes": graph_width("graph_word_mask"),
+        "edges": graph_width("graph_edge_mask"),
+    }
+
+
+def _trace_shape_counts(events: list[dict]) -> dict[str, Any]:
+    node_shapes: list[list[int]] = []
+    edge_shapes: list[list[int]] = []
+    for event in events:
+        stage = str(event.get("trace_stage", ""))
+        shape = (event.get("tensor") or {}).get("shape")
+        if not isinstance(shape, list):
+            continue
+        if stage == "pooled_word_hidden" and len(shape) >= 2:
+            node_shapes.append([int(size) for size in shape])
+        if stage in {"edge_query", "edge_key", "edge_value", "final_attention_logits", "attention_probabilities"} and len(shape) >= 2:
+            edge_shapes.append([int(size) for size in shape])
+    unique_nodes = {tuple(shape) for shape in node_shapes}
+    unique_edges = {tuple(shape) for shape in edge_shapes}
+    node_widths = {shape[1] for shape in unique_nodes if len(shape) >= 2}
+    edge_widths = {shape[1] for shape in unique_edges if len(shape) >= 2}
+    return {
+        "observed": bool(node_shapes and edge_shapes),
+        "nodes": next(iter(node_widths)) if len(node_widths) == 1 else None,
+        "edges": next(iter(edge_widths)) if len(edge_widths) == 1 else None,
+        "node_shapes": [list(shape) for shape in sorted(unique_nodes)],
+        "edge_shapes": [list(shape) for shape in sorted(unique_edges)],
+        "consistent": len(node_widths) <= 1 and len(edge_widths) <= 1,
+    }
+
+
+def build_v2_report_gates(
+    *,
+    control_result: dict,
+    treatment_result: dict,
+    batch_counts: dict[str, int],
+    target_test_access: bool,
+) -> dict[str, Any]:
+    """Build the non-negotiable V2 validity gates from measured evidence."""
+    def hashes_unchanged(result: dict) -> bool:
+        return bool(
+            result.get(
+                "parameter_hashes_all_match",
+                result.get("parameter_hashes_match", False),
+            )
+        )
+
+    gates = {
+        "control_no_graph_path": int(control_result.get("graph_stage_count", 0)) == 0,
+        "treatment_graph_counts_positive": int(batch_counts.get("nodes", 0)) > 0 and int(batch_counts.get("edges", 0)) > 0,
+        "batch_counts_match_trace": bool(treatment_result.get("graph_counts_match_trace", False)),
+        "three_step_parameter_hashes_unchanged": hashes_unchanged(control_result) and hashes_unchanged(treatment_result),
+        "optimizer_updates_zero": int(control_result.get("optimizer_updates", 0)) == 0 and int(treatment_result.get("optimizer_updates", 0)) == 0,
+        "scheduler_steps_zero": int(control_result.get("scheduler_steps", 0)) == 0 and int(treatment_result.get("scheduler_steps", 0)) == 0,
+        "parameter_updates_zero": int(control_result.get("parameter_updates", 0)) == 0 and int(treatment_result.get("parameter_updates", 0)) == 0,
+        "target_test_access_false": target_test_access is False,
+    }
+    return {
+        "status": "PASS" if all(gates.values()) else "BLOCKED",
+        "gates": gates,
+        "failed_gates": [name for name, passed in gates.items() if not passed],
+    }
+
+
+def classify_lifecycle_attribution(
+    lifecycle_events: list[dict],
+    *,
+    isolated_treatment_steady_allocated_bytes: int,
+    total_memory_bytes: int | None,
+    threshold_bytes: int = 1 * 1024 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Apply the pre-registered lifecycle/isolated-treatment decision rule."""
+    by_name = {str(event.get("callpoint")): event for event in lifecycle_events}
+    before = by_name.get("control_diagnostic_end_before_locals_exit", {})
+    after = by_name.get("cuda_empty_cache_after", {})
+    before_memory = before.get("memory", {})
+    after_memory = after.get("memory", {})
+    allocated_drop = max(0, int(before_memory.get("allocated_bytes", 0) or 0) - int(after_memory.get("allocated_bytes", 0) or 0))
+    reserved_drop = max(0, int(before_memory.get("reserved_bytes", 0) or 0) - int(after_memory.get("reserved_bytes", 0) or 0))
+    after_lifecycle = after.get("lifecycle", {})
+    control_refs_remain = bool(
+        after_lifecycle.get("control_model_reachable", False)
+        or after_lifecycle.get("control_optimizer_reachable", False)
+        or after_lifecycle.get("control_trainer_reachable", False)
+    )
+    control_retention = bool(
+        allocated_drop > int(threshold_bytes)
+        or reserved_drop > int(threshold_bytes)
+        or control_refs_remain
+    )
+    treatment_near_capacity = bool(
+        total_memory_bytes
+        and isolated_treatment_steady_allocated_bytes >= int(float(total_memory_bytes) * 0.90)
+    )
+    if control_retention:
+        classification = "CONTROL_LIFECYCLE_RETENTION_IDENTIFIED"
+    elif treatment_near_capacity:
+        classification = "TREATMENT_INTRINSIC_VRAM_LIMIT"
+    else:
+        classification = "VRAM_CAUSE_UNRESOLVED"
+    return {
+        "classification": classification,
+        "control_cleanup_allocated_drop_bytes": allocated_drop,
+        "control_cleanup_reserved_drop_bytes": reserved_drop,
+        "control_cuda_references_remain": control_refs_remain,
+        "isolated_treatment_steady_allocated_bytes": int(isolated_treatment_steady_allocated_bytes),
+        "treatment_near_capacity_threshold_ratio": 0.90,
+        "treatment_near_capacity": treatment_near_capacity,
+        "pre_registered_threshold_bytes": int(threshold_bytes),
+    }
 
 
 def _move_batch(batch: dict, device: torch.device) -> dict:
@@ -673,16 +926,23 @@ def _run_variant_steps(
     device: torch.device,
     variant: str,
 ) -> dict:
+    batch_counts = _batch_counts(batch)
+    if graph_enabled and (batch_counts["nodes"] <= 0 or batch_counts["edges"] <= 0):
+        raise RuntimeError(
+            "graph-enabled diagnostic batch has no graph structure: "
+            f"nodes={batch_counts['nodes']} edges={batch_counts['edges']}"
+        )
     current_loss: list[torch.Tensor | None] = [None]
     recorder = MemoryRecorder(
         TorchCudaMemoryBackend(),
         device=device,
-        batch_counts=_batch_counts(batch),
+        batch_counts=batch_counts,
         runtime_provider=lambda: _runtime_provider(model, optimizer, current_loss),
     )
     step_ref = [0]
     handles = _attach_hooks(model, recorder, step_ref)
     model_hash_before = _parameter_state_sha256(model)
+    parameter_hashes_by_step = [model_hash_before]
     recorder.mark("model_loaded", step=0, extra={"variant": variant})
     recorder.mark(
         "optimizer_created",
@@ -736,6 +996,7 @@ def _run_variant_steps(
             )
             optimizer_result = run_zero_update_optimizer_step(model, optimizer)
             recorder.mark("optimizer_step", step=step, extra=optimizer_result)
+            parameter_hashes_by_step.append(_parameter_state_sha256(model))
             current_loss[0] = None
             del output, domain_loss, total_loss, graph_trace
             gc.collect()
@@ -749,6 +1010,14 @@ def _run_variant_steps(
         for handle in handles:
             handle.remove()
         model.zero_grad(set_to_none=True)
+    trace_counts = _trace_shape_counts(recorder.events)
+    graph_counts_match_trace = (
+        not graph_enabled
+        or bool(trace_counts["observed"])
+        and bool(trace_counts["consistent"])
+        and int(trace_counts.get("nodes") or 0) == int(batch_counts["nodes"])
+        and int(trace_counts.get("edges") or 0) == int(batch_counts["edges"])
+    )
     return {
         "variant": variant,
         "graph_enabled": bool(graph_enabled),
@@ -756,10 +1025,17 @@ def _run_variant_steps(
         "parameter_hash_before": model_hash_before,
         "parameter_hash_after": model_hash_after,
         "parameter_hashes_match": model_hash_before == model_hash_after,
+        "parameter_hashes_by_step": parameter_hashes_by_step,
+        "parameter_hashes_all_match": len(set(parameter_hashes_by_step)) == 1,
         "steps": int(args.steps),
         "optimizer_updates": 0,
         "scheduler_steps": 0,
         "parameter_updates": 0,
+        "graph_stage_count": sum(
+            1 for event in recorder.events if event.get("callpoint") in GRAPH_CALLPOINTS
+        ),
+        "trace_shape_counts": trace_counts,
+        "graph_counts_match_trace": bool(graph_counts_match_trace),
         "python_container_tensor_audit": audit_python_container_tensors({"events": recorder.events}),
         "trace_retains_tensor_references": False,
         "post_cleanup_autograd_graph_nodes": [
@@ -841,6 +1117,7 @@ def _load_real_batch(args, control_model, tokenizer):
     labels = batch.get("labels")
     if not torch.is_tensor(labels) or not bool(labels[1].eq(-100).all().item()):
         raise RuntimeError("target diagnostic row must have labels=-100")
+    batch_counts = _batch_counts(batch)
     batch["graph_metadata"] = {
         "source_row_id": str(source_row["id"]),
         "target_row_id": str(target_row["id"]),
@@ -848,9 +1125,9 @@ def _load_real_batch(args, control_model, tokenizer):
         "target_text": str(target_row.get("text", "")),
         "source_count": 1,
         "target_count": 1,
-        "tokens": _batch_counts(batch)["tokens"],
-        "nodes": _batch_counts(batch)["nodes"],
-        "edges": _batch_counts(batch)["edges"],
+        "tokens": batch_counts["tokens"],
+        "nodes": batch_counts["nodes"],
+        "edges": batch_counts["edges"],
     }
     return batch, source_rows, target_rows
 
@@ -886,7 +1163,7 @@ def _write_markdown(path: Path, report: dict) -> None:
     config = report.get("config", {})
     errors = report.get("errors", [])
     lines = [
-        "# M1 句法 RGAT 显存归因审计报告",
+        "# M1 句法 RGAT V2 显存归因审计报告",
         "",
         f"总体状态：`{report['status']}`",
         "",
@@ -956,13 +1233,53 @@ def run_gpu_diagnostic(args) -> dict:
     batch_meta = dict(batch.pop("graph_metadata"))
     batch_cpu = {key: value.detach().cpu().clone() if torch.is_tensor(value) else value for key, value in batch.items()}
     variant_results = {}
+    lifecycle_recorder = MemoryRecorder(
+        TorchCudaMemoryBackend(),
+        device=device,
+        batch_counts={
+            "tokens": int(batch_meta.get("tokens", 0)),
+            "nodes": int(batch_meta.get("nodes", 0)),
+            "edges": int(batch_meta.get("edges", 0)),
+        },
+    )
+    lifecycle_events: list[dict] = []
+    optimizer_measurements: dict[str, dict] = {}
+    control_model_ref = None
+    control_optimizer_ref = None
     for variant, model, graph_enabled in tqdm(
         (("control", control, False), ("treatment", treatment, True)),
         desc="m1-vram-attribution",
     ):
+        if variant == "treatment":
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "treatment_model_load_before",
+                    model=model,
+                    extra={"variant": variant},
+                )
+            )
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         model.to(device)
+        if variant == "control":
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "control_model_loaded",
+                    model=model,
+                    extra={"variant": variant},
+                )
+            )
+        else:
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "treatment_model_load_after",
+                    model=model,
+                    extra={"variant": variant},
+                )
+            )
         variant_batch = _move_batch(batch_cpu, device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.learning_rate))
         variant_results[variant] = _run_variant_steps(
@@ -974,10 +1291,117 @@ def run_gpu_diagnostic(args) -> dict:
             device=device,
             variant=variant,
         )
-        del optimizer, variant_batch
+        if variant == "control":
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "control_gradients_created",
+                    model=model,
+                    optimizer=optimizer,
+                    extra={
+                        "gradient_bytes_peak_observed": _runtime_overlap_audit(
+                            variant_results[variant]["events"]
+                        )["gradient_bytes_peak_observed"]
+                    },
+                )
+            )
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "control_diagnostic_end_before_locals_exit",
+                    model=model,
+                    optimizer=optimizer,
+                    extra={"variant": variant},
+                )
+            )
+        else:
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "treatment_gradients_optimizer_state_entered",
+                    model=model,
+                    optimizer=optimizer,
+                    extra={
+                        "gradient_bytes_peak_observed": _runtime_overlap_audit(
+                            variant_results[variant]["events"]
+                        )["gradient_bytes_peak_observed"]
+                    },
+                )
+            )
+        del variant_batch
         model.to("cpu")
-        torch.cuda.empty_cache()
-        gc.collect()
+        if variant == "control":
+            optimizer_measurements[variant] = materialize_adamw_state_for_audit(
+                model,
+                device=device,
+                learning_rate=float(args.learning_rate),
+                recorder=lifecycle_recorder,
+                stage_name="control_optimizer_state_simulated",
+            )
+            control_model_ref = weakref.ref(model)
+            control_optimizer_ref = weakref.ref(optimizer)
+            del optimizer
+            control = None
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "run_phase_a_training_equivalent_returned",
+                    model=model,
+                    control_model_ref=control_model_ref,
+                    control_optimizer_ref=control_optimizer_ref,
+                    extra={"variant": variant},
+                )
+            )
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "gc_collect_before",
+                    model=model,
+                    control_model_ref=control_model_ref,
+                    control_optimizer_ref=control_optimizer_ref,
+                )
+            )
+            del model
+            gc.collect()
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "gc_collect_after",
+                    control_model_ref=control_model_ref,
+                    control_optimizer_ref=control_optimizer_ref,
+                )
+            )
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "cuda_empty_cache_before",
+                    control_model_ref=control_model_ref,
+                    control_optimizer_ref=control_optimizer_ref,
+                )
+            )
+            torch.cuda.empty_cache()
+            lifecycle_events.append(
+                record_lifecycle_event(
+                    lifecycle_recorder,
+                    "cuda_empty_cache_after",
+                    control_model_ref=control_model_ref,
+                    control_optimizer_ref=control_optimizer_ref,
+                )
+            )
+        else:
+            optimizer_measurements[variant] = materialize_adamw_state_for_audit(
+                model,
+                device=device,
+                learning_rate=float(args.learning_rate),
+                recorder=lifecycle_recorder,
+                stage_name="treatment_gradients_optimizer_state_entered",
+            )
+            del optimizer, model
+            gc.collect()
+            torch.cuda.empty_cache()
+    del batch_cpu, batch, source_rows, target_rows
+    gc.collect()
+    torch.cuda.empty_cache()
     control_result = variant_results["control"]
     treatment_result = variant_results["treatment"]
     memory_comparison = analyze_memory_attribution(
@@ -986,10 +1410,30 @@ def run_gpu_diagnostic(args) -> dict:
         significant_growth_bytes=int(args.significant_growth_bytes),
         total_memory_bytes=int(torch.cuda.get_device_properties(device).total_memory),
     )
+    lifecycle_events = list(lifecycle_recorder.events)
+    treatment_steady_allocated_bytes = max(
+        (
+            int(event.get("memory", {}).get("allocated_bytes", 0) or 0)
+            for event in lifecycle_events
+            if event.get("callpoint") == "treatment_gradients_optimizer_state_entered"
+        ),
+        default=0,
+    )
+    lifecycle_attribution = classify_lifecycle_attribution(
+        lifecycle_events,
+        isolated_treatment_steady_allocated_bytes=treatment_steady_allocated_bytes,
+        total_memory_bytes=int(torch.cuda.get_device_properties(device).total_memory),
+    )
+    gates = build_v2_report_gates(
+        control_result=control_result,
+        treatment_result=treatment_result,
+        batch_counts=batch_meta,
+        target_test_access=False,
+    )
     report = {
         "schema_version": SCHEMA_VERSION,
         "diagnostic_id": DIAGNOSTIC_ID,
-        "status": "PASS" if control_result["parameter_hashes_match"] and treatment_result["parameter_hashes_match"] else "BLOCKED",
+        "status": gates["status"],
         "identity": {
             "code": _git_identity(Path(__file__).resolve().parent),
             "model": _model_identity(Path(args.model_path).resolve()),
@@ -1017,9 +1461,60 @@ def run_gpu_diagnostic(args) -> dict:
             "trace_instrumentation": "MemoryTrace records metadata only; graph_trace still enables the existing trace-only attention probability buffer and is reported as diagnostic overhead.",
         },
         "batch": batch_meta,
+        "gates": gates,
         "control": control_result,
         "treatment": treatment_result,
         "comparison": memory_comparison,
+        "lifecycle": {
+            "events": lifecycle_events,
+            "attribution": lifecycle_attribution,
+            "optimizer_measurements": optimizer_measurements,
+            "control_model_trainer_optimizer_reachability": {
+                "control_model_weakref_alive_after_cleanup": bool(control_model_ref and control_model_ref() is not None),
+                "control_optimizer_weakref_alive_after_cleanup": bool(control_optimizer_ref and control_optimizer_ref() is not None),
+                "control_trainer_present": False,
+            },
+        },
+        "optimizer_memory_breakdown": {
+            "activation_peak_control_bytes": int(_event_peak(control_result["events"], "peak_allocated_bytes")),
+            "activation_peak_treatment_bytes": int(_event_peak(treatment_result["events"], "peak_allocated_bytes")),
+            "gradient_peak_control_bytes": int(memory_comparison["control_runtime_overlap"]["gradient_bytes_peak_observed"]),
+            "gradient_peak_treatment_bytes": int(memory_comparison["treatment_runtime_overlap"]["gradient_bytes_peak_observed"]),
+            "adamw_state_control_bytes": int(optimizer_measurements.get("control", {}).get("optimizer_state_bytes", 0)),
+            "adamw_state_treatment_bytes": int(optimizer_measurements.get("treatment", {}).get("optimizer_state_bytes", 0)),
+            "isolated_treatment_steady_allocated_bytes": int(treatment_steady_allocated_bytes),
+            "cuda_reserved_cache_control_bytes": int(memory_comparison["control_peak_reserved_bytes"]),
+            "cuda_reserved_cache_treatment_bytes": int(memory_comparison["treatment_peak_reserved_bytes"]),
+            "control_cleanup_allocated_drop_bytes": int(
+                lifecycle_attribution["control_cleanup_allocated_drop_bytes"]
+            ),
+            "control_cleanup_reserved_drop_bytes": int(
+                lifecycle_attribution["control_cleanup_reserved_drop_bytes"]
+            ),
+            "control_residual_allocated_bytes_after_cleanup": int(
+                next(
+                    (
+                        event.get("memory", {}).get("allocated_bytes", 0)
+                        for event in lifecycle_events
+                        if event.get("callpoint") == "cuda_empty_cache_after"
+                    ),
+                    0,
+                )
+            ),
+            "control_residual_reserved_bytes_after_cleanup": int(
+                next(
+                    (
+                        event.get("memory", {}).get("reserved_bytes", 0)
+                        for event in lifecycle_events
+                        if event.get("callpoint") == "cuda_empty_cache_after"
+                    ),
+                    0,
+                )
+            ),
+            "treatment_graph_module_increment_peak_allocated_bytes": int(
+                memory_comparison["graph_module_increment_peak_allocated_bytes"]
+            ),
+        },
         "optimizer_updates": 0,
         "scheduler_steps": 0,
         "parameter_updates": 0,
@@ -1038,6 +1533,11 @@ def run_gpu_diagnostic(args) -> dict:
                 "disabling graph adapter",
                 "changing loss or DANN coefficient",
             ],
+        },
+        "diagnostic_validity": {
+            "batch_count_source": "attention_mask + graph_word_mask + graph_edge_mask from project collator",
+            "counts_must_match_trace_shapes": True,
+            "optimizer_state_measurement": "disposable model copy only; formal model hash checked before and after",
         },
     }
     return report
