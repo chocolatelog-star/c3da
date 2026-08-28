@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 from tqdm import tqdm
 
-from syntactic_graph import build_parser_identity, sha256_file
+from syntactic_graph import GraphCacheError, build_parser_identity, load_graph_cache_directory, sha256_file
 from t5_aste_data import (
     dump_json,
     micro_f1,
@@ -1122,8 +1122,10 @@ def _read_dann_batch_audit(
             raise RuntimeError(f"DANN batch audit planned/issued batch mismatch: {path}")
         if completion == "complete" and len(epoch["batches"]) != planned_batches:
             raise RuntimeError(f"DANN batch audit marks a short traversal complete: {path}")
-        if completion == "partial" and len(epoch["batches"]) >= planned_batches:
+        if completion == "partial" and len(epoch["batches"]) > planned_batches:
             raise RuntimeError(f"DANN batch audit marks a full traversal partial: {path}")
+        if completion == "complete" and (issued_batches != processed_batches or processed_batches != planned_batches):
+            raise RuntimeError(f"DANN batch audit complete state has issued/processed/planned mismatch: {path}")
         if epoch.get("source_rows") != len(epoch["batches"]) or epoch.get("target_rows") != len(epoch["batches"]):
             raise RuntimeError(f"DANN batch audit domain row count mismatch: {path}")
         if epoch.get("source_unique_rows") > report["source_count"] or epoch.get("target_unique_rows") > report["target_count"]:
@@ -1477,6 +1479,55 @@ def _stage_record(
     )
 
 
+def validate_phase_a_graph_cache(
+    cache_dir: str | Path,
+    input_rows: dict[str, list[dict]],
+    parser_identity: dict,
+) -> dict:
+    """Preflight every graph-cache identity before starting long training."""
+    root = Path(cache_dir).resolve()
+    required_splits = ("source_train", "source_dev", "target_unlabeled")
+    required_paths = [root / "manifest.json", root / "relation_vocab.json"] + [
+        root / f"{split}.jsonl" for split in required_splits
+    ]
+    missing = [str(path) for path in required_paths if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"Phase A graph cache preflight missing required artifacts: {missing}")
+    try:
+        manifest = _read_json(root / "manifest.json")
+        relation_vocab = _read_json(root / "relation_vocab.json")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Phase A graph cache preflight cannot read metadata: {root}") from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"Phase A graph cache manifest is not an object: {root}")
+    if not isinstance(relation_vocab, list):
+        raise RuntimeError(f"Phase A graph cache relation vocabulary is not a list: {root}")
+    if manifest.get("target_test_access") is not False:
+        raise RuntimeError("Phase A graph cache must explicitly forbid target_test access")
+    try:
+        split_counts = {}
+        split_hashes = {}
+        for split in required_splits:
+            expected = input_rows.get(split)
+            if not isinstance(expected, list):
+                raise RuntimeError(f"Phase A graph cache preflight lacks input rows for {split}")
+            cache = load_graph_cache_directory(root, split, expected, parser_identity=parser_identity)
+            split_counts[split] = len(cache.records)
+            split_hashes[split] = sha256_file(root / f"{split}.jsonl")
+    except (GraphCacheError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Phase A graph cache identity preflight failed: {root}: {exc}") from exc
+    return {
+        "cache_dir": str(root),
+        "manifest_sha256": sha256_file(root / "manifest.json"),
+        "relation_vocab_sha256": sha256_file(root / "relation_vocab.json"),
+        "relation_vocab_size": len(relation_vocab),
+        "split_jsonl_sha256": split_hashes,
+        "split_counts": split_counts,
+        "manifest_input_sha256": manifest.get("input_sha256"),
+        "parser_identity": parser_identity,
+    }
+
+
 def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
     _validate_recipe(recipe)
@@ -1507,18 +1558,20 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     input_identity_hashes = {"run_inputs": input_hashes, "declared_external_inputs": declared_input_hashes}
     model_hashes = _model_hashes(declared_model_path)
     parser_identity = build_parser_identity(args.parser_dir)
+    graph_cache_identity = validate_phase_a_graph_cache(args.graph_cache_dir, input_rows, parser_identity)
     recipe_sha256 = sha256_file(Path(args.recipe))
     actual_identity, identity_metadata = _build_identity(args, input_identity_hashes, model_hashes, parser_identity, recipe_sha256, git_identity)
-    status_identity = {"task_id": TASK_ID, "code_commit": git_identity["commit"], "recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "scope": build_phase_a_scope()}
+    status_identity = {"task_id": TASK_ID, "code_commit": git_identity["commit"], "recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "graph_cache_identity": graph_cache_identity, "scope": build_phase_a_scope()}
     state = load_or_initialize_stage_status(run_dir / "stage_status.json", status_identity, args.resume)
     if state is None:
         raise RuntimeError("resume identity mismatch; refusing to mix Phase A artifacts")
     state["status"] = "in_progress"
     _atomic_write_json(run_dir / "stage_status.json", state)
     _write_inputs(input_rows, run_dir)
-    _atomic_write_json(run_dir / "config_snapshot.json", {"task_id": TASK_ID, "recipe": recipe, "variant_configs": {"control": build_variant_config(False), "treatment": build_variant_config(True)}, "scope": build_phase_a_scope(), "identities": {"recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "git_commit": git_identity["commit"]}})
+    _atomic_write_json(run_dir / "config_snapshot.json", {"task_id": TASK_ID, "recipe": recipe, "variant_configs": {"control": build_variant_config(False), "treatment": build_variant_config(True)}, "scope": build_phase_a_scope(), "identities": {"recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "graph_cache_identity": graph_cache_identity, "git_commit": git_identity["commit"]}})
     _atomic_write_json(run_dir / "git_identity.json", git_identity)
-    _atomic_write_json(run_dir / "input_artifact_hashes.json", {"inputs": input_hashes, "raw_external_inputs": declared_input_hashes, "model": model_hashes, "parser": parser_identity, "recipe": {"path": str(args.recipe), "sha256": recipe_sha256}})
+    _atomic_write_json(run_dir / "input_artifact_hashes.json", {"inputs": input_hashes, "raw_external_inputs": declared_input_hashes, "model": model_hashes, "parser": parser_identity, "graph_cache": graph_cache_identity, "recipe": {"path": str(args.recipe), "sha256": recipe_sha256}})
+    _atomic_write_json(run_dir / "graph_cache_identity.json", graph_cache_identity)
     _atomic_write_json(run_dir / "parent_run_identity.json", {"parent_task_id": "M1_SYNTACTIC_RGAT_ZERO_UPDATE_ENTRY_AUDIT_V1", "required_entry_code_identity": FIXED_PARENT_CODE_IDENTITY, "current_code_commit": git_identity["commit"], "zero_update_entry_status": "15/15 PASS (provided by approved parent identity)"})
 
     variant_dirs = {name: run_dir / name for name in ("control", "treatment")}

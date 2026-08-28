@@ -2,6 +2,13 @@
 
 > 更新时间：2026-08-28（北京时间）
 
+## 2026-08-28：V3 复审修复（验收仍 BLOCKED）
+
+- 不得把 `63fd1a6` 称为验收通过。复审确认的终止多签发已修复：采样器在准备下一批前读取 Trainer 状态及累积预算，终止边界不再追加 issued；`complete` 必须同时满足 issued=processed=planned，审计加载器和正式验证器均强制该条件。
+- 恢复不再使用 `max(processed, issued)`；processed-but-unfinished accumulation（已处理但梯度尚未完成的累积）通过梯度快照/偏移恢复，issued-but-unprocessed 批次从 processed 位置重新进入真实 training_step。缺失或哈希不一致的梯度身份硬拒绝。
+- Phase A 入口在长训练前预检 manifest、relation_vocab、source_train/source_dev/target_unlabeled 三个缓存文件及输入/文件哈希；缓存缺失或身份不符立即失败。正式命令必须使用已验证的 `J:\nlp\CD-C3DA\runs\diagnostics\laptop14_to_rest15_m1_syntactic_rgat_entry_audit_v4\graph_cache_resume`。
+- 保持既有 `int(Trainer.state.epoch)` 洗牌语义；physical traversal ID 仅审计用途，不改变采样顺序。未运行 GPU、正式实验、伪标签推理或 target_test。
+
 ## 2026-08-28：完成 Phase A DANN 物理遍历审计与恢复修复（复审阻塞项已闭环）
 
 - 根因确认：旧采样器把浮点 `state.epoch`（轮次状态）取整后作为审计编号，并在生成器完全耗尽后才追加报告；梯度累积和训练器立即停止造成重复编号覆盖、缺失轮次和末尾报告丢失。旧运行 `control/dann_batch_audit.json` 保留为 legacy（旧版）方向性诊断，不伪造缺失观测、不把门槛降为21。

@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import copy
+import io
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     validate_initialization_pair,
     _validate_recipe,
     validate_input_split,
+    validate_phase_a_graph_cache,
     prepare_legacy_diagnostic_resume,
 )
 from syntactic_graph_adapter import load_seq2seq_model
@@ -361,6 +363,11 @@ def test_dann_sampling_order_keeps_legacy_trainer_epoch_semantics_at_real_bounda
         gradient_accumulation_steps=16,
         num_train_epochs=25,
     ) == 1400
+    terminal_state = {"global_step": 1400, "max_steps": 1400}
+    terminal_sampler = PairedDomainBatchSampler(906, 906, source_batch_size=1, target_batch_size=1, seed=1000)
+    terminal_sampler.bind_training_state_provider(lambda: terminal_state)
+    assert list(terminal_sampler) == []
+    assert terminal_sampler.audit_report()["epochs"] == []
 
     sampler = PairedDomainBatchSampler(
         906,
@@ -427,6 +434,66 @@ def test_dann_audit_ack_is_distinct_from_issued_batches():
     assert sampler.audit_report()["epochs"][-1]["processed_batches"] == 0
     sampler.acknowledge_next_batch()
     assert sampler.audit_report()["epochs"][-1]["processed_batches"] == 1
+
+
+def test_dann_sampler_stops_before_issuing_after_terminal_max_steps():
+    state = {"global_step": 2, "max_steps": 2}
+    sampler = PairedDomainBatchSampler(
+        5, 5, source_batch_size=1, target_batch_size=1, seed=1000
+    )
+    sampler.bind_training_state_provider(lambda: state)
+    iterator = iter(sampler)
+    with pytest.raises(StopIteration):
+        next(iterator)
+    assert sampler.audit_report()["epochs"] == []
+
+
+def test_dann_complete_requires_issued_processed_and_planned_equality():
+    sampler = PairedDomainBatchSampler(
+        2, 2, source_batch_size=1, target_batch_size=1, seed=1000
+    )
+    list(sampler)
+    report = copy.deepcopy(sampler.audit_report())
+    report["epochs"][0]["processed_batches"] = 1
+    restored = PairedDomainBatchSampler(
+        2, 2, source_batch_size=1, target_batch_size=1, seed=1000
+    )
+    with pytest.raises(ValueError, match="complete|accounting"):
+        restored.load_audit_report(report)
+
+
+def test_formal_dann_validator_rejects_complete_count_mismatch(tmp_path):
+    sampler = PairedDomainBatchSampler(1, 1, source_batch_size=1, target_batch_size=1, seed=1000)
+    list(sampler)
+    report = sampler.audit_report()
+    report["epochs"][0]["processed_batches"] = 0
+    (tmp_path / "dann_batch_audit.json").write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="complete.*mismatch"):
+        _read_dann_batch_audit(tmp_path)
+
+
+def test_dann_resume_reissues_issued_but_unprocessed_batch(tmp_path):
+    audit_path = tmp_path / "dann_batch_audit.json"
+    state = {"global_step": 0, "max_steps": 3}
+    sampler = PairedDomainBatchSampler(
+        3, 3, source_batch_size=1, target_batch_size=1, seed=1000, audit_path=audit_path
+    )
+    sampler.bind_training_state_provider(lambda: state)
+    original_batch = next(iter(sampler))
+    snapshot = sampler.state_dict()
+    report = sampler.audit_report()
+
+    restored = PairedDomainBatchSampler(
+        3, 3, source_batch_size=1, target_batch_size=1, seed=1000, audit_path=audit_path
+    )
+    restored.bind_training_state_provider(lambda: state)
+    restored.load_state_dict(snapshot)
+    restored.load_audit_report(report)
+    replayed = next(iter(restored))
+    assert replayed == original_batch
+    assert restored.audit_report()["epochs"][-1]["processed_batches"] == 0
+    restored.acknowledge_next_batch()
+    assert restored.audit_report()["epochs"][-1]["processed_batches"] == 1
 
 
 def test_dann_validator_rejects_non_integer_or_non_contiguous_optimizer_step_ranges(tmp_path):
@@ -566,9 +633,11 @@ def test_terminal_partial_checkpoint_is_resume_valid_only_with_processed_equals_
     sampler_path = checkpoint / "dann_batch_sampler_state.json"
     audit_path = checkpoint / "dann_batch_audit.json"
     trainer_state_path = checkpoint / "trainer_state.json"
+    gradient_state_path = checkpoint / "dann_gradient_state.pt"
     sampler_path.write_text(json.dumps(sampler_state), encoding="utf-8")
     audit_path.write_text(json.dumps(audit), encoding="utf-8")
     trainer_state_path.write_text(json.dumps(trainer_state), encoding="utf-8")
+    torch.save({"schema_version": 1, "accumulation_remainder": 0, "gradients": {}}, gradient_state_path)
     manifest = {
         "schema_version": 3,
         "complete": True,
@@ -592,6 +661,8 @@ def test_terminal_partial_checkpoint_is_resume_valid_only_with_processed_equals_
         "sampler_state_sha256": hashlib.sha256(sampler_path.read_bytes()).hexdigest(),
         "audit_sha256": hashlib.sha256(audit_path.read_bytes()).hexdigest(),
         "trainer_state_sha256": hashlib.sha256(trainer_state_path.read_bytes()).hexdigest(),
+        "gradient_state_artifact": gradient_state_path.name,
+        "gradient_state_sha256": hashlib.sha256(gradient_state_path.read_bytes()).hexdigest(),
         "model_artifact": "pytorch_model.bin",
         "model_artifact_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
     }
@@ -896,6 +967,15 @@ def test_phase_a_recipe_is_accepted_and_training_argv_has_explicit_lengths():
     assert "--max_source_length" in argv and argv[argv.index("--max_source_length") + 1] == "128"
     assert "--max_target_length" in argv and argv[argv.index("--max_target_length") + 1] == "96"
     assert argv[argv.index("--lambda_domain_adv") + 1] == "0.03"
+
+
+def test_phase_a_graph_cache_preflight_rejects_missing_identity_bundle(tmp_path):
+    with pytest.raises(RuntimeError, match="missing required artifacts"):
+        validate_phase_a_graph_cache(
+            tmp_path / "missing-cache",
+            {"source_train": [], "source_dev": [], "target_unlabeled": []},
+            {},
+        )
 
 
 def test_t5_model_identity_includes_all_loaded_files():
@@ -1278,11 +1358,11 @@ def test_real_trainer_three_epoch_resume_matches_continuous_run(tmp_path):
 
 
 class _NonDivisiblePairedDataset(Dataset):
-    def __init__(self):
+    def __init__(self, count=5):
         self.items = []
-        for index in range(5):
+        for index in range(count):
             self.items.append({"input_ids": [2 + index, 3, 4, 5], "labels": [1, 2, 3], "sample_weight": 1.0, "domain_weight": 1.0})
-        for index in range(5):
+        for index in range(count):
             self.items.append({"input_ids": [7 + index, 8, 9, 10], "labels": [-100, -100, -100], "sample_weight": 0.0, "domain_weight": 0.0})
 
     def __len__(self):
@@ -1292,7 +1372,7 @@ class _NonDivisiblePairedDataset(Dataset):
         return self.items[index]
 
 
-def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_epoch=None):
+def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_epoch=None, max_steps=2, paired_count=5, paired_batch_size=1):
     config = T5Config(
         vocab_size=32,
         d_model=8,
@@ -1311,12 +1391,12 @@ def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_ep
         model = T5ForConditionalGeneration(config)
     else:
         model = T5ForConditionalGeneration.from_pretrained(checkpoint)
-    sampler = PairedDomainBatchSampler(5, 5, source_batch_size=1, target_batch_size=1, seed=1000)
+    sampler = PairedDomainBatchSampler(paired_count, paired_count, source_batch_size=paired_batch_size, target_batch_size=paired_batch_size, seed=1000)
     args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
         overwrite_output_dir=True,
         num_train_epochs=3,
-        max_steps=2,
+        max_steps=max_steps,
         per_device_train_batch_size=1,
         no_cuda=True,
         gradient_accumulation_steps=2,
@@ -1336,7 +1416,7 @@ def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_ep
     callbacks = []
     class StopAtTerminalStep(TrainerCallback):
         def on_step_end(self, args, state, control, **kwargs):
-            if state.global_step >= 2:
+            if state.global_step >= max_steps:
                 control.should_training_stop = True
             return control
     callbacks.append(StopAtTerminalStep())
@@ -1350,7 +1430,7 @@ def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_ep
     trainer = WeightedSeq2SeqTrainer(
         model=model,
         args=args,
-        train_dataset=_NonDivisiblePairedDataset(),
+        train_dataset=_NonDivisiblePairedDataset(paired_count),
         data_collator=_tiny_pair_collator,
         dann_batch_sampler=sampler,
         callbacks=callbacks,
@@ -1361,16 +1441,39 @@ def _run_non_divisible_paired_trainer(output_dir, checkpoint=None, stop_after_ep
     return trainer
 
 
-def test_real_trainer_nondivisible_terminal_processing_gap_is_rejected(tmp_path):
+def test_real_trainer_nondivisible_terminal_partial_is_formally_resumable(tmp_path):
     continuous = _run_non_divisible_paired_trainer(tmp_path / "continuous")
     interrupted = _run_non_divisible_paired_trainer(tmp_path / "interrupted", stop_after_epoch=1)
     continuous_audit = continuous.get_dann_batch_audit()
     assert continuous_audit["trainer_global_step"] == 2
-    assert continuous_audit["epochs"][-1]["issued_batches"] == 5
+    assert continuous_audit["epochs"][-1]["issued_batches"] == 4
     assert continuous_audit["epochs"][-1]["processed_batches"] == 4
-    with pytest.raises(RuntimeError, match="complete|terminal|acknowledged"):
-        find_latest_complete_dann_checkpoint(tmp_path / "interrupted", interrupted.dann_batch_sampler)
+    checkpoint = find_latest_complete_dann_checkpoint(
+        tmp_path / "interrupted", interrupted.dann_batch_sampler
+    )
+    assert checkpoint.name == "checkpoint-2"
     assert continuous.state.epoch != int(continuous.state.epoch)
+
+
+def test_real_trainer_nondivisible_continuous_resume_matches_all_states_and_batches(tmp_path):
+    continuous = _run_non_divisible_paired_trainer(tmp_path / "continuous", max_steps=5, paired_count=7, paired_batch_size=2)
+    interrupted = _run_non_divisible_paired_trainer(tmp_path / "interrupted", max_steps=5, stop_after_epoch=0.5, paired_count=7, paired_batch_size=2)
+    checkpoint = find_latest_complete_dann_checkpoint(
+        tmp_path / "interrupted", interrupted.dann_batch_sampler
+    )
+    resumed = _run_non_divisible_paired_trainer(
+        tmp_path / "interrupted", checkpoint=checkpoint, max_steps=5, paired_count=7, paired_batch_size=2
+    )
+    assert continuous.state.global_step == resumed.state.global_step == 5
+    assert continuous.get_dann_batch_audit() == resumed.get_dann_batch_audit()
+    assert continuous.model.state_dict().keys() == resumed.model.state_dict().keys()
+    assert all(torch.equal(continuous.model.state_dict()[name], resumed.model.state_dict()[name]) for name in continuous.model.state_dict())
+    continuous_optimizer_buffer = io.BytesIO()
+    resumed_optimizer_buffer = io.BytesIO()
+    torch.save(continuous.optimizer.state_dict(), continuous_optimizer_buffer)
+    torch.save(resumed.optimizer.state_dict(), resumed_optimizer_buffer)
+    assert continuous_optimizer_buffer.getvalue() == resumed_optimizer_buffer.getvalue()
+    assert continuous.lr_scheduler.state_dict() == resumed.lr_scheduler.state_dict()
 
 
 def test_corrupt_latest_dann_checkpoint_falls_back_to_previous_complete_checkpoint(tmp_path):

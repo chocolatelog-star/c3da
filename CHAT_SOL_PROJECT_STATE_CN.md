@@ -4,14 +4,14 @@
 
 ## 当前工程修复状态
 
-`M1_DANN_AUDIT_RESUME_FIX_V1`（Phase A DANN 审计与恢复修复）已按复审要求完成代码实现和 CPU（中央处理器）验证，状态为 `APPROVED`（已批准实施，未批准运行实验）。修复只影响成对 DANN 的审计身份、原子落盘、检查点恢复和正式验证，不改变模型公式、图传播、损失、DANN=0.03、数据、优化器、调度器或训练参数。旧入口的采样顺序语义已恢复：`sampling_epoch=int(Trainer.state.epoch)` 仍只用于 `seed+sampling_epoch` 洗牌，独立的 `physical_traversal_index` 不参与洗牌。
+`M1_SYNTACTIC_RGAT_DANN_AUDIT_RECOVERY_FIX_V3`（Phase A DANN 审计与恢复修复）当前为修复实施已批准、验收与实验 `BLOCKED`（阻塞）；不得把 `63fd1a6` 称为验收通过。终止边界现阻止多签发，complete 强制 issued=processed=planned，恢复重签 issued-but-unprocessed（已签发未处理）批次并保存梯度累积快照；入口启动前预检 manifest、relation vocabulary 和三个 split 文件身份。既有 `int(Trainer.state.epoch)` 洗牌语义保持，physical ID 只用于审计；未运行 GPU、正式实验、伪标签或 target_test。
 
-- `PairedDomainBatchSampler`（成对领域批次采样器）现在独立记录物理 DataLoader（数据加载器）遍历序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数、完整/部分遍历和 Trainer（训练器）global step（全局步数）身份；物理序号不再参与洗牌。
-- 审计协议升级为 schema 3（模式3）：每批只追加带完整行校验和哈希链的 journal（日志），遍历边界、检查点和正常结束时才原子压缩快照；崩溃后可从完整日志行恢复，且不会把 issued 冒充 processed。
-- 成对检查点只接受 schema 3、身份与哈希一致且恢复语义有效的点；`resume_complete` 与 `training_terminal_partial` 分离，末尾部分遍历只有 Trainer global step==max_steps 且 issued==processed 时才可作为终端恢复点，未确认批次会硬拒绝。
+- `PairedDomainBatchSampler`（成对领域批次采样器）独立记录 physical traversal（物理遍历）序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数；physical ID 不参与洗牌。
+- 审计协议使用带完整行校验和哈希链的追加式 journal（日志）；终止边界在签发前检查 Trainer 状态，`complete` 强制 issued=processed=planned。
+- 成对检查点保存并哈希校验梯度累积快照/偏移、采样器状态和审计；issued-but-unprocessed 批次从 processed 位置重签，无法证明安全的旧点硬拒绝。
 - Phase A 验证器不再固定要求 `len(epochs)==num_train_epochs`；独立依据冻结配方和实际成对 DataLoader 长度计算 max_steps，并严格校验每次遍历的 optimizer step 区间、单调性、边界连续性、最终 global step 和 Control/Treatment（对照组/处理组）逐批对齐。
-- 旧运行只能通过显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）写入 `legacy_diagnostic_migration.json`（旧版迁移报告）；该路径保留旧提交和产物哈希、拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
-- TDD（测试驱动开发）新增边界覆盖重复采样轮次、906/16/25→1400 采样哈希、追加日志规模、落盘后未确认崩溃、恢复重放、步区间、终止部分遍历、Control/Treatment 对齐和 legacy 不得正式 PASS（通过）。M1 六个测试文件共97项通过；完整项目回归以最终命令输出为准。
+- 旧运行只能通过显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）写入迁移报告；拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
+- V3 六个 M1 测试文件 CPU 回归为 `103 passed`；未运行 GPU、正式实验、伪标签或 target_test，当前验收仍 BLOCKED。
 
 ## 当前任务状态
 

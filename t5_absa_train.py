@@ -23,6 +23,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    TrainerCallback,
 )
 
 from t5_absa_data import read_jsonl
@@ -190,6 +191,16 @@ def _atomic_write_json(path: Path, value: dict) -> None:
 
 def _json_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _atomic_torch_save(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as handle:
+        temporary = Path(handle.name)
+        torch.save(value, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def _canonical_json_bytes(value: dict) -> bytes:
@@ -1015,8 +1026,9 @@ class PairedDomainBatchSampler:
         self._training_state_provider = None
         self._sampling_epoch_provider = None
         self._acknowledgement_required = False
-        self._pending_acks: list[tuple[int, int]] = []
+        self._pending_acks: list[tuple[int, int, bool]] = []
         self._resume_replay_batch_ids: list[tuple[int, int]] = []
+        self._resume_reissue_batch_ids: list[tuple[int, int]] = []
         self._journal_last_hash = ""
         self._journal_write_count = 0
         self._journal_bytes = 0
@@ -1098,14 +1110,30 @@ class PairedDomainBatchSampler:
 
     def _training_state(self) -> dict:
         if self._training_state_provider is None:
-            return {"global_step": None, "max_steps": None}
+            return {"global_step": None, "max_steps": None, "gradient_accumulation_steps": None}
         state = self._training_state_provider()
         if not isinstance(state, dict):
-            return {"global_step": None, "max_steps": None}
+            return {"global_step": None, "max_steps": None, "gradient_accumulation_steps": None}
         return {
             "global_step": state.get("global_step"),
             "max_steps": state.get("max_steps"),
+            "gradient_accumulation_steps": state.get("gradient_accumulation_steps"),
         }
+
+    def _training_has_reached_max_steps(self) -> bool:
+        state = self._training_state()
+        global_step = state.get("global_step")
+        max_steps = state.get("max_steps")
+        if isinstance(global_step, int) and isinstance(max_steps, int) and max_steps > 0 and global_step >= max_steps:
+            return True
+        grad_accumulation = state.get("gradient_accumulation_steps")
+        if not isinstance(max_steps, int) or max_steps <= 0 or not isinstance(grad_accumulation, int) or grad_accumulation <= 0:
+            return False
+        report = self.epoch_reports[-1] if self.epoch_reports else None
+        if report is None or report.get("completion") == "complete":
+            return False
+        in_flight = sum(1 for _, _, is_replay in self._pending_acks if not is_replay)
+        return report.get("processed_batches", 0) + in_flight >= max_steps * grad_accumulation
 
     def flush_audit_snapshot(self) -> None:
         if self.audit_path is not None:
@@ -1130,6 +1158,7 @@ class PairedDomainBatchSampler:
             "source_row_ids": list(self.source_row_ids),
             "target_row_ids": list(self.target_row_ids),
             "resume_replay_batch_ids": [list(item) for item in self._resume_replay_batch_ids],
+            "resume_reissue_batch_ids": [list(item) for item in self._resume_reissue_batch_ids],
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -1166,6 +1195,10 @@ class PairedDomainBatchSampler:
         if not isinstance(replay_ids, list) or any(not isinstance(item, list) or len(item) != 2 or not all(isinstance(value, int) and value >= 0 for value in item) for item in replay_ids):
             raise ValueError("DANN sampler state has invalid replay batch identities")
         self._resume_replay_batch_ids = [tuple(item) for item in replay_ids]
+        reissue_ids = state.get("resume_reissue_batch_ids", [])
+        if not isinstance(reissue_ids, list) or any(not isinstance(item, list) or len(item) != 2 or not all(isinstance(value, int) and value >= 0 for value in item) for item in reissue_ids):
+            raise ValueError("DANN sampler state has invalid reissue batch identities")
+        self._resume_reissue_batch_ids = [tuple(item) for item in reissue_ids]
         # A state-only restore remains replayable for callers that do not load
         # the audit.  Loading the audit below advances it to the next identity.
         self._explicit_epoch = True
@@ -1211,13 +1244,16 @@ class PairedDomainBatchSampler:
                 or not isinstance(epoch_report.get("processed_batches"), int)
                 or epoch_report.get("processed_batches") < 0
                 or epoch_report.get("processed_batches") > epoch_report.get("issued_batches")
-                or epoch_report.get("source_rows") != len(batches)
-                or epoch_report.get("target_rows") != len(batches)
+                or epoch_report.get("source_rows") != sum(batch.get("source_count", 0) for batch in batches if isinstance(batch, dict))
+                or epoch_report.get("target_rows") != sum(batch.get("target_count", 0) for batch in batches if isinstance(batch, dict))
                 or epoch_report.get("completion") not in {"complete", "partial"}
             ):
                 raise ValueError("DANN sampler audit report has incomplete epoch accounting")
-            if epoch_report["completion"] == "complete" and len(batches) != len(self):
-                raise ValueError("DANN sampler audit report marks a short traversal complete")
+            if epoch_report["completion"] == "complete" and (
+                epoch_report["issued_batches"] != epoch_report["processed_batches"]
+                or epoch_report["issued_batches"] != epoch_report["planned_batches"]
+            ):
+                raise ValueError("DANN sampler audit report marks a non-terminal traversal complete")
             if epoch_report["completion"] == "partial" and len(batches) > len(self):
                 raise ValueError("DANN sampler audit report marks a full traversal partial")
             if epoch_report["source_unique_rows"] > self.source_count or epoch_report["target_unique_rows"] > self.target_count:
@@ -1238,16 +1274,12 @@ class PairedDomainBatchSampler:
                     or len(target_indices) != self.target_batch_size
                 ):
                     raise ValueError("DANN sampler audit report has an invalid 1/1 batch")
-                source_index = source_indices[0]
-                target_index = target_indices[0] - self.source_count if isinstance(target_indices[0], int) else None
-                if not (isinstance(source_index, int) and 0 <= source_index < self.source_count):
-                    raise ValueError("DANN sampler audit report has an invalid source index")
-                if not (isinstance(target_index, int) and 0 <= target_index < self.target_count):
-                    raise ValueError("DANN sampler audit report has an invalid target index")
-                if batch.get("source_row_ids") != [self.source_row_ids[source_index]] or batch.get("target_row_ids") != [self.target_row_ids[target_index]]:
+                if any(not isinstance(index, int) or not 0 <= index < self.source_count for index in source_indices) or any(not isinstance(index, int) or not self.source_count <= index < self.source_count + self.target_count for index in target_indices):
                     raise ValueError("DANN sampler audit report index/row identity mismatch")
-                seen_source.add(source_index)
-                seen_target.add(target_index)
+                if batch.get("source_row_ids") != [self.source_row_ids[index] for index in source_indices] or batch.get("target_row_ids") != [self.target_row_ids[index - self.source_count] for index in target_indices]:
+                    raise ValueError("DANN sampler audit report index/row identity mismatch")
+                seen_source.update(source_indices)
+                seen_target.update(index - self.source_count for index in target_indices)
             if seen_source != set(range(self.source_count)) or seen_target != set(range(self.target_count)):
                 if epoch_report["completion"] == "complete":
                     raise ValueError("DANN sampler audit report does not cover both domains")
@@ -1258,6 +1290,9 @@ class PairedDomainBatchSampler:
         for physical_index, batch_id in self._resume_replay_batch_ids:
             if physical_index >= len(epochs) or batch_id >= epochs[physical_index].get("issued_batches", 0):
                 raise ValueError("DANN sampler audit report has an invalid replay identity")
+        for physical_index, batch_id in self._resume_reissue_batch_ids:
+            if physical_index >= len(epochs) or batch_id >= epochs[physical_index].get("issued_batches", 0):
+                raise ValueError("DANN sampler audit report has an invalid reissue identity")
         self.epoch_reports = list(epochs)
         self._next_physical_traversal_index = len(epochs)
         self._next_sampling_epoch = max((item.get("sampling_epoch", -1) for item in epochs), default=-1) + 1
@@ -1266,10 +1301,14 @@ class PairedDomainBatchSampler:
             self._epoch = epochs[-1].get("sampling_epoch", self._epoch)
 
     def __iter__(self):
+        if self._training_has_reached_max_steps():
+            return
         if self._resume_replay_batch_ids:
             replay_ids = list(self._resume_replay_batch_ids)
             self._resume_replay_batch_ids.clear()
             for physical_index, batch_id in replay_ids:
+                if self._training_has_reached_max_steps():
+                    break
                 report = next((item for item in self.epoch_reports if item.get("physical_traversal_index") == physical_index), None)
                 if report is None or batch_id >= report.get("issued_batches", 0):
                     raise RuntimeError("DANN checkpoint replay identity mismatch")
@@ -1295,7 +1334,9 @@ class PairedDomainBatchSampler:
             report = last
             physical_traversal_index = report["physical_traversal_index"]
             sampling_epoch = report["sampling_epoch"]
-            start_batch = max(report["processed_batches"], report["issued_batches"])
+            # Issued is durable intent, not proof that Trainer processed the
+            # batch.  Reissue the unprocessed suffix through training_step.
+            start_batch = report["processed_batches"]
         else:
             physical_traversal_index = self._next_physical_traversal_index
             if self._sampling_epoch_provider is not None:
@@ -1343,6 +1384,8 @@ class PairedDomainBatchSampler:
             seen_source.update(existing_batch.get("source_indices", []))
             seen_target.update(index - self.source_count for index in existing_batch.get("target_indices", []))
         for batch_id in range(start_batch, len(self)):
+            if self._training_has_reached_max_steps():
+                break
             source_positions = [
                 source_order[(batch_id * self.source_batch_size + offset) % self.source_count]
                 for offset in range(self.source_batch_size)
@@ -1383,8 +1426,6 @@ class PairedDomainBatchSampler:
                 "batch_reissued" if is_reissue else "batch_issued",
                 {"physical_traversal_index": physical_traversal_index, "batch": batch_record},
             )
-            if report["issued_batches"] == report["planned_batches"]:
-                self._finalize_report_if_complete(report)
             yield source_positions + [self.source_count + index for index in target_positions]
             if not self._acknowledgement_required:
                 self.acknowledge_next_batch()
@@ -1395,7 +1436,10 @@ class PairedDomainBatchSampler:
         self.flush_audit_snapshot()
 
     def _finalize_report_if_complete(self, report: dict) -> None:
-        if report["issued_batches"] == report["planned_batches"]:
+        if (
+            report["issued_batches"] == report["processed_batches"]
+            and report["issued_batches"] == report["planned_batches"]
+        ):
             if report.get("completion") != "complete":
                 report["completion"] = "complete"
                 self._append_journal_event(
@@ -1426,17 +1470,25 @@ class PairedDomainBatchSampler:
     def prepare_resume_replay(self, gradient_accumulation_steps: int) -> None:
         if not self.epoch_reports or self._training_state_provider is None:
             self._resume_replay_batch_ids = []
+            self._resume_reissue_batch_ids = []
             return
         state = self._training_state()
         global_step = state.get("global_step")
         if not isinstance(global_step, int):
             self._resume_replay_batch_ids = []
+            self._resume_reissue_batch_ids = []
             return
         report = self.epoch_reports[-1]
-        remainder = max(0, report.get("processed_batches", 0) - global_step * int(gradient_accumulation_steps))
+        processed_batches = report.get("processed_batches", 0)
+        issued_batches = report.get("issued_batches", 0)
+        remainder = max(0, processed_batches - global_step * int(gradient_accumulation_steps))
         self._resume_replay_batch_ids = [
             (report["physical_traversal_index"], batch["logical_batch_id"])
             for batch in report.get("batches", [])[-remainder:]
+        ]
+        self._resume_reissue_batch_ids = [
+            (report["physical_traversal_index"], batch["logical_batch_id"])
+            for batch in report.get("batches", [])[processed_batches:issued_batches]
         ]
 
     def audit_report(self) -> dict:
@@ -1475,8 +1527,9 @@ def _read_complete_dann_checkpoint(checkpoint_dir: Path, sampler: PairedDomainBa
     sampler_path = checkpoint_dir / "dann_batch_sampler_state.json"
     audit_path = checkpoint_dir / "dann_batch_audit.json"
     trainer_state_path = checkpoint_dir / "trainer_state.json"
+    gradient_state_path = checkpoint_dir / "dann_gradient_state.pt"
     model_files = [checkpoint_dir / "pytorch_model.bin", checkpoint_dir / "model.safetensors"]
-    required = (manifest_path, sampler_path, audit_path, trainer_state_path)
+    required = (manifest_path, sampler_path, audit_path, trainer_state_path, gradient_state_path)
     missing = [str(path) for path in required if not path.is_file()]
     if not any(path.is_file() for path in model_files):
         missing.append(f"{checkpoint_dir}/pytorch_model.bin|model.safetensors")
@@ -1487,6 +1540,7 @@ def _read_complete_dann_checkpoint(checkpoint_dir: Path, sampler: PairedDomainBa
         sampler_state = json.loads(sampler_path.read_text(encoding="utf-8"))
         audit = json.loads(audit_path.read_text(encoding="utf-8"))
         trainer_state = json.loads(trainer_state_path.read_text(encoding="utf-8"))
+        gradient_state = torch.load(gradient_state_path, map_location="cpu")
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid DANN checkpoint JSON in {checkpoint_dir}: {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("complete") is not True:
@@ -1499,6 +1553,10 @@ def _read_complete_dann_checkpoint(checkpoint_dir: Path, sampler: PairedDomainBa
         raise RuntimeError(f"DANN checkpoint audit hash mismatch: {checkpoint_dir}")
     if manifest.get("trainer_state_sha256") != _json_sha256(trainer_state_path):
         raise RuntimeError(f"DANN checkpoint trainer state hash mismatch: {checkpoint_dir}")
+    if manifest.get("gradient_state_artifact") != gradient_state_path.name or manifest.get("gradient_state_sha256") != _json_sha256(gradient_state_path):
+        raise RuntimeError(f"DANN checkpoint gradient state hash mismatch: {checkpoint_dir}")
+    if not isinstance(gradient_state, dict) or gradient_state.get("schema_version") != 1 or not isinstance(gradient_state.get("gradients"), dict) or not isinstance(gradient_state.get("accumulation_remainder"), int) or gradient_state.get("accumulation_remainder") < 0:
+        raise RuntimeError(f"DANN checkpoint gradient state is invalid: {checkpoint_dir}")
     model_path = next(path for path in model_files if path.is_file())
     if manifest.get("model_artifact") != model_path.name or manifest.get("model_artifact_sha256") != _json_sha256(model_path):
         raise RuntimeError(f"DANN checkpoint model hash mismatch: {checkpoint_dir}")
@@ -1550,6 +1608,7 @@ def _read_complete_dann_checkpoint(checkpoint_dir: Path, sampler: PairedDomainBa
         "sampler_state": sampler_state,
         "audit": audit,
         "trainer_state": trainer_state,
+        "gradient_state": gradient_state,
     }
 
 
@@ -1571,6 +1630,34 @@ def find_latest_complete_dann_checkpoint(
             errors.append(f"{candidate.name}: {exc}")
     detail = "; ".join(errors) if errors else "no checkpoint candidates"
     raise RuntimeError(f"no complete identity-valid paired DANN checkpoint found: {detail}")
+
+
+class _DANNGradientRestoreCallback(TrainerCallback):
+    def __init__(self, trainer):
+        self.trainer = trainer
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        gradient_state = getattr(self.trainer, "_pending_dann_gradient_state", None)
+        if gradient_state is None:
+            return control
+        gradients = gradient_state.get("gradients", {})
+        parameters = dict(self.trainer.model.named_parameters())
+        if set(gradients) - set(parameters):
+            raise RuntimeError("DANN checkpoint gradient identity mismatch")
+        for name, parameter in parameters.items():
+            gradient = gradients.get(name)
+            parameter.grad = None if gradient is None else gradient.to(device=parameter.device, dtype=parameter.dtype).clone()
+        self.trainer._dann_resume_gradient_pending = bool(gradients)
+        self.trainer._dann_resume_gradient_accumulation_steps = int(args.gradient_accumulation_steps)
+        self.trainer.accelerator.step = int(gradient_state.get("accumulation_remainder", 0))
+        self.trainer._pending_dann_gradient_state = None
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if getattr(self.trainer, "_dann_resume_gradient_pending", False):
+            self.trainer.args.gradient_accumulation_steps = self.trainer._dann_resume_gradient_accumulation_steps
+            self.trainer._dann_resume_gradient_pending = False
+        return control
 
 
 class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
@@ -1673,6 +1760,13 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
 
     def training_step(self, model, inputs, *args, **kwargs):
         result = super().training_step(model, inputs, *args, **kwargs)
+        if getattr(self, "_dann_resume_gradient_pending", False):
+            # Trainer's local batch counter restarts at zero on resume, while
+            # the restored gradient already represents the prior partial
+            # accumulation.  Force this first batch to close that accumulation
+            # after computing its loss with the original accumulation factor.
+            self.accelerator.gradient_state._set_sync_gradients(True)
+            self.args.gradient_accumulation_steps = 1
         if self.dann_batch_sampler is not None:
             self.dann_batch_sampler.acknowledge_next_batch()
         return result
@@ -1680,13 +1774,31 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
     def load_dann_batch_sampler_state(self, checkpoint_dir: str | Path) -> None:
         if self.dann_batch_sampler is None:
             return
-        _read_complete_dann_checkpoint(Path(checkpoint_dir), self.dann_batch_sampler)
+        checkpoint = _read_complete_dann_checkpoint(Path(checkpoint_dir), self.dann_batch_sampler)
+        self._pending_dann_gradient_state = checkpoint["gradient_state"]
+        self.add_callback(_DANNGradientRestoreCallback(self))
 
     def _save_checkpoint(self, model, trial, metrics=None):
         super()._save_checkpoint(model, trial, metrics=metrics)
         if self.dann_batch_sampler is None or not self.args.should_save:
             return
         checkpoint_dir = Path(self._get_output_dir(trial=trial)) / f"checkpoint-{self.state.global_step}"
+        gradient_state = {
+            "schema_version": 1,
+            "accumulation_remainder": (
+                self.dann_batch_sampler.epoch_reports[-1].get("processed_batches", 0)
+                % int(self.args.gradient_accumulation_steps)
+                if self.dann_batch_sampler.epoch_reports
+                else 0
+            ),
+            "gradients": {
+                name: parameter.grad.detach().cpu().clone()
+                for name, parameter in model.named_parameters()
+                if parameter.grad is not None
+            },
+        }
+        gradient_state_path = checkpoint_dir / "dann_gradient_state.pt"
+        _atomic_torch_save(gradient_state_path, gradient_state)
         state_path = checkpoint_dir / "dann_batch_sampler_state.json"
         audit_path = checkpoint_dir / "dann_batch_audit.json"
         self.dann_batch_sampler.prepare_resume_replay(self.args.gradient_accumulation_steps)
@@ -1729,6 +1841,8 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
                 "sampler_state_sha256": _json_sha256(state_path),
                 "audit_sha256": _json_sha256(audit_path),
                 "trainer_state_sha256": _json_sha256(checkpoint_dir / "trainer_state.json"),
+                "gradient_state_artifact": gradient_state_path.name,
+                "gradient_state_sha256": _json_sha256(gradient_state_path),
                 "model_artifact": next(
                     path.name
                     for path in (checkpoint_dir / "pytorch_model.bin", checkpoint_dir / "model.safetensors")

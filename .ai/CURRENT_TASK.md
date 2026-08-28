@@ -2,12 +2,12 @@
 
 > 更新时间：2026-08-28（北京时间）
 
-- 任务编号：M1_DANN_AUDIT_RESUME_FIX_V1
+- 任务编号：M1_SYNTACTIC_RGAT_DANN_AUDIT_RECOVERY_FIX_V3
 - 任务类型：PHASE A DANN 审计与恢复工程修复
 - 方向：laptop14 -> rest15
 - 随机种子：1000
 - 入口身份：保留 M1 句法 RGAT zero-update（零更新）入口审计身份；本修复分支提交后由新代码身份承担
-- 状态：APPROVED（代码修复已通过 CPU（中央处理器）验证；未批准 GPU（图形处理器）实验）
+- 状态：APPROVED（修复实施范围已批准；验收与实验仍 BLOCKED（阻塞））
 - 当前实现范围：仅修复 Phase A 成对 DANN 的物理遍历审计、原子持久化、检查点恢复、Control/Treatment（对照组/实验组）对齐和 legacy diagnostic（旧版诊断）降级；不运行实验
 - 最早失效阶段：Phase A target-unlabeled DANN 审计及其真实下游；必须在新目录从头验证，旧运行不晋级正式证据
 - Phase B（下游阶段）执行状态：NOT APPROVED（未批准）；本轮不实现或运行 Phase B
@@ -47,6 +47,14 @@
 - 冻结 T5-base、seed=1000、optimizer（优化器）、LR（学习率）、epoch（轮数）、batch（批大小）、checkpoint selection（检查点选择）、pseudo decoding/filtering（伪标签解码/过滤）、pseudo weight=0.75、DANN=0.03、generator/augmentation 配方、k=1 和 final ASTE 架构；不做参数搜索。
 - Phase A 输出 `phase_a_summary.json`、`phase_a_result_CN.md`、`stage_status.json`、`control_identity_audit.json`、配置快照、Git 身份、父运行身份和文件哈希，并支持 `--resume` 与长阶段进度条。
 - 本轮仅修复 Phase A 最终验收中的成对 DANN 生成损失归一化、Control/Treatment 初始化混杂、完整检查点恢复、配方/输入冻结和 DANN 审计真实性；运行 CPU（中央处理器）测试与静态检查，不启动 GPU（图形处理器）实验、正式训练、正式伪标签或目标测试。Phase A 的 Control/Treatment（对照组/实验组）抽取器训练、源域开发评估和目标无标签伪推理只允许由专用入口在用户运行实验时执行。
+
+## V3 修复状态（2026-08-28）
+
+- V3 修复针对 Sol 复审的终止边界、issued/processed 恢复、梯度累积检查点、完整状态门控和图缓存启动预检；不把提交 `63fd1a6` 视为验收通过。
+- 采样语义保持既有 `int(Trainer.state.epoch)` → `seed + sampling_epoch`，新增的 `physical_traversal_index` 只用于审计，不参与洗牌；未获研究批准前不改变采样顺序。
+- 终止前在准备下一批时读取 Trainer 状态，并以 `issued == processed == planned` 才标记 complete；issued 未确认批次恢复从 `processed_batches` 重签，绝不跳过。
+- 检查点新增原子梯度累积快照与累积偏移身份；无法证明梯度/计数安全的旧检查点硬拒绝。Phase A 启动前逐项校验 graph cache 的 manifest、relation vocabulary 和三个 split 文件身份哈希。
+- 本轮只做 CPU（中央处理器）测试、静态检查和文档同步；六个 M1 测试文件 `103 passed`，`py_compile` 与 `git diff --check` 均为退出码 0。未运行 GPU、正式训练、伪标签推理或 target_test。
 
 ## 当前实现完成状态
 
