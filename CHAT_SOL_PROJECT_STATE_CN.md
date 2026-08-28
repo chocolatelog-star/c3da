@@ -1,12 +1,22 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-28 22:05（北京时间）
+> 更新时间：2026-08-28 23:03（北京时间）
 
 ## 当前工程修复状态
 
-当前工程状态为：M1 Phase A 的 v3 运行已标记 `INVALID_REPLAY_CONTAMINATED`（重放污染无效），v4 运行已标记 `INCOMPLETE_VRAM_THRASHING`（显存抖动导致不完整），二者均不得恢复或用于实验结论。历史 V2 显存报告已标记 `VALID_DIAGNOSTIC_REPORTING_INCONSISTENT`（诊断报告口径不一致）。当前任务 `M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V1` 的代码已完成，等待 Codex Sol（高级工程模型）只读复审；本轮只修复训练生命周期，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
+当前工程状态为：M1 Phase A 的 v3 运行已标记 `INVALID_REPLAY_CONTAMINATED`（重放污染无效），v4 运行已标记 `INCOMPLETE_VRAM_THRASHING`（显存抖动导致不完整），二者均不得恢复或用于实验结论。历史 V2 显存报告已标记 `VALID_DIAGNOSTIC_REPORTING_INCONSISTENT`（诊断报告口径不一致）。当前任务 `M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V2` 的代码和 CPU（中央处理器）验证已完成，等待 Codex Sol（高级工程模型）只读复审；本轮只修复生命周期审计与门控，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
 
-## 本轮生命周期修复状态
+## 本轮 V2 生命周期修复状态
+
+本轮修复只处理 Control（对照组）返回前后生命周期证据的时序问题，不改变训练过程。V1 中外层 `main`（主函数）强引用使早期清理事件误报；V2 已在释放前建立真实 weakref（弱引用），并在外层局部变量释放、两次垃圾回收和 CUDA（英伟达 GPU 加速）缓存清理后写入最终事件。最终门控只读取 `phase_a_return_after_local_release`，早期 `control_cuda_empty_cache_after` 仅作为过程记录。
+
+- 最终事件记录各训练对象 weakref 是否存活、live CUDA tensor（活动 CUDA 张量）数量/字节数、allocated/reserved（已分配/保留显存）和清理前后 RNG（随机数生成器）哈希；最终事件缺失、对象存活、CUDA 张量残留或显存超过基线加256 MiB时硬停止。
+- 清理同时处理 Trainer/Accelerator（训练器/加速器）的 `_models`、`_optimizers`、`_dataloaders`、scheduler（调度器）、scaler（缩放器）、callbacks（回调）和训练批次引用；产物在清理前已复制为纯 CPU 数据。
+- RED（失败先行）复现了外层强引用导致早期事件误判；GREEN（修复后）覆盖最终事件、保留对象失败、写死空引用失败、内部持有器清理、模型和产物不变以及 CPU RNG 不变。
+- 全部 M1 相关 CPU 直接测试为 137/137 通过，AST（抽象语法树）和 `git diff --check`（差异格式检查）通过；未运行 GPU、Phase A（阶段A）、正式伪标签、Phase B（阶段B）、生成器、增强、最终 ASTE 或 target_test，正式实验索引不更新。
+
+## 历史：V1 生命周期修复状态
+
 
 - `t5_absa_train.py` 在模型和 DANN（领域对抗网络）审计产物保存后复制纯 CPU（中央处理器）返回数据，再显式释放 Trainer（训练器）、模型、优化器、数据加载器、回调和训练批次引用，执行垃圾回收与 CUDA 缓存清理并记录生命周期事件。
 - Phase A 运行器记录 Control（对照组）返回前、返回后、垃圾回收后、CUDA 缓存清理后的 allocated/reserved（已分配/保留显存）、活动 CUDA 张量数量与字节数、引用标志和 RNG（随机数生成器）哈希；清理不通过时硬停止 Treatment（实验组），要求独立子进程隔离。

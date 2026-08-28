@@ -1,19 +1,34 @@
 # 当前任务
 
-> 更新时间：2026-08-28 22:05（北京时间）
+> 更新时间：2026-08-28 23:03（北京时间）
 
-- 任务编号：M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V1
+- 任务编号：M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V2
 - 任务类型：ENGINEERING FIX（工程修复）
 - 方向：laptop14 -> rest15
 - 随机种子：1000
 - 入口身份：M1 Phase A Control（对照组）到 Treatment（实验组）训练生命周期
-- 状态：COMPLETE（代码修复完成，等待 Codex Sol（高级工程模型）只读复审）
+- 状态：COMPLETE（V2代码修复和CPU验证完成，等待 Codex Sol（高级工程模型）只读复审）
 - 当前功能分支：codex/m1-syntactic-rgat-entry-audit-v1
-- 本轮性质：只修复训练生命周期，不启动实验
+- 本轮性质：只修复生命周期审计与门控，不启动实验
 - V4 运行：INCOMPLETE_VRAM_THRASHING（显存抖动导致不完整），不得恢复、不得删除、不得用于实验结论
 - V3 运行：INVALID_REPLAY_CONTAMINATED（重放污染无效），不得恢复、不得用于实验结论
 
-## 本轮生命周期修复
+## 本轮 V2 生命周期修复
+
+- Codex Sol 已确认 V1 的 P0：外层 main（主函数）仍持有 Trainer（训练器）和模型强引用时，早期 `control_cuda_empty_cache_after` 事件会误用于最终门控；V2 已将其降级为过程记录。
+- 清理前为 Trainer、模型、优化器、数据加载器、callbacks（回调）及其他训练运行对象建立真实 weakref（弱引用）；最终 `phase_a_return_after_local_release` 在外层强引用释放后重新采集真实弱引用、CUDA（英伟达 GPU 加速）张量和显存状态。
+- `evaluate_control_lifecycle_gate` 只使用最终事件判定；最终事件缺失、弱引用仍存活、仍有 Control（对照组）CUDA 张量或显存超过基线加256 MiB时硬停止，不得用早期事件或写死的空引用绕过。
+- 生命周期清理同时处理 Trainer/Accelerator（加速器）的 `_models`、`_optimizers`、`_dataloaders`、scheduler（调度器）、scaler（缩放器）、callbacks 和训练批次引用；只改变对象释放时机，不改变训练过程。
+- V2 不改变模型、图传播公式、损失、数据、采样、随机种子、DANN=0.03、训练参数或研究范围；不启动 V5、Phase A（阶段A）、GPU（图形处理器）、正式伪标签或 target_test（目标测试集）。
+
+## 当前验证边界
+
+- RED（失败先行）：新增的最终生命周期回归测试在实现前因缺少 `finalize_phase_a_training_runtime` 入口而导入失败，复现了 V1 不能提供最终真实弱引用证据的问题。
+- GREEN（修复后）：全部 M1 相关 CPU 直接测试共137项通过；覆盖外层强引用顺序、最终弱引用死亡、保留对象硬失败、写死空引用硬失败和 Trainer/Accelerator 持有器清理。
+- AST 检查和 `git diff --check`（差异格式检查）通过；未运行 GPU 诊断、正式 Phase A、正式伪标签、生成器、增强、Phase B（阶段B）、最终 ASTE（方面级情感三元组抽取）或 target_test；正式实验索引不更新。
+- 若真实 GPU 运行时最终生命周期门控失败，必须停止并改用 Control/Treatment 独立子进程隔离，不得继续叠加清理补丁。
+
+## 历史：V1 生命周期修复
 
 - V2 显存诊断确认图批次为 27 个节点、131 条边，图模块峰值增量约 17.3 MiB（兆字节）；隔离 Treatment 含完整梯度和 AdamW（自适应矩估计）状态时不受 8GB（8 GB）显存硬限制。
 - Control 清理前后 reserved（保留显存）下降约 1972 MiB；同一 Python（Python 语言）进程串行运行 Control/Treatment 时，Control 生命周期残留是高置信度根因候选。
@@ -22,7 +37,7 @@
 - 报告区分 audit_status（诊断完整性）和 attribution_decision（归因决定）；历史 V2 报告保留并标记 VALID_DIAGNOSTIC_REPORTING_INCONSISTENT（诊断报告口径不一致）。
 - 本轮不改变图传播公式、模型结构、损失、DANN=0.03、数据、采样、随机种子、训练参数或研究范围。
 
-## 当前验证边界
+## 历史：V1 验证边界
 
 - TDD（测试驱动开发）RED（修复前失败证据）已复现 Control 运行对象在 Treatment 前仍可达；GREEN（修复后通过证据）验证清理门控、模型参数、产物字节和 CPU RNG 不变。
 - 全部 M1 相关 CPU 直接测试共 133 项通过；未运行 GPU（图形处理器）诊断、正式 Phase A、正式伪标签、生成器、增强、Phase B（阶段 B）、最终 ASTE（方面级情感三元组抽取）或 target_test（目标测试集）。
