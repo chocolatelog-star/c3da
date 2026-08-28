@@ -349,3 +349,37 @@ def test_lifecycle_pre_registered_rule_classifies_control_cleanup_drop():
     )
     assert result["classification"] == "CONTROL_LIFECYCLE_RETENTION_IDENTIFIED"
     assert result["control_cleanup_allocated_drop_bytes"] > 1024**3
+
+
+def test_lifecycle_report_does_not_call_dead_weakref_a_cuda_reference():
+    events = [
+        {
+            "callpoint": "control_diagnostic_end_before_locals_exit",
+            "memory": {"allocated_bytes": 2 * 1024**3, "reserved_bytes": 2 * 1024**3},
+        },
+        {
+            "callpoint": "cuda_empty_cache_after",
+            "memory": {
+                "allocated_bytes": 0,
+                "reserved_bytes": 0,
+                "live_cuda_tensor_count": 0,
+                "live_cuda_tensor_bytes": 0,
+            },
+            "lifecycle": {
+                # This is the old weak-reference reporting shape.  A weakref
+                # that is dead and no live CUDA tensor is not a retained object.
+                "control_model_reachable": True,
+                "control_optimizer_reachable": True,
+                "control_trainer_reachable": True,
+                "live_cuda_tensor_count": 0,
+                "live_cuda_tensor_bytes": 0,
+            },
+        },
+    ]
+    result = audit.classify_lifecycle_attribution(
+        events,
+        isolated_treatment_steady_allocated_bytes=100,
+        total_memory_bytes=8 * 1024**3,
+    )
+    assert result["control_cuda_references_remain"] is False
+    assert result["classification"] == "CONTROL_LIFECYCLE_RETENTION_IDENTIFIED"

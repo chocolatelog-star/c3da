@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import math
 import os
+import pickle
 import random
 import shutil
 import sys
 import tempfile
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +44,228 @@ from syntactic_graph import (
     load_graph_cache_directory,
 )
 from syntactic_graph_adapter import load_seq2seq_model
+
+
+_PHASE_A_GRAPH_TRAINING_AUTHORIZED = False
+_PHASE_A_LIFECYCLE_CLEANUP_REQUESTED = False
+
+
+def _phase_a_state_sha256(value: object) -> str:
+    return hashlib.sha256(pickle.dumps(value, protocol=4)).hexdigest()
+
+
+def phase_a_rng_state_hashes(*, include_cuda: bool | None = None) -> dict[str, str]:
+    """Hash all RNG streams touched by the Phase A training process."""
+    if include_cuda is None:
+        include_cuda = torch.cuda.is_available()
+    cuda_state: object = "unavailable"
+    if include_cuda and torch.cuda.is_available():
+        cuda_state = tuple(
+            bytes(state.detach().cpu().contiguous().numpy().tobytes())
+            for state in torch.cuda.get_rng_state_all()
+        )
+    return {
+        "python_rng_sha256": _phase_a_state_sha256(random.getstate()),
+        "numpy_rng_sha256": _phase_a_state_sha256(np.random.get_state()),
+        "torch_cpu_rng_sha256": _phase_a_state_sha256(
+            bytes(torch.get_rng_state().contiguous().numpy().tobytes())
+        ),
+        "torch_cuda_rng_sha256": _phase_a_state_sha256(cuda_state),
+    }
+
+
+def _phase_a_live_cuda_tensor_stats() -> dict[str, int]:
+    count = 0
+    total_bytes = 0
+    for obj in gc.get_objects():
+        try:
+            if not torch.is_tensor(obj) or not obj.is_cuda:
+                continue
+            count += 1
+            total_bytes += int(obj.numel() * obj.element_size())
+        except (ReferenceError, RuntimeError, AttributeError):
+            continue
+    return {
+        "live_cuda_tensor_count": count,
+        "live_cuda_tensor_bytes": total_bytes,
+    }
+
+
+def phase_a_lifecycle_memory_snapshot(*, include_cuda: bool | None = None) -> dict[str, int]:
+    """Return allocator and Python-owned CUDA tensor counters without allocating tensors."""
+    if include_cuda is None:
+        include_cuda = torch.cuda.is_available()
+    if include_cuda and torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        memory = {
+            "allocated_bytes": int(torch.cuda.memory_allocated(device)),
+            "reserved_bytes": int(torch.cuda.memory_reserved(device)),
+            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+        }
+    else:
+        memory = {
+            "allocated_bytes": 0,
+            "reserved_bytes": 0,
+            "peak_allocated_bytes": 0,
+            "peak_reserved_bytes": 0,
+        }
+    live = (
+        _phase_a_live_cuda_tensor_stats()
+        if include_cuda and torch.cuda.is_available()
+        else {"live_cuda_tensor_count": 0, "live_cuda_tensor_bytes": 0}
+    )
+    return {**memory, **live}
+
+
+def _phase_a_reference_flags(runtime_refs: dict[str, object]) -> dict[str, bool]:
+    return {name: value is not None for name, value in runtime_refs.items()}
+
+
+def _phase_a_lifecycle_event(
+    callpoint: str,
+    *,
+    runtime_refs: dict[str, object],
+    include_cuda: bool | None = None,
+    extra: dict[str, object] | None = None,
+) -> dict:
+    event = {
+        "callpoint": callpoint,
+        "memory": phase_a_lifecycle_memory_snapshot(include_cuda=include_cuda),
+        "references": _phase_a_reference_flags(runtime_refs),
+    }
+    if extra:
+        event.update(extra)
+    return event
+
+
+def cleanup_phase_a_training_runtime(
+    runtime_refs: dict[str, object],
+    *,
+    cuda: bool | None = None,
+    variant: str = "phase_a",
+) -> dict:
+    """Release Phase A runtime objects after artifacts have been durably saved.
+
+    ``runtime_refs`` is deliberately a mutable ownership registry.  Clearing it
+    makes the release contract testable and prevents a returned report from
+    retaining a Trainer, model, optimizer, dataloader, callback, or batch.
+    This function does not call any random operation and never changes an
+    artifact on disk.
+    """
+    use_cuda = torch.cuda.is_available() if cuda is None else bool(cuda)
+    before_rng = phase_a_rng_state_hashes(include_cuda=use_cuda)
+    events = [
+        _phase_a_lifecycle_event(
+            f"{variant}_return_before_cleanup",
+            runtime_refs=runtime_refs,
+            include_cuda=use_cuda,
+            extra={"rng_state": before_rng},
+        )
+    ]
+    weak_refs: dict[str, weakref.ReferenceType] = {}
+    for name, value in runtime_refs.items():
+        if value is not None:
+            try:
+                weak_refs[name] = weakref.ref(value)
+            except TypeError:
+                pass
+
+    trainer = runtime_refs.get("trainer")
+    model = runtime_refs.get("model")
+    optimizer = runtime_refs.get("optimizer")
+    if optimizer is None and trainer is not None:
+        optimizer = getattr(trainer, "optimizer", None)
+    dataloader = runtime_refs.get("dataloader")
+    callbacks = runtime_refs.get("callbacks")
+
+    if optimizer is not None:
+        try:
+            optimizer.zero_grad(set_to_none=True)
+        except (AttributeError, TypeError):
+            pass
+        try:
+            optimizer.state.clear()
+        except AttributeError:
+            pass
+    if model is not None and isinstance(model, nn.Module):
+        model.zero_grad(set_to_none=True)
+        if model is not None and next(model.parameters(), None) is not None:
+            model.cpu()
+    if trainer is not None:
+        for name in (
+            "optimizer",
+            "lr_scheduler",
+            "model",
+            "train_dataset",
+            "eval_dataset",
+            "data_collator",
+            "_train_dataloader",
+            "_past",
+            "dann_batch_sampler",
+        ):
+            if hasattr(trainer, name):
+                setattr(trainer, name, None)
+        callback_handler = getattr(trainer, "callback_handler", None)
+        if callback_handler is not None and hasattr(callback_handler, "callbacks"):
+            callback_handler.callbacks.clear()
+    if callbacks is not None and hasattr(callbacks, "clear"):
+        callbacks.clear()
+    if dataloader is not None:
+        del dataloader
+    runtime_refs.clear()
+    trainer = None
+    model = None
+    optimizer = None
+    callbacks = None
+    dataloader = None
+    gc.collect()
+    events.append(
+        {
+            "callpoint": f"{variant}_gc_after",
+            "memory": phase_a_lifecycle_memory_snapshot(include_cuda=use_cuda),
+            "references": {
+                name: bool(reference() is not None)
+                for name, reference in weak_refs.items()
+            },
+        }
+    )
+    if use_cuda and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    after_rng = phase_a_rng_state_hashes(include_cuda=use_cuda)
+    events.append(
+        {
+            "callpoint": f"{variant}_cuda_empty_cache_after",
+            "memory": phase_a_lifecycle_memory_snapshot(include_cuda=use_cuda),
+            "references": {
+                name: bool(reference() is not None)
+                for name, reference in weak_refs.items()
+            },
+            "rng_state": after_rng,
+        }
+    )
+    return {
+        "schema_version": 1,
+        "cleanup_performed": True,
+        "events": events,
+        "rng_state_before_cleanup": before_rng,
+        "rng_state_after_cleanup": after_rng,
+        "rng_state_unchanged": before_rng == after_rng,
+        "references_after_cleanup": events[-1]["references"],
+    }
+
+
+def _phase_a_cpu_copy(value: object) -> object:
+    if torch.is_tensor(value):
+        return value.detach().cpu().clone()
+    if isinstance(value, dict):
+        return {key: _phase_a_cpu_copy(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_phase_a_cpu_copy(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_phase_a_cpu_copy(item) for item in value)
+    return value
 
 
 def reproducibility_training_args(seed: int, mode: str) -> dict:
@@ -2563,9 +2788,6 @@ def add_task_special_tokens(tokenizer, model, rows: list[dict]) -> None:
         print(f"initialized {token} from {init_word}")
 
 
-_PHASE_A_GRAPH_TRAINING_AUTHORIZED = False
-
-
 def enforce_graph_training_boundary(use_syntactic_graph_adapter: bool) -> None:
     """Keep direct graph training closed; only the Phase A API may authorize it."""
     if use_syntactic_graph_adapter and not _PHASE_A_GRAPH_TRAINING_AUTHORIZED:
@@ -2583,19 +2805,22 @@ def run_phase_a_training(argv: list[str]) -> dict | None:
     flag, so its graph-training hard stop remains active. The dedicated Phase A
     runner calls this API only after validating its frozen recipe and identities.
     """
-    global _PHASE_A_GRAPH_TRAINING_AUTHORIZED
+    global _PHASE_A_GRAPH_TRAINING_AUTHORIZED, _PHASE_A_LIFECYCLE_CLEANUP_REQUESTED
     previous_argv = sys.argv
     previous_authorization = _PHASE_A_GRAPH_TRAINING_AUTHORIZED
+    previous_cleanup_request = _PHASE_A_LIFECYCLE_CLEANUP_REQUESTED
     sys.argv = ["t5_absa_train.py", *argv]
     _PHASE_A_GRAPH_TRAINING_AUTHORIZED = True
+    _PHASE_A_LIFECYCLE_CLEANUP_REQUESTED = True
     try:
         return main()
     finally:
         sys.argv = previous_argv
         _PHASE_A_GRAPH_TRAINING_AUTHORIZED = previous_authorization
+        _PHASE_A_LIFECYCLE_CLEANUP_REQUESTED = previous_cleanup_request
 
 
-def main() -> None:
+def main() -> dict | None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", default=r"J:\nlp\models\t5-base-py")
     parser.add_argument("--train_file", required=True)
@@ -2699,7 +2924,9 @@ def main() -> None:
     dev_rows = read_jsonl(args.dev_file)
     train_graph_cache = None
     dev_graph_cache = None
+    target_graph_cache = None
     target_domain_rows = []
+    source_train_rows = None
     dann_batch_sampler = None
     graph_relation_vocab_size = 1
     if args.use_syntactic_graph_adapter:
@@ -2991,7 +3218,54 @@ def main() -> None:
     trainer.save_model(str(best_dir))
     tokenizer.save_pretrained(str(best_dir))
     print(f"saved {args.checkpoint_selection} model to {best_dir}")
-    return trainer.get_dann_batch_audit()
+    dann_audit = _phase_a_cpu_copy(trainer.get_dann_batch_audit())
+    if not _PHASE_A_LIFECYCLE_CLEANUP_REQUESTED:
+        return None
+
+    runtime_refs = {
+        "trainer": trainer,
+        "model": model,
+        "optimizer": getattr(trainer, "optimizer", None),
+        "dataloader": getattr(trainer, "_train_dataloader", None),
+        "callbacks": getattr(getattr(trainer, "callback_handler", None), "callbacks", None),
+        "training_batch_refs": getattr(trainer, "_past", None),
+    }
+    lifecycle = cleanup_phase_a_training_runtime(
+        runtime_refs,
+        variant="treatment" if args.use_syntactic_graph_adapter else "control",
+    )
+    # These assignments are intentional: the function's own frame must not
+    # keep a strong reference after the lifecycle audit has been constructed.
+    trainer = None
+    model = None
+    train_data = None
+    dev_data = None
+    collator = None
+    dann_batch_sampler = None
+    tokenizer = None
+    train_rows = None
+    dev_rows = None
+    target_domain_rows = None
+    source_train_rows = None
+    train_graph_cache = None
+    dev_graph_cache = None
+    target_graph_cache = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    lifecycle["events"].append(
+        {
+            "callpoint": "phase_a_return_after_local_release",
+            "memory": phase_a_lifecycle_memory_snapshot(),
+            "references": {},
+            "rng_state": phase_a_rng_state_hashes(),
+        }
+    )
+    lifecycle["rng_state_after_local_release"] = phase_a_rng_state_hashes()
+    lifecycle["rng_state_unchanged"] = (
+        lifecycle["rng_state_before_cleanup"] == lifecycle["rng_state_after_local_release"]
+    )
+    return {"dann_batch_audit": dann_audit, "lifecycle": _phase_a_cpu_copy(lifecycle)}
 
 
 if __name__ == "__main__":

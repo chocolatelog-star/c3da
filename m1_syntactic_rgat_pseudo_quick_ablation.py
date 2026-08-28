@@ -34,6 +34,8 @@ from t5_aste_pipeline import DATASETS
 from t5_absa_train import (
     compute_dann_expected_max_steps,
     compute_dann_planned_batches,
+    phase_a_lifecycle_memory_snapshot,
+    phase_a_rng_state_hashes,
     read_dann_audit_journal,
 )
 
@@ -65,6 +67,7 @@ CONTROL_IDENTITY_FIELDS = (
     "code_semantics",
     "artifact_sha256",
 )
+CONTROL_LIFECYCLE_ALLOCATED_CAP_BYTES = 256 * 1024 * 1024
 FROZEN_RECIPE = {
     "source_dataset": "laptop14",
     "target_dataset": "rest15",
@@ -897,7 +900,7 @@ def _training_argv(
 def _run_training(args: argparse.Namespace, variant_dir: Path, graph_enabled: bool) -> dict | None:
     from t5_absa_train import run_phase_a_training
 
-    return run_phase_a_training(
+    result = run_phase_a_training(
         _training_argv(
             args,
             variant_dir,
@@ -906,6 +909,86 @@ def _run_training(args: argparse.Namespace, variant_dir: Path, graph_enabled: bo
             variant_dir / "phase_a_initialization_audit.json",
         )
     )
+    if isinstance(result, dict) and isinstance(result.get("lifecycle"), dict):
+        _atomic_write_json(variant_dir / "phase_a_lifecycle_audit.json", result["lifecycle"])
+    return result
+
+
+def append_control_return_lifecycle_event(
+    lifecycle_audit: dict,
+    *,
+    baseline: dict[str, int],
+) -> dict:
+    """Record the first point visible to the Phase A runner after Control returns."""
+    event = {
+        "callpoint": "control_return_after_return",
+        "memory": phase_a_lifecycle_memory_snapshot(),
+        "references": dict(lifecycle_audit.get("references_after_cleanup", {})),
+        "baseline": {
+            "allocated_bytes": int(baseline.get("allocated_bytes", 0)),
+            "reserved_bytes": int(baseline.get("reserved_bytes", 0)),
+        },
+        "rng_state": phase_a_rng_state_hashes(),
+    }
+    lifecycle_audit.setdefault("events", []).append(event)
+    lifecycle_audit["runner_return_recorded"] = True
+    return event
+
+
+def evaluate_control_lifecycle_gate(
+    lifecycle_audit: dict,
+    *,
+    baseline: dict[str, int],
+    allocated_cap_bytes: int = CONTROL_LIFECYCLE_ALLOCATED_CAP_BYTES,
+) -> dict:
+    """Hard-stop Treatment unless Control is no longer retained after cleanup."""
+    events = lifecycle_audit.get("events", [])
+    by_name = {str(event.get("callpoint")): event for event in events}
+    cleanup_event = (
+        by_name.get("control_cuda_empty_cache_after")
+        or by_name.get("phase_a_cuda_empty_cache_after")
+    )
+    final_event = by_name.get("phase_a_return_after_local_release") or cleanup_event
+    reasons: list[str] = []
+    if cleanup_event is None:
+        reasons.append("missing_control_cuda_cleanup_event")
+    if not bool(lifecycle_audit.get("cleanup_performed")):
+        reasons.append("phase_a_training_cleanup_not_performed")
+    if not bool(lifecycle_audit.get("rng_state_unchanged")):
+        reasons.append("cleanup_changed_rng_state")
+    cleanup_memory = (cleanup_event or {}).get("memory", {})
+    live_count = int(cleanup_memory.get("live_cuda_tensor_count", 0) or 0)
+    live_bytes = int(cleanup_memory.get("live_cuda_tensor_bytes", 0) or 0)
+    if live_count > 0 or live_bytes > 0:
+        reasons.append("control_cuda_tensors_remain_after_cleanup")
+    cleanup_refs = (cleanup_event or {}).get("references", {})
+    if any(bool(cleanup_refs.get(name)) for name in (
+        "model", "optimizer", "trainer", "dataloader", "callbacks", "training_batch_refs"
+    )):
+        reasons.append("control_runtime_reference_remains_after_cleanup")
+    allocated = int((final_event or {}).get("memory", {}).get("allocated_bytes", 0) or 0)
+    baseline_allocated = int(baseline.get("allocated_bytes", 0) or 0)
+    if allocated > baseline_allocated + int(allocated_cap_bytes):
+        reasons.append("control_allocated_memory_exceeds_cleanup_cap")
+    passed = not reasons
+    return {
+        "passed": passed,
+        "treatment_allowed": passed,
+        "next_action": (
+            "CONTINUE_PHASE_A_TREATMENT"
+            if passed
+            else "CONTROL_TREATMENT_SUBPROCESS_ISOLATION_REQUIRED"
+        ),
+        "reasons": reasons,
+        "baseline": dict(baseline),
+        "allocated_cap_bytes": int(allocated_cap_bytes),
+        "observed_cleanup_memory": {
+            "allocated_bytes": allocated,
+            "live_cuda_tensor_count": live_count,
+            "live_cuda_tensor_bytes": live_bytes,
+        },
+        "cleanup_reference_flags": dict(cleanup_refs),
+    }
 
 
 def _pipeline_argv(
@@ -1432,6 +1515,10 @@ def _stage_spec(
                 "extractor_best": control_model_path,
                 "dann_batch_audit": audit_path,
                 "phase_a_initialization_audit": initialization_path,
+                **(
+                    {"phase_a_lifecycle_audit": control_dir / "phase_a_lifecycle_audit.json"}
+                    if execute_control_training else {}
+                ),
             },
             "variant_dir": control_dir,
         }
@@ -1447,6 +1534,7 @@ def _stage_spec(
                 "extractor_best": model_path,
                 "dann_batch_audit": audit_path,
                 "phase_a_initialization_audit": initialization_path,
+                "phase_a_lifecycle_audit": treatment_dir / "phase_a_lifecycle_audit.json",
             },
             "variant_dir": treatment_dir,
         }
@@ -1610,6 +1698,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     _write_inputs(input_rows, run_dir, resume=args.resume)
     for variant_dir in variant_dirs.values():
         _write_variant_inputs(variant_dir, run_dir, resume=args.resume)
+    control_lifecycle_baseline = phase_a_lifecycle_memory_snapshot()
     control_reuse_audit = {
         "reuse_allowed": False,
         "requires_rerun": True,
@@ -1784,7 +1873,9 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             _atomic_write_json(run_dir / "stage_status.json", state)
             if execute:
                 if stage == "control_training":
-                    _run_training(args, variant_dirs["control"], False)
+                    training_result = _run_training(args, variant_dirs["control"], False)
+                    if not isinstance(training_result, dict):
+                        raise RuntimeError("Control Phase A training returned no lifecycle audit")
                     control_model_path = variant_dirs["control"] / "models" / "extractor" / "best"
                     control_dann_batch_audit_path = (variant_dirs["control"] / "dann_batch_audit.json").resolve()
                     control_initialization_audit_path = (variant_dirs["control"] / "phase_a_initialization_audit.json").resolve()
@@ -1809,6 +1900,36 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                     }
                     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
                 elif stage == "treatment_training":
+                    lifecycle_path = variant_dirs["control"] / "phase_a_lifecycle_audit.json"
+                    if not lifecycle_path.is_file():
+                        raise RuntimeError(
+                            "Control lifecycle audit is missing; "
+                            "independent Control/Treatment subprocess isolation is required"
+                        )
+                    lifecycle_audit = _read_json(lifecycle_path)
+                    if not lifecycle_audit.get("runner_return_recorded"):
+                        append_control_return_lifecycle_event(
+                            lifecycle_audit,
+                            baseline=control_lifecycle_baseline,
+                        )
+                    lifecycle_gate = evaluate_control_lifecycle_gate(
+                        lifecycle_audit,
+                        baseline=control_lifecycle_baseline,
+                    )
+                    lifecycle_audit["control_lifecycle_gate"] = lifecycle_gate
+                    _atomic_write_json(lifecycle_path, lifecycle_audit)
+                    if not lifecycle_gate["passed"]:
+                        state["status"] = "BLOCKED"
+                        state["decision"] = {
+                            "status": "BLOCKED",
+                            "next_action": lifecycle_gate["next_action"],
+                            "reasons": lifecycle_gate["reasons"],
+                        }
+                        _atomic_write_json(run_dir / "stage_status.json", state)
+                        raise RuntimeError(
+                            "Control lifecycle cleanup gate failed; "
+                            "independent Control/Treatment subprocess isolation is required"
+                        )
                     _run_training(args, variant_dirs["treatment"], True)
                 elif stage == "control_source_dev_evaluation":
                     _run_pipeline_command(args, variant_dirs["control"], "evaluate", False, control_model_path, "source_dev")
@@ -1881,6 +2002,14 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         require_journal=True,
         require_fresh_replay_free=not args.resume,
     )
+    lifecycle_reports = {}
+    for variant in ("control", "treatment"):
+        lifecycle_path = variant_dirs[variant] / "phase_a_lifecycle_audit.json"
+        if lifecycle_path.is_file():
+            lifecycle_reports[variant] = {
+                "path": str(lifecycle_path.resolve()),
+                "report": _read_json(lifecycle_path),
+            }
     gate_result = evaluate_phase_a_gates(metrics)
     decision = decide_phase_a(gate_result)
     summary = {
@@ -1894,6 +2023,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         "gates": gate_result["gates"],
         "metrics": metrics,
         "dann_batch_audit": dann_batch_audit,
+        "phase_a_lifecycle": lifecycle_reports,
         "phase_a_initialization_audit": initialization_pair_audit,
         "control_identity_audit": control_reuse_audit,
         "identity": identity_metadata,

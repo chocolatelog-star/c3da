@@ -5,6 +5,8 @@ import json
 import tempfile
 import copy
 import io
+import gc
+import weakref
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -36,6 +38,8 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     validate_input_split,
     validate_phase_a_graph_cache,
     prepare_legacy_diagnostic_resume,
+    evaluate_control_lifecycle_gate,
+    append_control_return_lifecycle_event,
 )
 from syntactic_graph_adapter import load_seq2seq_model
 from t5_absa_train import (
@@ -46,7 +50,148 @@ from t5_absa_train import (
     find_latest_complete_dann_checkpoint,
     initialize_domain_adversarial_head,
     recover_dann_audit_journal,
+    cleanup_phase_a_training_runtime,
+    phase_a_rng_state_hashes,
 )
+
+
+def test_control_lifecycle_red_reproduces_reachable_runtime_before_treatment():
+    """RED guard: a reachable Control runtime must never authorize Treatment."""
+    runtime = {"model": object(), "optimizer": object(), "trainer": object()}
+    audit = {
+        "events": [
+            {
+                "callpoint": "control_return_after_return",
+                "memory": {
+                    "allocated_bytes": 300 * 1024 * 1024,
+                    "reserved_bytes": 300 * 1024 * 1024,
+                    "live_cuda_tensor_count": 1,
+                    "live_cuda_tensor_bytes": 1024,
+                },
+                "references": {
+                    "control_model_reachable": True,
+                    "control_optimizer_reachable": True,
+                    "control_trainer_reachable": True,
+                },
+            },
+            {
+                "callpoint": "control_cuda_empty_cache_after",
+                "memory": {
+                    "allocated_bytes": 300 * 1024 * 1024,
+                    "reserved_bytes": 300 * 1024 * 1024,
+                    "live_cuda_tensor_count": 1,
+                    "live_cuda_tensor_bytes": 1024,
+                },
+                "references": {
+                    "control_model_reachable": True,
+                    "control_optimizer_reachable": True,
+                    "control_trainer_reachable": True,
+                },
+            },
+        ],
+        "runtime_references": runtime,
+    }
+    gate = evaluate_control_lifecycle_gate(
+        audit,
+        baseline={"allocated_bytes": 0, "reserved_bytes": 0},
+    )
+    assert gate["passed"] is False
+    assert gate["treatment_allowed"] is False
+    assert gate["next_action"] == "CONTROL_TREATMENT_SUBPROCESS_ISOLATION_REQUIRED"
+
+
+def test_phase_a_cleanup_releases_runtime_and_preserves_rng():
+    class Runtime:
+        pass
+
+    model = Runtime()
+    optimizer = Runtime()
+    trainer = Runtime()
+    model_ref = weakref.ref(model)
+    optimizer_ref = weakref.ref(optimizer)
+    trainer_ref = weakref.ref(trainer)
+    runtime = {"model": model, "optimizer": optimizer, "trainer": trainer}
+    before_rng = phase_a_rng_state_hashes(include_cuda=False)
+    audit = cleanup_phase_a_training_runtime(runtime, cuda=False)
+    del model, optimizer, trainer
+    gc.collect()
+    assert runtime == {}
+    assert model_ref() is None
+    assert optimizer_ref() is None
+    assert trainer_ref() is None
+    assert audit["cleanup_performed"] is True
+    assert audit["rng_state_before_cleanup"] == before_rng
+    assert audit["rng_state_after_cleanup"] == before_rng
+
+
+def test_control_return_event_is_added_without_retaining_runtime_objects():
+    audit = {"events": []}
+    event = append_control_return_lifecycle_event(
+        audit,
+        baseline={"allocated_bytes": 10, "reserved_bytes": 20},
+    )
+    assert event["callpoint"] == "control_return_after_return"
+    assert audit["events"][-1] == event
+    assert "runtime_object" not in json.dumps(audit)
+
+
+def test_control_lifecycle_gate_allows_treatment_only_after_clean_release():
+    audit = {
+        "cleanup_performed": True,
+        "rng_state_unchanged": True,
+        "references_after_cleanup": {
+            "model": False,
+            "optimizer": False,
+            "trainer": False,
+        },
+        "events": [
+            {
+                "callpoint": "control_cuda_empty_cache_after",
+                "memory": {
+                    "allocated_bytes": 64 * 1024 * 1024,
+                    "reserved_bytes": 96 * 1024 * 1024,
+                    "live_cuda_tensor_count": 0,
+                    "live_cuda_tensor_bytes": 0,
+                },
+                "references": {
+                    "model": False,
+                    "optimizer": False,
+                    "trainer": False,
+                },
+            },
+            {
+                "callpoint": "phase_a_return_after_local_release",
+                "memory": {
+                    "allocated_bytes": 64 * 1024 * 1024,
+                    "reserved_bytes": 96 * 1024 * 1024,
+                    "live_cuda_tensor_count": 0,
+                    "live_cuda_tensor_bytes": 0,
+                },
+                "references": {},
+            },
+        ],
+    }
+    gate = evaluate_control_lifecycle_gate(
+        audit,
+        baseline={"allocated_bytes": 0, "reserved_bytes": 0},
+    )
+    assert gate["passed"] is True
+    assert gate["treatment_allowed"] is True
+
+
+def test_phase_a_cleanup_preserves_model_and_audit_artifact_bytes(tmp_path):
+    model = torch.nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+    model_before = [parameter.detach().clone() for parameter in model.parameters()]
+    audit_path = tmp_path / "dann_batch_audit.json"
+    audit_path.write_text(json.dumps({"seed": 1000, "batches": [[0, 1]]}), encoding="utf-8")
+    audit_bytes = audit_path.read_bytes()
+    runtime = {"model": model, "optimizer": optimizer}
+    lifecycle = cleanup_phase_a_training_runtime(runtime, cuda=False)
+    for parameter, expected in zip(model.parameters(), model_before):
+        assert torch.equal(parameter, expected)
+    assert audit_path.read_bytes() == audit_bytes
+    assert lifecycle["rng_state_unchanged"] is True
 
 
 def _metrics():

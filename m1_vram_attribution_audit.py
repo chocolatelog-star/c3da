@@ -841,11 +841,33 @@ def classify_lifecycle_attribution(
     allocated_drop = max(0, int(before_memory.get("allocated_bytes", 0) or 0) - int(after_memory.get("allocated_bytes", 0) or 0))
     reserved_drop = max(0, int(before_memory.get("reserved_bytes", 0) or 0) - int(after_memory.get("reserved_bytes", 0) or 0))
     after_lifecycle = after.get("lifecycle", {})
-    control_refs_remain = bool(
+    live_cuda_count = int(
+        after_lifecycle.get(
+            "live_cuda_tensor_count",
+            after_memory.get("live_cuda_tensor_count", 0),
+        )
+        or 0
+    )
+    live_cuda_bytes = int(
+        after_lifecycle.get(
+            "live_cuda_tensor_bytes",
+            after_memory.get("live_cuda_tensor_bytes", 0),
+        )
+        or 0
+    )
+    weakref_alive = bool(
+        after_lifecycle.get("control_model_weakref_alive_after_cleanup", False)
+        or after_lifecycle.get("control_optimizer_weakref_alive_after_cleanup", False)
+    )
+    strong_reachable = bool(
         after_lifecycle.get("control_model_reachable", False)
         or after_lifecycle.get("control_optimizer_reachable", False)
         or after_lifecycle.get("control_trainer_reachable", False)
     )
+    # Older V2 events used ``*_reachable`` for a live weakref, even after the
+    # referent had been collected.  Treat that shape as retained only when it
+    # is corroborated by an explicitly live weakref or CUDA tensor ownership.
+    control_refs_remain = bool(weakref_alive or (strong_reachable and (live_cuda_count or live_cuda_bytes)))
     control_retention = bool(
         allocated_drop > int(threshold_bytes)
         or reserved_drop > int(threshold_bytes)
@@ -866,6 +888,11 @@ def classify_lifecycle_attribution(
         "control_cleanup_allocated_drop_bytes": allocated_drop,
         "control_cleanup_reserved_drop_bytes": reserved_drop,
         "control_cuda_references_remain": control_refs_remain,
+        "control_live_cuda_tensor_count_after_cleanup": live_cuda_count,
+        "control_live_cuda_tensor_bytes_after_cleanup": live_cuda_bytes,
+        "reference_report_consistent": not (
+            strong_reachable and not weakref_alive and not (live_cuda_count or live_cuda_bytes)
+        ),
         "isolated_treatment_steady_allocated_bytes": int(isolated_treatment_steady_allocated_bytes),
         "treatment_near_capacity_threshold_ratio": 0.90,
         "treatment_near_capacity": treatment_near_capacity,
@@ -1165,7 +1192,7 @@ def _write_markdown(path: Path, report: dict) -> None:
     lines = [
         "# M1 句法 RGAT V2 显存归因审计报告",
         "",
-        f"总体状态：`{report['status']}`",
+        f"诊断完整性：`{report.get('audit_status', report.get('status'))}`",
         "",
         f"固定批次：source row `{batch.get('source_row_id')}` + target row `{batch.get('target_row_id')}`，连续 `{config.get('steps')}` 次 zero-update（零更新）。",
         "",
@@ -1173,7 +1200,7 @@ def _write_markdown(path: Path, report: dict) -> None:
         f"- Treatment（实验组）峰值：allocated `{comparison.get('treatment_peak_allocated_bytes')}` bytes，reserved `{comparison.get('treatment_peak_reserved_bytes')}` bytes。",
         f"- 图模块峰值增量：`{comparison.get('graph_module_increment_peak_allocated_bytes')}` bytes。",
         f"- 首个显著增长调用点：`{comparison.get('first_significant_growth_callpoint')}`。",
-        f"- 归因分类：`{comparison.get('classification', '未完成')}`；泄漏疑点=`{comparison.get('leak_suspected')}`，碎片化疑点=`{comparison.get('fragmentation_suspected')}`，WDDM（Windows 显示驱动模型）换页疑点=`{comparison.get('wddm_paging_suspected')}`。",
+        f"- 生命周期归因：`{report.get('attribution_decision', comparison.get('classification', '未完成'))}`；泄漏疑点=`{comparison.get('leak_suspected')}`，碎片化疑点=`{comparison.get('fragmentation_suspected')}`，WDDM（Windows 显示驱动模型）换页疑点=`{comparison.get('wddm_paging_suspected')}`。",
         "",
         "## 结论边界",
         "",
@@ -1433,6 +1460,9 @@ def run_gpu_diagnostic(args) -> dict:
     report = {
         "schema_version": SCHEMA_VERSION,
         "diagnostic_id": DIAGNOSTIC_ID,
+        "audit_status": gates["status"],
+        "attribution_decision": lifecycle_attribution["classification"],
+        # Kept as a compatibility alias for consumers of the V2 report.
         "status": gates["status"],
         "identity": {
             "code": _git_identity(Path(__file__).resolve().parent),
@@ -1587,6 +1617,8 @@ def main(argv: list[str] | None = None) -> int:
         report = {
             "schema_version": SCHEMA_VERSION,
             "diagnostic_id": DIAGNOSTIC_ID,
+            "audit_status": "BLOCKED",
+            "attribution_decision": "UNAVAILABLE_DUE_TO_EXCEPTION",
             "status": "BLOCKED",
             "errors": [{"exception_type": type(exc).__name__, "message": str(exc)}],
             "config": {
