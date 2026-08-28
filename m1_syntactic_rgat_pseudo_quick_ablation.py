@@ -944,27 +944,31 @@ def evaluate_control_lifecycle_gate(
     """Hard-stop Treatment unless Control is no longer retained after cleanup."""
     events = lifecycle_audit.get("events", [])
     by_name = {str(event.get("callpoint")): event for event in events}
-    cleanup_event = (
+    process_event = (
         by_name.get("control_cuda_empty_cache_after")
         or by_name.get("phase_a_cuda_empty_cache_after")
     )
-    final_event = by_name.get("phase_a_return_after_local_release") or cleanup_event
+    final_event = by_name.get("phase_a_return_after_local_release")
     reasons: list[str] = []
-    if cleanup_event is None:
+    if process_event is None:
         reasons.append("missing_control_cuda_cleanup_event")
+    if final_event is None:
+        reasons.append("missing_final_lifecycle_event")
     if not bool(lifecycle_audit.get("cleanup_performed")):
         reasons.append("phase_a_training_cleanup_not_performed")
     if not bool(lifecycle_audit.get("rng_state_unchanged")):
         reasons.append("cleanup_changed_rng_state")
-    cleanup_memory = (cleanup_event or {}).get("memory", {})
-    live_count = int(cleanup_memory.get("live_cuda_tensor_count", 0) or 0)
-    live_bytes = int(cleanup_memory.get("live_cuda_tensor_bytes", 0) or 0)
+    final_memory = (final_event or {}).get("memory", {})
+    live_count = int(final_memory.get("live_cuda_tensor_count", 0) or 0)
+    live_bytes = int(final_memory.get("live_cuda_tensor_bytes", 0) or 0)
     if live_count > 0 or live_bytes > 0:
         reasons.append("control_cuda_tensors_remain_after_cleanup")
-    cleanup_refs = (cleanup_event or {}).get("references", {})
-    if any(bool(cleanup_refs.get(name)) for name in (
-        "model", "optimizer", "trainer", "dataloader", "callbacks", "training_batch_refs"
-    )):
+    final_refs = (final_event or {}).get("references", {})
+    weakref_alive = final_refs.get("weakref_alive")
+    if not isinstance(weakref_alive, dict):
+        reasons.append("missing_final_weakref_evidence")
+        weakref_alive = {}
+    if any(bool(value) for value in weakref_alive.values()):
         reasons.append("control_runtime_reference_remains_after_cleanup")
     allocated = int((final_event or {}).get("memory", {}).get("allocated_bytes", 0) or 0)
     baseline_allocated = int(baseline.get("allocated_bytes", 0) or 0)
@@ -987,7 +991,7 @@ def evaluate_control_lifecycle_gate(
             "live_cuda_tensor_count": live_count,
             "live_cuda_tensor_bytes": live_bytes,
         },
-        "cleanup_reference_flags": dict(cleanup_refs),
+        "cleanup_reference_flags": dict(final_refs),
     }
 
 

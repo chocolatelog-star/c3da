@@ -51,6 +51,7 @@ from t5_absa_train import (
     initialize_domain_adversarial_head,
     recover_dann_audit_journal,
     cleanup_phase_a_training_runtime,
+    finalize_phase_a_training_runtime,
     phase_a_rng_state_hashes,
 )
 
@@ -167,7 +168,13 @@ def test_control_lifecycle_gate_allows_treatment_only_after_clean_release():
                     "live_cuda_tensor_count": 0,
                     "live_cuda_tensor_bytes": 0,
                 },
-                "references": {},
+                "references": {
+                    "weakref_alive": {
+                        "model": False,
+                        "optimizer": False,
+                        "trainer": False,
+                    },
+                },
             },
         ],
     }
@@ -192,6 +199,160 @@ def test_phase_a_cleanup_preserves_model_and_audit_artifact_bytes(tmp_path):
         assert torch.equal(parameter, expected)
     assert audit_path.read_bytes() == audit_bytes
     assert lifecycle["rng_state_unchanged"] is True
+
+
+def test_phase_a_lifecycle_final_event_uses_outer_weakrefs_after_local_release():
+    class Runtime:
+        pass
+
+    trainer = Runtime()
+    model = Runtime()
+    optimizer = Runtime()
+    dataloader = Runtime()
+    callback = Runtime()
+    runtime = {
+        "trainer": trainer,
+        "model": model,
+        "optimizer": optimizer,
+        "dataloader": dataloader,
+        "callbacks": [callback],
+    }
+    lifecycle = cleanup_phase_a_training_runtime(
+        runtime,
+        cuda=False,
+        variant="control",
+        defer_finalization=True,
+    )
+    early = next(event for event in lifecycle["events"] if event["callpoint"] == "control_gc_after")
+    assert early["references"]["model"] is True
+    assert early["references"]["trainer"] is True
+    trainer = model = optimizer = dataloader = callback = None
+    gc.collect()
+    lifecycle = finalize_phase_a_training_runtime(lifecycle, include_cuda=False)
+    final = next(event for event in lifecycle["events"] if event["callpoint"] == "phase_a_return_after_local_release")
+    assert final["references"]["weakref_alive"]["model"] is False
+    assert final["references"]["weakref_alive"]["trainer"] is False
+    assert final["memory"]["live_cuda_tensor_count"] == 0
+    gate = evaluate_control_lifecycle_gate(
+        {**lifecycle, "runner_return_recorded": True},
+        baseline={"allocated_bytes": 0, "reserved_bytes": 0},
+    )
+    assert gate["passed"] is True
+
+
+def test_phase_a_lifecycle_gate_rejects_final_event_with_retained_object():
+    class Runtime:
+        pass
+
+    held_model = Runtime()
+    runtime = {"model": held_model}
+    lifecycle = cleanup_phase_a_training_runtime(
+        runtime,
+        cuda=False,
+        variant="control",
+        defer_finalization=True,
+    )
+    lifecycle = finalize_phase_a_training_runtime(lifecycle, include_cuda=False)
+    final = next(event for event in lifecycle["events"] if event["callpoint"] == "phase_a_return_after_local_release")
+    assert final["references"]["weakref_alive"]["model"] is True
+    gate = evaluate_control_lifecycle_gate(
+        {**lifecycle, "runner_return_recorded": True},
+        baseline={"allocated_bytes": 0, "reserved_bytes": 0},
+    )
+    assert gate["passed"] is False
+    assert "control_runtime_reference_remains_after_cleanup" in gate["reasons"]
+
+
+def test_phase_a_lifecycle_gate_rejects_hardcoded_empty_final_references():
+    lifecycle = {
+        "cleanup_performed": True,
+        "rng_state_unchanged": True,
+        "events": [
+            {
+                "callpoint": "control_cuda_empty_cache_after",
+                "memory": {
+                    "allocated_bytes": 0,
+                    "reserved_bytes": 0,
+                    "live_cuda_tensor_count": 0,
+                    "live_cuda_tensor_bytes": 0,
+                },
+                "references": {"model": True},
+            },
+            {
+                "callpoint": "phase_a_return_after_local_release",
+                "memory": {
+                    "allocated_bytes": 0,
+                    "reserved_bytes": 0,
+                    "live_cuda_tensor_count": 0,
+                    "live_cuda_tensor_bytes": 0,
+                },
+                "references": {},
+            },
+        ],
+    }
+    gate = evaluate_control_lifecycle_gate(
+        lifecycle,
+        baseline={"allocated_bytes": 0, "reserved_bytes": 0},
+    )
+    assert gate["passed"] is False
+    assert "missing_final_weakref_evidence" in gate["reasons"]
+
+
+def test_phase_a_cleanup_clears_trainer_and_accelerator_runtime_holders():
+    class Runtime:
+        pass
+
+    trainer = Runtime()
+    accelerator = Runtime()
+    model = Runtime()
+    optimizer = Runtime()
+    scheduler = Runtime()
+    scaler = Runtime()
+    dataloader = Runtime()
+    batch = Runtime()
+    callback = Runtime()
+    trainer.model = model
+    trainer.optimizer = optimizer
+    trainer.lr_scheduler = scheduler
+    trainer.scaler = scaler
+    trainer._train_dataloader = dataloader
+    trainer._past = [batch]
+    trainer._models = [model]
+    trainer._optimizers = [optimizer]
+    trainer._dataloaders = [dataloader]
+    trainer.callback_handler = SimpleNamespace(callbacks=[callback])
+    trainer.accelerator = accelerator
+    accelerator._models = [model]
+    accelerator._optimizers = [optimizer]
+    accelerator._dataloaders = [dataloader]
+    accelerator._schedulers = [scheduler]
+    accelerator._scalers = [scaler]
+    accelerator.optimizer = optimizer
+    accelerator.lr_scheduler = scheduler
+    accelerator.scaler = scaler
+
+    runtime = {"trainer": trainer, "model": model, "accelerator": accelerator}
+    cleanup_phase_a_training_runtime(runtime, cuda=False)
+
+    assert trainer.model is None
+    assert trainer.optimizer is None
+    assert trainer.lr_scheduler is None
+    assert trainer.scaler is None
+    assert trainer._train_dataloader is None
+    assert trainer._past is None
+    assert trainer._models is None
+    assert trainer._optimizers is None
+    assert trainer._dataloaders is None
+    assert trainer.callback_handler is None
+    assert trainer.accelerator is None
+    assert accelerator._models is None
+    assert accelerator._optimizers is None
+    assert accelerator._dataloaders is None
+    assert accelerator._schedulers is None
+    assert accelerator._scalers is None
+    assert accelerator.optimizer is None
+    assert accelerator.lr_scheduler is None
+    assert accelerator.scaler is None
 
 
 def _metrics():

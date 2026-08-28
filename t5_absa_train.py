@@ -122,6 +122,67 @@ def _phase_a_reference_flags(runtime_refs: dict[str, object]) -> dict[str, bool]
     return {name: value is not None for name, value in runtime_refs.items()}
 
 
+def _phase_a_make_weakref_metadata(runtime_refs: dict[str, object]) -> dict[str, object]:
+    """Capture weak references before cleanup while retaining no strong ownership."""
+    weak_refs: dict[str, weakref.ReferenceType] = {}
+    weakref_supported: dict[str, bool] = {}
+    top_names: list[str] = []
+    for name, value in runtime_refs.items():
+        if value is None:
+            continue
+        top_names.append(name)
+        try:
+            weak_refs[name] = weakref.ref(value)
+            weakref_supported[name] = True
+            continue
+        except TypeError:
+            weakref_supported[name] = False
+        if isinstance(value, dict):
+            children = list(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            children = list(value)
+        else:
+            children = []
+        for index, child in enumerate(children):
+            if child is None:
+                continue
+            child_name = f"{name}[{index}]"
+            try:
+                weak_refs[child_name] = weakref.ref(child)
+                weakref_supported[child_name] = True
+            except TypeError:
+                weakref_supported[child_name] = False
+    return {
+        "weak_refs": weak_refs,
+        "weakref_supported": weakref_supported,
+        "top_names": top_names,
+    }
+
+
+def _phase_a_weakref_evidence(metadata: dict[str, object]) -> dict[str, object]:
+    weak_refs = metadata.get("weak_refs", {})
+    weakref_supported = metadata.get("weakref_supported", {})
+    top_names = metadata.get("top_names", [])
+    weakref_alive = {
+        name: bool(reference() is not None)
+        for name, reference in weak_refs.items()
+    }
+    logical_flags: dict[str, bool] = {}
+    for name in top_names:
+        if name in weakref_alive:
+            logical_flags[name] = weakref_alive[name]
+        else:
+            logical_flags[name] = any(
+                alive for child_name, alive in weakref_alive.items()
+                if child_name.startswith(f"{name}[")
+            )
+    return {
+        **logical_flags,
+        "weakref_alive": weakref_alive,
+        "weakref_supported": dict(weakref_supported),
+    }
+
+
 def _phase_a_lifecycle_event(
     callpoint: str,
     *,
@@ -144,6 +205,7 @@ def cleanup_phase_a_training_runtime(
     *,
     cuda: bool | None = None,
     variant: str = "phase_a",
+    defer_finalization: bool = False,
 ) -> dict:
     """Release Phase A runtime objects after artifacts have been durably saved.
 
@@ -154,6 +216,19 @@ def cleanup_phase_a_training_runtime(
     artifact on disk.
     """
     use_cuda = torch.cuda.is_available() if cuda is None else bool(cuda)
+    trainer = runtime_refs.get("trainer")
+    if runtime_refs.get("optimizer") is None and trainer is not None:
+        runtime_refs["optimizer"] = getattr(trainer, "optimizer", None)
+    if runtime_refs.get("dataloader") is None and trainer is not None:
+        runtime_refs["dataloader"] = getattr(trainer, "_train_dataloader", None)
+    if runtime_refs.get("callbacks") is None and trainer is not None:
+        runtime_refs["callbacks"] = getattr(getattr(trainer, "callback_handler", None), "callbacks", None)
+    if runtime_refs.get("accelerator") is None and trainer is not None:
+        runtime_refs["accelerator"] = getattr(trainer, "accelerator", None)
+    if runtime_refs.get("scheduler") is None and trainer is not None:
+        runtime_refs["scheduler"] = getattr(trainer, "lr_scheduler", None)
+    if runtime_refs.get("scaler") is None and trainer is not None:
+        runtime_refs["scaler"] = getattr(trainer, "scaler", None)
     before_rng = phase_a_rng_state_hashes(include_cuda=use_cuda)
     events = [
         _phase_a_lifecycle_event(
@@ -163,21 +238,12 @@ def cleanup_phase_a_training_runtime(
             extra={"rng_state": before_rng},
         )
     ]
-    weak_refs: dict[str, weakref.ReferenceType] = {}
-    for name, value in runtime_refs.items():
-        if value is not None:
-            try:
-                weak_refs[name] = weakref.ref(value)
-            except TypeError:
-                pass
-
-    trainer = runtime_refs.get("trainer")
+    weakref_metadata = _phase_a_make_weakref_metadata(runtime_refs)
     model = runtime_refs.get("model")
     optimizer = runtime_refs.get("optimizer")
-    if optimizer is None and trainer is not None:
-        optimizer = getattr(trainer, "optimizer", None)
     dataloader = runtime_refs.get("dataloader")
     callbacks = runtime_refs.get("callbacks")
+    accelerator = runtime_refs.get("accelerator")
 
     if optimizer is not None:
         try:
@@ -196,6 +262,7 @@ def cleanup_phase_a_training_runtime(
         for name in (
             "optimizer",
             "lr_scheduler",
+            "scaler",
             "model",
             "train_dataset",
             "eval_dataset",
@@ -203,12 +270,38 @@ def cleanup_phase_a_training_runtime(
             "_train_dataloader",
             "_past",
             "dann_batch_sampler",
+            "_models",
+            "_optimizers",
+            "_dataloaders",
         ):
             if hasattr(trainer, name):
+                holder = getattr(trainer, name)
+                if hasattr(holder, "clear"):
+                    holder.clear()
                 setattr(trainer, name, None)
         callback_handler = getattr(trainer, "callback_handler", None)
         if callback_handler is not None and hasattr(callback_handler, "callbacks"):
             callback_handler.callbacks.clear()
+        if hasattr(trainer, "callback_handler"):
+            trainer.callback_handler = None
+        if hasattr(trainer, "accelerator"):
+            trainer.accelerator = None
+    if accelerator is not None:
+        for name in (
+            "_models",
+            "_optimizers",
+            "_dataloaders",
+            "_schedulers",
+            "_scalers",
+        ):
+            if hasattr(accelerator, name):
+                holder = getattr(accelerator, name)
+                if hasattr(holder, "clear"):
+                    holder.clear()
+                setattr(accelerator, name, None)
+        for name in ("optimizer", "lr_scheduler", "scaler"):
+            if hasattr(accelerator, name):
+                setattr(accelerator, name, None)
     if callbacks is not None and hasattr(callbacks, "clear"):
         callbacks.clear()
     if dataloader is not None:
@@ -219,15 +312,14 @@ def cleanup_phase_a_training_runtime(
     optimizer = None
     callbacks = None
     dataloader = None
+    accelerator = None
+    callback_handler = None
     gc.collect()
     events.append(
         {
             "callpoint": f"{variant}_gc_after",
             "memory": phase_a_lifecycle_memory_snapshot(include_cuda=use_cuda),
-            "references": {
-                name: bool(reference() is not None)
-                for name, reference in weak_refs.items()
-            },
+            "references": _phase_a_weakref_evidence(weakref_metadata),
         }
     )
     if use_cuda and torch.cuda.is_available():
@@ -238,14 +330,11 @@ def cleanup_phase_a_training_runtime(
         {
             "callpoint": f"{variant}_cuda_empty_cache_after",
             "memory": phase_a_lifecycle_memory_snapshot(include_cuda=use_cuda),
-            "references": {
-                name: bool(reference() is not None)
-                for name, reference in weak_refs.items()
-            },
+            "references": _phase_a_weakref_evidence(weakref_metadata),
             "rng_state": after_rng,
         }
     )
-    return {
+    lifecycle = {
         "schema_version": 1,
         "cleanup_performed": True,
         "events": events,
@@ -253,7 +342,47 @@ def cleanup_phase_a_training_runtime(
         "rng_state_after_cleanup": after_rng,
         "rng_state_unchanged": before_rng == after_rng,
         "references_after_cleanup": events[-1]["references"],
+        "_weakref_metadata": weakref_metadata,
+        "_include_cuda": use_cuda,
     }
+    if defer_finalization:
+        return lifecycle
+    return finalize_phase_a_training_runtime(lifecycle, include_cuda=use_cuda, variant=variant)
+
+
+def finalize_phase_a_training_runtime(
+    lifecycle: dict,
+    *,
+    include_cuda: bool | None = None,
+    variant: str | None = None,
+) -> dict:
+    """Record final weakref evidence after the caller releases its own locals."""
+    use_cuda = bool(lifecycle.get("_include_cuda", False)) if include_cuda is None else bool(include_cuda)
+    gc.collect()
+    if use_cuda and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    after_rng = phase_a_rng_state_hashes(include_cuda=use_cuda)
+    before_rng = lifecycle.get("rng_state_before_cleanup", {})
+    metadata = lifecycle.get("_weakref_metadata", {})
+    final_references = _phase_a_weakref_evidence(metadata)
+    final_event = {
+        "callpoint": "phase_a_return_after_local_release",
+        "variant": variant,
+        "memory": phase_a_lifecycle_memory_snapshot(include_cuda=use_cuda),
+        "references": final_references,
+        "rng_state_before_cleanup": before_rng,
+        "rng_state_after_cleanup": after_rng,
+        "rng_state": after_rng,
+    }
+    lifecycle.setdefault("events", []).append(final_event)
+    lifecycle["rng_state_after_finalization"] = after_rng
+    lifecycle["rng_state_unchanged"] = before_rng == after_rng
+    lifecycle["references_after_finalization"] = final_references
+    lifecycle["references_after_cleanup"] = final_references
+    lifecycle.pop("_weakref_metadata", None)
+    lifecycle.pop("_include_cuda", None)
+    return lifecycle
 
 
 def _phase_a_cpu_copy(value: object) -> object:
@@ -3226,13 +3355,26 @@ def main() -> dict | None:
         "trainer": trainer,
         "model": model,
         "optimizer": getattr(trainer, "optimizer", None),
+        "scheduler": getattr(trainer, "lr_scheduler", None),
+        "scaler": getattr(trainer, "scaler", None),
         "dataloader": getattr(trainer, "_train_dataloader", None),
         "callbacks": getattr(getattr(trainer, "callback_handler", None), "callbacks", None),
+        "callback_handler": getattr(trainer, "callback_handler", None),
+        "accelerator": getattr(trainer, "accelerator", None),
         "training_batch_refs": getattr(trainer, "_past", None),
+        "train_data": train_data,
+        "dev_data": dev_data,
+        "collator": collator,
+        "dann_batch_sampler": dann_batch_sampler,
+        "tokenizer": tokenizer,
+        "train_graph_cache": train_graph_cache,
+        "dev_graph_cache": dev_graph_cache,
+        "target_graph_cache": target_graph_cache,
     }
     lifecycle = cleanup_phase_a_training_runtime(
         runtime_refs,
         variant="treatment" if args.use_syntactic_graph_adapter else "control",
+        defer_finalization=True,
     )
     # These assignments are intentional: the function's own frame must not
     # keep a strong reference after the lifecycle audit has been constructed.
@@ -3250,21 +3392,7 @@ def main() -> dict | None:
     train_graph_cache = None
     dev_graph_cache = None
     target_graph_cache = None
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    lifecycle["events"].append(
-        {
-            "callpoint": "phase_a_return_after_local_release",
-            "memory": phase_a_lifecycle_memory_snapshot(),
-            "references": {},
-            "rng_state": phase_a_rng_state_hashes(),
-        }
-    )
-    lifecycle["rng_state_after_local_release"] = phase_a_rng_state_hashes()
-    lifecycle["rng_state_unchanged"] = (
-        lifecycle["rng_state_before_cleanup"] == lifecycle["rng_state_after_local_release"]
-    )
+    lifecycle = finalize_phase_a_training_runtime(lifecycle)
     return {"dann_batch_audit": dann_audit, "lifecycle": _phase_a_cpu_copy(lifecycle)}
 
 
