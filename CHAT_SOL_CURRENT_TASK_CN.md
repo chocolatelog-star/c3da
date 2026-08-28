@@ -1,17 +1,39 @@
 # 当前任务
 
-> 更新时间：2026-08-28 17:16（北京时间）
+> 更新时间：2026-08-28 20:40（北京时间）
 
-- 任务编号：M1_PHASE_A_LIVE_REPLAY_CONTAMINATION_FIX_V4
-- 任务类型：P0 训练恢复与审计污染修复
+- 任务编号：M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1
+- 任务类型：READ-ONLY DIAGNOSTIC IMPLEMENTATION（只读显存归因诊断实现）
 - 方向：laptop14 -> rest15
 - 随机种子：1000
-- 入口身份：M1 句法 RGAT zero-update（零更新）入口身份保持不变
-- 状态：APPROVED（代码修复和 CPU 验证完成，等待 Codex Sol（高级工程模型）最终只读复审）
+- 入口身份：M1 句法 RGAT Phase A zero-update（零更新）入口；本任务只做独立显存诊断
+- 状态：APPROVED（已批准）
 - 当前功能分支：codex/m1-syntactic-rgat-entry-audit-v1
-- 修复基线：231d9150bbc45b7dc21552b2855e56b1c269ffa6
-- 污染运行：v3 已标记 INVALID_REPLAY_CONTAMINATED，不得恢复或用于任何实验结论
-- Phase B（下游阶段）执行状态：NOT APPROVED（未批准）；本轮不实现或运行 Phase B
+- 父代码身份：8f165cf50ac30bcdee1a4173af54813087194f6c
+- V4 运行：INCOMPLETE_VRAM_THRASHING（显存抖动导致不完整），不得恢复、不得删除、不得用于实验结论
+- Phase A 正式训练、正式伪标签、Phase B（下游阶段）和 target_test（目标测试集）：禁止
+
+## 本任务批准范围
+
+- 使用真实 T5-base、真实图缓存、source=1/target=1、FP16（半精度）、梯度检查点和 DANN=0.03，比较同一批次的 Control（对照组）与 Treatment（实验组）。
+- 逐调用点记录显存、张量形状/dtype（数据类型）、理论字节数、token/node/edge 数量，并检测图张量保留、GPU 张量进入 Python 容器、autograd graph（自动求导图）存活、隐式 FP32 提升和分配器碎片化。
+- 同一固定样本执行至少三次 zero-update（零更新）诊断，输出机器可读 JSON（结构化报告）和中文报告；不修改模型、损失、数据、配方、训练参数或实验逻辑。
+- 只做 CPU（中央处理器）测试和静态检查；GPU（图形处理器）诊断命令仅提供给用户，不由本执行器启动。
+
+## 禁止事项
+
+- 不运行完整训练、正式伪标签、Phase B、最终 ASTE（方面级情感三元组抽取）或 target_test；不恢复 V4。
+- 不实施 graph checkpointing（图检查点）、CPU offload（中央处理器卸载）、缩短长度、替换优化器、修改 batch（批大小）、关闭图模块或修改损失。
+- 不使用 `nan_to_num`、梯度裁剪或强制 FP32（单精度）掩盖显存/数值问题；不改变图传播公式、DANN 系数、模型结构或研究范围。
+
+## 当前实现状态
+
+- 已新增独立只读脚本 `m1_vram_attribution_audit.py`，只加载用户指定的固定 source/target（源域/目标无标签）样本和现有图缓存；不会读取 target_test（目标测试集）或恢复 V4。
+- 脚本在用户手动 GPU（图形处理器）运行时执行 Control/Treatment（对照组/实验组）同批次、FP16（半精度）、梯度检查点、DANN=0.03 的三次 zero-update（零更新）诊断，并记录模型、优化器、批次、编码器、图投影、注意力、关系聚合、融合、解码、反向和清理后的显存及张量元数据。
+- 已加入 CPU（中央处理器）合成测试，当前 151 项 M1 CPU 测试全部通过，尚未运行 GPU 诊断。
+- 本轮是显存归因工具实现，不改变实验逻辑；V4 仍为 `INCOMPLETE_VRAM_THRASHING`，不得恢复或用于实验结论。
+
+> 以下 V4 重放修复内容为历史审计记录，不属于当前显存诊断的实施范围。
 
 ## 本轮 P0 修复范围
 

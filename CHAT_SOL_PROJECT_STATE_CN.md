@@ -1,10 +1,16 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-28 17:16（北京时间）
+> 更新时间：2026-08-28 20:40（北京时间）
 
 ## 当前工程修复状态
 
-当前工程状态为：M1 Phase A 的 v3 运行已确认被 live sampler（运行中采样器）重放污染，状态标记为 `INVALID_REPLAY_CONTAMINATED`，不得恢复或用于任何实验结论。当前任务 `M1_PHASE_A_LIVE_REPLAY_CONTAMINATION_FIX_V4` 已批准，正在等待 Codex Sol（高级工程模型）最终只读复审；代码修复只影响成对 DANN 的检查点重放与审计，不改变模型公式、图传播、损失、DANN=0.03、数据、优化器、调度器、训练参数或研究范围。
+当前工程状态为：M1 Phase A 的 v3 运行已确认被 live sampler（运行中采样器）重放污染，状态标记为 `INVALID_REPLAY_CONTAMINATED`，不得恢复或用于任何实验结论。v4 运行随后因显存抖动在 Treatment（实验组）阶段不完整，现标记为 `INCOMPLETE_VRAM_THRASHING`，不得恢复、不得删除、不得用于实验结论。当前任务 `M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1` 已批准；本轮只做显存归因与入口审计，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
+
+## 显存归因诊断实现状态
+
+- 已新增 `m1_vram_attribution_audit.py` 及 CPU（中央处理器）合成回归测试；用户运行专用命令后，脚本才会加载真实 T5-base、现有图缓存和固定 source=1/target=1 批次。
+- 诊断会在 Control/Treatment（对照组/实验组）同批次的三次 zero-update（零更新）过程中记录各调用点显存、张量元数据、图模块增量、容器张量引用、autograd graph（自动求导图）和分配器碎片化迹象；参数、优化器和调度器均不更新。
+- 当前仅完成代码和 CPU/静态验证（M1 相关 151 项测试通过，AST 检查和 git diff --check 通过），GPU（图形处理器）诊断、正式训练、正式伪标签、Phase B（下游阶段）、最终 ASTE（方面级情感三元组抽取）和 target_test（目标测试集）均未运行，正式实验索引不更新。
 
 - `PairedDomainBatchSampler`（成对领域批次采样器）独立记录 physical traversal（物理遍历）序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数；physical ID 不参与洗牌。
 - 审计协议使用带完整行校验和哈希链的追加式 journal（日志）；终止边界在签发前检查 Trainer 状态，`complete` 强制 issued=processed=planned。
