@@ -1,12 +1,20 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-28 21:20（北京时间）
+> 更新时间：2026-08-28 22:05（北京时间）
 
 ## 当前工程修复状态
 
-当前工程状态为：M1 Phase A 的 v3 运行已确认被 live sampler 重放污染，状态标记为 `INVALID_REPLAY_CONTAMINATED`，不得恢复或用于任何实验结论。v4 运行随后因显存抖动在 Treatment 阶段不完整，现标记为 `INCOMPLETE_VRAM_THRASHING`，不得恢复、不得删除、不得用于实验结论。V1 显存报告已标记为 `INVALID_BATCH_COUNT_AND_INCOMPLETE_OPTIMIZER_LIFECYCLE`，不得用于显存安全结论。当前任务 `M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2` 已批准；本轮只做显存归因诊断修复，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
+当前工程状态为：M1 Phase A 的 v3 运行已标记 `INVALID_REPLAY_CONTAMINATED`（重放污染无效），v4 运行已标记 `INCOMPLETE_VRAM_THRASHING`（显存抖动导致不完整），二者均不得恢复或用于实验结论。历史 V2 显存报告已标记 `VALID_DIAGNOSTIC_REPORTING_INCONSISTENT`（诊断报告口径不一致）。当前任务 `M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V1` 的代码已完成，等待 Codex Sol（高级工程模型）只读复审；本轮只修复训练生命周期，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
 
-## 显存归因诊断实现状态
+## 本轮生命周期修复状态
+
+- `t5_absa_train.py` 在模型和 DANN（领域对抗网络）审计产物保存后复制纯 CPU（中央处理器）返回数据，再显式释放 Trainer（训练器）、模型、优化器、数据加载器、回调和训练批次引用，执行垃圾回收与 CUDA 缓存清理并记录生命周期事件。
+- Phase A 运行器记录 Control（对照组）返回前、返回后、垃圾回收后、CUDA 缓存清理后的 allocated/reserved（已分配/保留显存）、活动 CUDA 张量数量与字节数、引用标志和 RNG（随机数生成器）哈希；清理不通过时硬停止 Treatment（实验组），要求独立子进程隔离。
+- 诊断报告区分 `audit_status`（诊断完整性）与 `attribution_decision`（归因决定），历史 V2 报告不删除，只保留其口径不一致标记。
+- RED（失败先行）已复现 Control 对象在 Treatment 前仍可达；GREEN（修复后）验证清理门控、模型参数、产物字节、DANN 审计、采样语义和 CPU RNG 不变。
+- 全部 M1 相关 CPU 直接测试 133/133 通过；未运行 GPU、正式 Phase A、正式伪标签、Phase B、生成器、增强、最终 ASTE 或 target_test，正式实验索引暂不更新。
+
+## 历史：显存归因诊断实现状态
 
 - `m1_vram_attribution_audit.py` 已升级为 V2：批次计数读取真实整理器字段并与图追踪形状硬校验；用户运行专用命令后才会加载真实 T5-base、现有图缓存和固定 source=1/target=1 批次。
 - V2 在 Control/Treatment 同批次的三次 zero-update 过程中继续记录各调用点显存，同时增加 Control 生命周期、Python CUDA 张量存活、对象可达性和可丢弃模型副本 AdamW 稳态状态测量；正式模型哈希必须保持不变。

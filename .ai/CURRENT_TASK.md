@@ -1,17 +1,32 @@
 # 当前任务
 
-> 更新时间：2026-08-28 21:20（北京时间）
+> 更新时间：2026-08-28 22:05（北京时间）
 
-- 任务编号：M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2
-- 任务类型：READ-ONLY DIAGNOSTIC IMPLEMENTATION（只读显存归因诊断实现）
+- 任务编号：M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V1
+- 任务类型：ENGINEERING FIX（工程修复）
 - 方向：laptop14 -> rest15
 - 随机种子：1000
-- 入口身份：M1 句法 RGAT Phase A zero-update（零更新）入口；本任务只做 V2 显存归因诊断
-- 状态：APPROVED（已批准）
+- 入口身份：M1 Phase A Control（对照组）到 Treatment（实验组）训练生命周期
+- 状态：COMPLETE（代码修复完成，等待 Codex Sol（高级工程模型）只读复审）
 - 当前功能分支：codex/m1-syntactic-rgat-entry-audit-v1
-- 父代码身份：11ecef3324994060b26141ee1c7e7ffcc355e7fc
+- 本轮性质：只修复训练生命周期，不启动实验
 - V4 运行：INCOMPLETE_VRAM_THRASHING（显存抖动导致不完整），不得恢复、不得删除、不得用于实验结论
-- Phase A 正式训练、正式伪标签、Phase B（下游阶段）和 target_test（目标测试集）：禁止
+- V3 运行：INVALID_REPLAY_CONTAMINATED（重放污染无效），不得恢复、不得用于实验结论
+
+## 本轮生命周期修复
+
+- V2 显存诊断确认图批次为 27 个节点、131 条边，图模块峰值增量约 17.3 MiB（兆字节）；隔离 Treatment 含完整梯度和 AdamW（自适应矩估计）状态时不受 8GB（8 GB）显存硬限制。
+- Control 清理前后 reserved（保留显存）下降约 1972 MiB；同一 Python（Python 语言）进程串行运行 Control/Treatment 时，Control 生命周期残留是高置信度根因候选。
+- t5_absa_train.py 在模型和 DANN（领域对抗网络）审计产物保存后复制纯 CPU（中央处理器）返回字典，释放 Trainer（训练器）、模型、优化器、数据加载器、回调和训练批次引用，执行垃圾回收与 CUDA 缓存清理，并记录事件。
+- Phase A 运行器记录 Control 返回前、返回后、垃圾回收后和 CUDA 缓存清理后的显存、活动 CUDA 张量、引用标志和 RNG（随机数生成器）哈希；清理不通过时硬停止并要求独立子进程隔离，禁止进入 Treatment。
+- 报告区分 audit_status（诊断完整性）和 attribution_decision（归因决定）；历史 V2 报告保留并标记 VALID_DIAGNOSTIC_REPORTING_INCONSISTENT（诊断报告口径不一致）。
+- 本轮不改变图传播公式、模型结构、损失、DANN=0.03、数据、采样、随机种子、训练参数或研究范围。
+
+## 当前验证边界
+
+- TDD（测试驱动开发）RED（修复前失败证据）已复现 Control 运行对象在 Treatment 前仍可达；GREEN（修复后通过证据）验证清理门控、模型参数、产物字节和 CPU RNG 不变。
+- 全部 M1 相关 CPU 直接测试共 133 项通过；未运行 GPU（图形处理器）诊断、正式 Phase A、正式伪标签、生成器、增强、Phase B（阶段 B）、最终 ASTE（方面级情感三元组抽取）或 target_test（目标测试集）。
+- 如果真实 GPU 运行时生命周期门控失败，必须停止并改用 Control/Treatment 独立子进程隔离，不得继续叠加清理补丁；正式实验索引暂不更新。
 
 ## 本任务批准范围
 
