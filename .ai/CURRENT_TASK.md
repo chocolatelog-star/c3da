@@ -7,16 +7,16 @@
 - 方向：laptop14 -> rest15
 - 随机种子：1000
 - 入口身份：保留 M1 句法 RGAT zero-update（零更新）入口审计身份；本修复分支提交后由新代码身份承担
-- 状态：APPROVED（已批准）
+- 状态：APPROVED（代码修复已通过 CPU（中央处理器）验证；未批准 GPU（图形处理器）实验）
 - 当前实现范围：仅修复 Phase A 成对 DANN 的物理遍历审计、原子持久化、检查点恢复、Control/Treatment（对照组/实验组）对齐和 legacy diagnostic（旧版诊断）降级；不运行实验
 - 最早失效阶段：Phase A target-unlabeled DANN 审计及其真实下游；必须在新目录从头验证，旧运行不晋级正式证据
 - Phase B（下游阶段）执行状态：NOT APPROVED（未批准）；本轮不实现或运行 Phase B
 
 ## 本任务批准范围
 
-- 先以 TDD（测试驱动开发）复现重复轮次覆盖、末尾部分遍历、生成器尾部清理丢报告、恢复单调性、Control/Treatment 对齐和 legacy 不得正式 PASS。
-- 新审计区分物理 DataLoader（数据加载器）遍历序号、采样轮次、计划/消费批次数、完整/部分遍历及 Trainer（训练器）global step 区间；不再使用浮点 `state.epoch` 取整作为身份。
-- 旧运行只能执行显式 `legacy_diagnostic_resume` 兼容记录；该路径写迁移报告、保留旧提交和产物哈希、拒绝训练续跑，不修改 `stage_status.json`，只能新目录正式重跑。
+- 先以 TDD（测试驱动开发）复现重复采样轮次、末尾部分遍历、journal（日志）崩溃恢复、issued/processed（已发出/已确认）窗口、恢复重放、步区间、Control/Treatment 对齐和 legacy 不得正式 PASS。
+- 新审计区分单调物理 DataLoader（数据加载器）遍历序号与既有 `int(state.epoch)` 采样轮次；计划批次、issued/processed 批次、完整/部分遍历及 Trainer（训练器）global step 区间均独立记录，旧洗牌顺序由确定性回归测试核对。
+- 旧运行只能执行显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）；该路径写迁移报告、保留旧提交和产物哈希、拒绝训练续跑，不修改 `stage_status.json`，只能新目录正式重跑。
 - 只做 CPU（中央处理器）测试、静态检查和既有产物只读核验；禁止 GPU（图形处理器）训练、伪标签推理、target_test（目标测试集）、删除、合并和推送。
 
 ## Phase A 批准范围
@@ -38,9 +38,9 @@
 
 - 成对 DANN（领域对抗）模式的生成损失只按有效源域生成权重归一化；目标行继续 `labels=-100`、生成权重为 0；旧的非成对流程保持原有全批次权重语义，DANN 系数仍为 0.03。
 - Control/Treatment（对照组/实验组）初始化使用隔离随机状态；共享 T5 参数和 DANN head（领域分类头）初始哈希必须一致，只有 Treatment（实验组）拥有句法图参数；`phase_a_initialization_audit.json` 纳入训练阶段产物身份。
-- 成对 DANN 检查点原子保存采样器状态、截至当前轮次的完整审计和身份清单；恢复只选择最新完整且身份合法的检查点，损坏或半写入点安全回退，run-level（运行级）审计原子写入。
+- 成对 DANN 检查点原子保存采样器状态、截至当前物理遍历的 schema 3 审计和身份清单；恢复只选择最新身份合法且 `resume_complete` 的检查点，损坏、未确认终止点或半写入点安全回退；run-level（运行级）快照由 journal 原子恢复。
 - 配方、三个真实输入、T5 实际加载文件、外部 Control、DANN 审计、A4 伪标签产物和阶段产物均重新计算并硬校验；Control qualified multi（合格多三元组）为 0 时 A4 为 `BLOCKED`、ratio（比率）为 `undefined`。
-- 本轮没有改变句法图公式、图结构、损失系数、Gate（门控）、伪标签规则、Phase B 或正式研究范围；正式 Phase A 尚未运行，目标测试仍禁止访问。
+- 本轮没有改变句法图公式、图结构、损失系数、Gate（门控）、伪标签规则、Phase B 或正式研究范围；已用 906/16/25→1400 确定性核对证明旧洗牌语义保持，正式 Phase A 尚未运行，目标测试仍禁止访问。
 
 ## 冻结参数与输出
 

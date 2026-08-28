@@ -2,15 +2,15 @@
 
 > 更新时间：2026-08-28（北京时间）
 
-## 2026-08-28：完成 Phase A DANN 物理遍历审计与恢复修复
+## 2026-08-28：完成 Phase A DANN 物理遍历审计与恢复修复（CPU 验证，未启动实验）
 
 - 根因确认：旧采样器把浮点 `state.epoch`（轮次状态）取整后作为审计编号，并在生成器完全耗尽后才追加报告；梯度累积和训练器立即停止造成重复编号覆盖、缺失轮次和末尾报告丢失。旧运行 `control/dann_batch_audit.json` 保留为 legacy（旧版）方向性诊断，不伪造缺失观测、不把门槛降为21。
-- 代码修复：`PairedDomainBatchSampler`（成对领域批次采样器）新增物理 DataLoader（数据加载器）遍历序号、独立采样轮次、计划/消费批次数、完整/部分遍历、Trainer global step（训练器全局步数）和原子逐批审计；最后批次提前标记完整，部分遍历不会因生成器尾部清理丢失。
-- 恢复修复：检查点升级为物理遍历审计 schema 2（模式2），联合校验模型、Trainer state（训练器状态）、采样器状态、报告和 manifest（清单）哈希；只从完整合法点恢复，关闭完整轮次检查点不需要的数据跳过回放，拒绝旧 schema、部分点、身份倒退和 Control/Treatment（对照组/处理组）不对齐。
-- 验证修复：Phase A 不再朴素要求 `len(epochs)==num_train_epochs`；正式检查依据实际 `max_steps`（最大步数）、global step、遍历完成度和逐批对应关系。末尾部分遍历只有在 Trainer 已达到 max_steps 时可作为终止证据，legacy 审计不能正式 PASS（通过）。
-- 兼容边界：新增显式 `--legacy_diagnostic_resume`（旧版诊断续跑）路径，仅原子写 `legacy_diagnostic_migration.json`（旧版迁移报告），保留源提交/产物哈希并硬拒绝改变训练语义的续跑，不修改 `stage_status.json`，只能在新目录正式重跑。
-- 测试结果：新增 TDD（测试驱动开发）边界测试与 M1 快速消融测试通过；M1 相关模块69项 CPU 测试、全项目顶层 CPU 测试244项全部通过；AST（抽象语法树）编译检查和 `git diff --check`（差异格式检查）待最终提交前再次执行。未启动 GPU（图形处理器）训练、正式实验、伪标签推理或 target_test（目标测试集）。
-- 实验逻辑：模型公式、图传播、DANN=0.03、数据、采样顺序、batch（批大小）、优化器、调度器和研究范围不变；最早失效阶段是 Phase A target-unlabeled DANN 审计及其真实下游，旧运行不晋级，修复后新目录从头运行。
+- P0 修复：物理 DataLoader（数据加载器）遍历序号与既有采样轮次分离；Trainer（训练器）仍通过显式 provider（提供器）使用修复前的 `int(state.epoch)` 洗牌语义。906/906、梯度累积16、25轮/1400步边界模拟已核对轮次标签和批次哈希，未改变采样顺序。
+- P1 修复：schema 3（模式3）采用带哈希链的追加式 JSONL journal（日志），每批只追加小记录；epoch/checkpoint/正常结束再写原子快照。`issued_batches` 与 `processed_batches` 分离，Trainer 的成功 `training_step` 后才 acknowledge（确认）；恢复严格校验身份、单调性、步数区间、物理遍历完成度和 Control/Treatment（对照组/处理组）逐批对应。
+- 终止与恢复：区分 `resume_complete` 与 `training_terminal_partial`；最终达到 max_steps（最大步数）但物理遍历未完整时，仅在 issued==processed 且身份有效时允许终端恢复，未确认或身份缺口硬拒绝。旧 schema 与旧运行不静默续跑。
+- 兼容边界：新增显式 `--legacy_diagnostic_migration`（旧版阻塞/迁移审计）路径，并保留旧参数别名；只写迁移报告，保留源提交/产物哈希，不修改 `stage_status.json`，返回 BLOCKED（阻塞），只能在新目录正式重跑。
+- 测试结果：六个 M1 测试文件 97 项 CPU 测试通过；全项目 CPU 测试 366 通过、7 项失败均为基线已有的 Windows 编码/工作流 Skill 断言问题，与本修复无关；AST（抽象语法树）编译检查和 `git diff --check` 在最终提交前复核。未启动 GPU（图形处理器）训练、正式实验、伪标签推理或 target_test（目标测试集）。
+- 实验逻辑：模型公式、图传播、DANN=0.03、数据、batch（批大小）、优化器、调度器和研究范围不变；旧采样语义已由 provider 与边界哈希测试保持。最早失效阶段是 Phase A target-unlabeled DANN 审计及其真实下游，旧运行不晋级，修复后新目录从头运行。
 
 ## 2026-08-27 10:53：完成全量词—子词对齐只读预检入口，等待实际 GPU 预检
 
