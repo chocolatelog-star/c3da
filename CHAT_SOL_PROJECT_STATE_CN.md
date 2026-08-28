@@ -1,36 +1,28 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-28 20:40（北京时间）
+> 更新时间：2026-08-28 21:20（北京时间）
 
 ## 当前工程修复状态
 
-当前工程状态为：M1 Phase A 的 v3 运行已确认被 live sampler（运行中采样器）重放污染，状态标记为 `INVALID_REPLAY_CONTAMINATED`，不得恢复或用于任何实验结论。v4 运行随后因显存抖动在 Treatment（实验组）阶段不完整，现标记为 `INCOMPLETE_VRAM_THRASHING`，不得恢复、不得删除、不得用于实验结论。当前任务 `M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1` 已批准；本轮只做显存归因与入口审计，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
+当前工程状态为：M1 Phase A 的 v3 运行已确认被 live sampler 重放污染，状态标记为 `INVALID_REPLAY_CONTAMINATED`，不得恢复或用于任何实验结论。v4 运行随后因显存抖动在 Treatment 阶段不完整，现标记为 `INCOMPLETE_VRAM_THRASHING`，不得恢复、不得删除、不得用于实验结论。V1 显存报告已标记为 `INVALID_BATCH_COUNT_AND_INCOMPLETE_OPTIMIZER_LIFECYCLE`，不得用于显存安全结论。当前任务 `M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2` 已批准；本轮只做显存归因诊断修复，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
 
 ## 显存归因诊断实现状态
 
-- 已新增 `m1_vram_attribution_audit.py` 及 CPU（中央处理器）合成回归测试；用户运行专用命令后，脚本才会加载真实 T5-base、现有图缓存和固定 source=1/target=1 批次。
-- 诊断会在 Control/Treatment（对照组/实验组）同批次的三次 zero-update（零更新）过程中记录各调用点显存、张量元数据、图模块增量、容器张量引用、autograd graph（自动求导图）和分配器碎片化迹象；参数、优化器和调度器均不更新。
-- 当前仅完成代码和 CPU/静态验证（M1 相关 151 项测试通过，AST 检查和 git diff --check 通过），GPU（图形处理器）诊断、正式训练、正式伪标签、Phase B（下游阶段）、最终 ASTE（方面级情感三元组抽取）和 target_test（目标测试集）均未运行，正式实验索引不更新。
-
-## 当前任务状态
-
-- 任务：`M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1`，方向 `laptop14 -> rest15`，父代码身份 `8f165cf50ac30bcdee1a4173af54813087194f6c`，状态 `APPROVED`。
-- 诊断使用真实 T5-base、真实图缓存、source=1/target=1、FP16（半精度）、梯度检查点和 DANN=0.03；只比较同一固定批次的 Control（对照组）与 Treatment（实验组），执行 zero-update（零更新）步骤。
-- 逐调用点记录 allocated/reserved/peak（已分配/已保留/峰值）显存、张量形状/dtype（数据类型）、理论字节数及 token/node/edge（子词/节点/边）数量，检查张量保留、GPU 张量进入 Python 容器、autograd graph（自动求导图）存活、隐式 FP32 提升、关系/注意力张量扩张和分配器碎片化。
-- V4 显存诊断期间不得恢复或继续训练；本任务只增加独立诊断脚本和 CPU（中央处理器）合成测试。GPU（图形处理器）诊断命令只交给用户手动运行。
-- 禁止完整训练、正式伪标签、Phase B（下游阶段）、最终 ASTE（方面级情感三元组抽取）、target_test（目标测试集）、图检查点、CPU 卸载、缩短长度、换优化器、改 batch（批大小）、关闭图模块或修改损失。
+- `m1_vram_attribution_audit.py` 已升级为 V2：批次计数读取真实整理器字段并与图追踪形状硬校验；用户运行专用命令后才会加载真实 T5-base、现有图缓存和固定 source=1/target=1 批次。
+- V2 在 Control/Treatment 同批次的三次 zero-update 过程中继续记录各调用点显存，同时增加 Control 生命周期、Python CUDA 张量存活、对象可达性和可丢弃模型副本 AdamW 稳态状态测量；正式模型哈希必须保持不变。
+- 当前仅完成代码和 CPU/静态验证；新版 GPU 诊断、正式训练、正式伪标签、Phase B、最终 ASTE 和 target_test 均未运行，正式实验索引不更新。
 
 - `PairedDomainBatchSampler`（成对领域批次采样器）独立记录 physical traversal（物理遍历）序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数；physical ID 不参与洗牌。
-- 每批追加式 journal（日志）避免 O(N²) 全量快照；终止边界在签发前检查 Trainer 状态，`complete` 强制 issued=processed=planned。
+- 审计协议使用带完整行校验和哈希链的追加式 journal（日志）；终止边界在签发前检查 Trainer 状态，`complete` 强制 issued=processed=planned。
 - 成对检查点保存并哈希校验梯度累积快照/偏移、采样器状态和审计；issued-but-unprocessed 批次从 processed 位置重签，无法证明安全的旧点硬拒绝。
-- Phase A 验证器不再固定要求 `len(epochs)==num_train_epochs`；正式证据依据实际 `max_steps`（最大步数）、global step、遍历完成度和 Control/Treatment（对照组/处理组）逐批对齐。末尾部分遍历只有在 Trainer 已到达 max_steps 时才可作为终止证据。
+- Phase A 验证器不再固定要求 `len(epochs)==num_train_epochs`；独立依据冻结配方和实际成对 DataLoader 长度计算 max_steps，并严格校验每次遍历的 optimizer step 区间、单调性、边界连续性、最终 global step 和 Control/Treatment（对照组/处理组）逐批对齐。
 - 旧运行只能通过显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）写入迁移报告；拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
 - V4 修复新增独立实际微批计数器；检查点状态由 `build_checkpoint_state` 复制构造，不写入 live sampler；`remainder=0` 不产生 replay/reissue（重放/重签）列表，fresh run 的 journal replay_count 必须为 0。
 - V3 六个 M1 测试文件 CPU 回归为 `103 passed`；未运行 GPU、正式实验、伪标签或 target_test，当前验收仍 BLOCKED。
 
 ## 当前任务状态
 
-`M1_PHASE_A_LIVE_REPLAY_CONTAMINATION_FIX_V4`（laptop14 -> rest15）当前为 `APPROVED`（已批准），固定种子为 1000，父代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`。本轮只修复 Phase A（上游阶段）成对 DANN 的 live/checkpoint 状态隔离、非整除尾部更新、fresh replay 审计和恢复门控；GPU（图形处理器）运行、正式训练、正式伪标签实验和目标测试读取尚未执行，Phase B（下游阶段）仍未批准。
+`M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2`（laptop14 -> rest15）当前为 `APPROVED`（已批准），固定种子为 1000，父代码身份为 `11ecef3324994060b26141ee1c7e7ffcc355e7fc`。本轮只修复 V2 显存诊断的批次计数、报告 Gate（门控）、生命周期和 AdamW 状态测量；GPU 诊断、正式训练、正式伪标签实验和目标测试读取尚未执行，Phase B（下游阶段）仍未批准。
 
 ## 当前 Phase A 实现状态
 

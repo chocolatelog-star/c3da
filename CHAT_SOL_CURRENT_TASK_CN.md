@@ -1,15 +1,15 @@
 # 当前任务
 
-> 更新时间：2026-08-28 20:40（北京时间）
+> 更新时间：2026-08-28 21:20（北京时间）
 
-- 任务编号：M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1
+- 任务编号：M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2
 - 任务类型：READ-ONLY DIAGNOSTIC IMPLEMENTATION（只读显存归因诊断实现）
 - 方向：laptop14 -> rest15
 - 随机种子：1000
-- 入口身份：M1 句法 RGAT Phase A zero-update（零更新）入口；本任务只做独立显存诊断
+- 入口身份：M1 句法 RGAT Phase A zero-update（零更新）入口；本任务只做 V2 显存归因诊断
 - 状态：APPROVED（已批准）
 - 当前功能分支：codex/m1-syntactic-rgat-entry-audit-v1
-- 父代码身份：8f165cf50ac30bcdee1a4173af54813087194f6c
+- 父代码身份：11ecef3324994060b26141ee1c7e7ffcc355e7fc
 - V4 运行：INCOMPLETE_VRAM_THRASHING（显存抖动导致不完整），不得恢复、不得删除、不得用于实验结论
 - Phase A 正式训练、正式伪标签、Phase B（下游阶段）和 target_test（目标测试集）：禁止
 
@@ -18,7 +18,7 @@
 - 使用真实 T5-base、真实图缓存、source=1/target=1、FP16（半精度）、梯度检查点和 DANN=0.03，比较同一批次的 Control（对照组）与 Treatment（实验组）。
 - 逐调用点记录显存、张量形状/dtype（数据类型）、理论字节数、token/node/edge 数量，并检测图张量保留、GPU 张量进入 Python 容器、autograd graph（自动求导图）存活、隐式 FP32 提升和分配器碎片化。
 - 同一固定样本执行至少三次 zero-update（零更新）诊断，输出机器可读 JSON（结构化报告）和中文报告；不修改模型、损失、数据、配方、训练参数或实验逻辑。
-- 只做 CPU（中央处理器）测试和静态检查；GPU（图形处理器）诊断命令仅提供给用户，不由本执行器启动。
+- 只做 CPU（中央处理器）测试和静态检查；新的 V2 GPU（图形处理器）诊断命令仅提供给用户，不由本执行器启动。
 
 ## 禁止事项
 
@@ -26,12 +26,14 @@
 - 不实施 graph checkpointing（图检查点）、CPU offload（中央处理器卸载）、缩短长度、替换优化器、修改 batch（批大小）、关闭图模块或修改损失。
 - 不使用 `nan_to_num`、梯度裁剪或强制 FP32（单精度）掩盖显存/数值问题；不改变图传播公式、DANN 系数、模型结构或研究范围。
 
-## 当前实现状态
+## V2 修复要求与当前状态
 
-- 已新增独立只读脚本 `m1_vram_attribution_audit.py`，只加载用户指定的固定 source/target（源域/目标无标签）样本和现有图缓存；不会读取 target_test（目标测试集）或恢复 V4。
-- 脚本在用户手动 GPU（图形处理器）运行时执行 Control/Treatment（对照组/实验组）同批次、FP16（半精度）、梯度检查点、DANN=0.03 的三次 zero-update（零更新）诊断，并记录模型、优化器、批次、编码器、图投影、注意力、关系聚合、融合、解码、反向和清理后的显存及张量元数据。
-- 已加入 CPU（中央处理器）合成测试，当前 151 项 M1 CPU 测试全部通过，尚未运行 GPU 诊断。
-- 本轮是显存归因工具实现，不改变实验逻辑；V4 仍为 `INCOMPLETE_VRAM_THRASHING`，不得恢复或用于实验结论。
+- V1 报告已标记为 `INVALID_BATCH_COUNT_AND_INCOMPLETE_OPTIMIZER_LIFECYCLE`，不得用于显存安全结论。
+- V2 修复 `_batch_counts`，读取整理器输出的 `attention_mask`、`graph_word_mask`、`graph_edge_mask`，并硬校验计数与图追踪形状一致；固定批次应为 nodes=27、edges=131。
+- V2 增加 Control 到 Treatment 的生命周期显存观测、可丢弃模型副本上的稳态 AdamW 状态测量、Python CUDA 张量存活和对象可达性审计；不修改正式训练清理行为。
+- V2 只有 Control 不进入图路径、Treatment 图计数有效且与追踪一致、三次参数哈希不变、更新计数为零、未访问 target_test 时才可报告 PASS；当前尚未运行 GPU 诊断。
+- V2 CPU 回归、全量 M1 相关测试共 158 项全部通过；AST 检查和 `git diff --check` 通过。GPU 诊断尚未运行。
+- 本轮不改变模型、图传播、损失、数据、配方、训练参数或实验逻辑；V4 仍为 `INCOMPLETE_VRAM_THRASHING`，不得恢复或用于实验结论。
 
 > 以下 V4 重放修复内容为历史审计记录，不属于当前显存诊断的实施范围。
 
@@ -52,9 +54,9 @@
 
 ## 本任务批准范围
 
-- 先以 TDD（测试驱动开发）复现重复轮次覆盖、末尾部分遍历、生成器尾部清理丢报告、恢复单调性、Control/Treatment 对齐和 legacy 不得正式 PASS。
-- 新审计区分物理 DataLoader（数据加载器）遍历序号、采样轮次、计划/消费批次数、完整/部分遍历及 Trainer（训练器）global step 区间；不再使用浮点 `state.epoch` 取整作为身份。
-- 旧运行只能执行显式 `legacy_diagnostic_resume` 兼容记录；该路径写迁移报告、保留旧提交和产物哈希、拒绝训练续跑，不修改 `stage_status.json`，只能新目录正式重跑。
+- 先以 TDD（测试驱动开发）复现重复采样轮次、末尾部分遍历、journal（日志）崩溃恢复、issued/processed（已发出/已确认）窗口、恢复重放、步区间、Control/Treatment 对齐和 legacy 不得正式 PASS。
+- 新审计区分单调物理 DataLoader（数据加载器）遍历序号与既有 `int(state.epoch)` 采样轮次；计划批次、issued/processed 批次、完整/部分遍历及 Trainer（训练器）global step 区间均独立记录，旧洗牌顺序由确定性回归测试核对。
+- 旧运行只能执行显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）；该路径写迁移报告、保留旧提交和产物哈希、拒绝训练续跑，不修改 `stage_status.json`，只能新目录正式重跑。
 - 只做 CPU（中央处理器）测试、静态检查和既有产物只读核验；禁止 GPU（图形处理器）训练、伪标签推理、target_test（目标测试集）、删除、合并和推送。
 
 ## Phase A 批准范围
@@ -76,9 +78,9 @@
 
 - 成对 DANN（领域对抗）模式的生成损失只按有效源域生成权重归一化；目标行继续 `labels=-100`、生成权重为 0；旧的非成对流程保持原有全批次权重语义，DANN 系数仍为 0.03。
 - Control/Treatment（对照组/实验组）初始化使用隔离随机状态；共享 T5 参数和 DANN head（领域分类头）初始哈希必须一致，只有 Treatment（实验组）拥有句法图参数；`phase_a_initialization_audit.json` 纳入训练阶段产物身份。
-- 成对 DANN 检查点原子保存采样器状态、截至当前轮次的完整审计和身份清单；恢复只选择最新完整且身份合法的检查点，损坏或半写入点安全回退，run-level（运行级）审计原子写入。
+- 成对 DANN 检查点原子保存采样器状态、截至当前物理遍历的 schema 3 审计和身份清单；恢复只选择最新身份合法且 `resume_complete` 的检查点，损坏、未确认终止点或半写入点安全回退；run-level（运行级）快照由 journal 原子恢复。
 - 配方、三个真实输入、T5 实际加载文件、外部 Control、DANN 审计、A4 伪标签产物和阶段产物均重新计算并硬校验；Control qualified multi（合格多三元组）为 0 时 A4 为 `BLOCKED`、ratio（比率）为 `undefined`。
-- 本轮没有改变句法图公式、图结构、损失系数、Gate（门控）、伪标签规则、Phase B 或正式研究范围；正式 Phase A 尚未运行，目标测试仍禁止访问。
+- 本轮没有改变句法图公式、图结构、损失系数、Gate（门控）、伪标签规则、Phase B 或正式研究范围；已用 906/16/25→1400 确定性核对证明旧洗牌语义保持，正式 Phase A 尚未运行，目标测试仍禁止访问。
 
 ## 冻结参数与输出
 
