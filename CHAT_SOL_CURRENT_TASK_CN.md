@@ -1,15 +1,23 @@
 # 当前任务
 
-> 更新时间：2026-08-27 21:53（北京时间）
+> 更新时间：2026-08-28（北京时间）
 
-- 任务编号：M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1
-- 任务类型：QUICK ABLATION（快速消融）
+- 任务编号：M1_DANN_AUDIT_RESUME_FIX_V1
+- 任务类型：PHASE A DANN 审计与恢复工程修复
 - 方向：laptop14 -> rest15
 - 随机种子：1000
-- 入口身份：M1 句法 RGAT zero-update（零更新）入口审计已达到 15/15 PASS（通过）；固定代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`
+- 入口身份：保留 M1 句法 RGAT zero-update（零更新）入口审计身份；本修复分支提交后由新代码身份承担
 - 状态：APPROVED（已批准）
-- 当前实现范围：仅实现 Phase A（上游阶段）可复现运行入口、Control/Treatment（对照组/实验组）身份审计、四项门控、断点恢复和硬停止；本轮完成最终整体验收阻塞修复
+- 当前实现范围：仅修复 Phase A 成对 DANN 的物理遍历审计、原子持久化、检查点恢复、Control/Treatment（对照组/实验组）对齐和 legacy diagnostic（旧版诊断）降级；不运行实验
+- 最早失效阶段：Phase A target-unlabeled DANN 审计及其真实下游；必须在新目录从头验证，旧运行不晋级正式证据
 - Phase B（下游阶段）执行状态：NOT APPROVED（未批准）；本轮不实现或运行 Phase B
+
+## 本任务批准范围
+
+- 先以 TDD（测试驱动开发）复现重复轮次覆盖、末尾部分遍历、生成器尾部清理丢报告、恢复单调性、Control/Treatment 对齐和 legacy 不得正式 PASS。
+- 新审计区分物理 DataLoader（数据加载器）遍历序号、采样轮次、计划/消费批次数、完整/部分遍历及 Trainer（训练器）global step 区间；不再使用浮点 `state.epoch` 取整作为身份。
+- 旧运行只能执行显式 `legacy_diagnostic_resume` 兼容记录；该路径写迁移报告、保留旧提交和产物哈希、拒绝训练续跑，不修改 `stage_status.json`，只能新目录正式重跑。
+- 只做 CPU（中央处理器）测试、静态检查和既有产物只读核验；禁止 GPU（图形处理器）训练、伪标签推理、target_test（目标测试集）、删除、合并和推送。
 
 ## Phase A 批准范围
 

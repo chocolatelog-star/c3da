@@ -344,6 +344,39 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def prepare_legacy_diagnostic_resume(run_dir: Path, *, current_commit: str) -> Path:
+    """Record an explicit non-formal migration refusal without changing stage status."""
+    run_dir = Path(run_dir)
+    stage_status_path = run_dir / "stage_status.json"
+    git_identity_path = run_dir / "git_identity.json"
+    audit_path = run_dir / "control" / "dann_batch_audit.json"
+    source_commit = None
+    if git_identity_path.is_file():
+        try:
+            source_commit = _read_json(git_identity_path).get("commit")
+        except (OSError, json.JSONDecodeError):
+            source_commit = None
+    report_path = run_dir / "legacy_diagnostic_migration.json"
+    _atomic_write_json(
+        report_path,
+        {
+            "schema_version": 1,
+            "mode": "legacy_diagnostic_resume",
+            "status": "BLOCKED",
+            "formal_evidence": False,
+            "resume_allowed": False,
+            "reason": "legacy audit identity cannot be resumed with the physical-traversal protocol without changing training semantics; run a fresh directory",
+            "source_commit": source_commit,
+            "current_commit": current_commit,
+            "source_stage_status_sha256": sha256_file(stage_status_path) if stage_status_path.is_file() else None,
+            "source_control_dann_audit_sha256": sha256_file(audit_path) if audit_path.is_file() else None,
+            "stage_status_modified": False,
+            "target_test_access": False,
+        },
+    )
+    return report_path
+
+
 def validate_input_split(split: str) -> None:
     if split == "target_test":
         raise ValueError("Phase A forbids target_test access")
@@ -1009,6 +1042,9 @@ def _read_dann_batch_audit(
     expected_target_count: int | None = None,
     expected_source_row_ids: list | None = None,
     expected_target_row_ids: list | None = None,
+    require_training_state: bool = False,
+    expected_max_steps: int | None = None,
+    allow_legacy: bool = True,
 ) -> dict:
     path = Path(variant_dir)
     if path.is_dir():
@@ -1016,8 +1052,15 @@ def _read_dann_batch_audit(
     if not path.is_file():
         raise RuntimeError(f"missing DANN batch audit report: {path}")
     report = _read_json(path)
-    if not isinstance(report, dict) or report.get("schema_version") != 1 or not isinstance(report.get("epochs"), list) or not report["epochs"]:
+    if not isinstance(report, dict) or not isinstance(report.get("epochs"), list) or not report["epochs"]:
         raise RuntimeError(f"invalid DANN batch audit report: {path}")
+    schema_version = report.get("schema_version")
+    legacy = schema_version == 1
+    current = schema_version == 2 and report.get("audit_protocol") == "physical_dataloader_traversal_v1"
+    if not legacy and not current:
+        raise RuntimeError(f"invalid DANN batch audit schema: {path}")
+    if legacy and not allow_legacy:
+        raise RuntimeError(f"legacy DANN batch audit is diagnostic-only and cannot be resumed: {path}")
     top_level = (
         "seed", "source_batch_size", "target_batch_size", "source_count", "target_count",
         "source_row_ids", "target_row_ids",
@@ -1041,20 +1084,43 @@ def _read_dann_batch_audit(
     if expected_epochs is not None and len(report["epochs"]) != expected_epochs:
         raise RuntimeError(f"DANN batch audit epoch count mismatch: {path}")
     seen_epochs = set()
-    for epoch in report["epochs"]:
+    seen_physical = set()
+    previous_sampling_epoch = -1
+    for position, epoch in enumerate(report["epochs"]):
         if not isinstance(epoch, dict):
             raise RuntimeError(f"DANN batch audit contains a non-object epoch: {path}")
-        if not isinstance(epoch.get("epoch"), int) or epoch["epoch"] in seen_epochs:
-            raise RuntimeError(f"DANN batch audit has duplicate or invalid epoch numbers: {path}")
-        seen_epochs.add(epoch["epoch"])
+        sampling_epoch = epoch.get("epoch") if legacy else epoch.get("sampling_epoch")
+        physical_index = epoch.get("epoch") if legacy else epoch.get("physical_traversal_index")
+        completion = "complete" if legacy else epoch.get("completion")
+        planned_batches = len(epoch.get("batches", [])) if legacy else epoch.get("planned_batches")
+        consumed_batches = len(epoch.get("batches", [])) if legacy else epoch.get("consumed_batches")
+        if not isinstance(sampling_epoch, int) or sampling_epoch in seen_epochs or sampling_epoch <= previous_sampling_epoch:
+            raise RuntimeError(f"DANN batch audit has duplicate or invalid sampling epochs: {path}")
+        if not isinstance(physical_index, int) or physical_index != position or physical_index in seen_physical:
+            raise RuntimeError(f"DANN batch audit has duplicate or invalid physical traversals: {path}")
+        if not legacy and epoch.get("epoch") != sampling_epoch:
+            raise RuntimeError(f"DANN batch audit epoch alias mismatch: {path}")
+        if completion not in {"complete", "partial"} or not isinstance(planned_batches, int) or planned_batches <= 0 or not isinstance(consumed_batches, int) or consumed_batches <= 0 or consumed_batches > planned_batches:
+            raise RuntimeError(f"DANN batch audit has invalid complete/partial traversal accounting: {path}")
+        seen_epochs.add(sampling_epoch)
+        seen_physical.add(physical_index)
+        previous_sampling_epoch = sampling_epoch
         if not isinstance(epoch.get("batches"), list) or not epoch["batches"]:
             raise RuntimeError(f"DANN batch audit has an empty epoch: {path}")
         if epoch.get("logical_batches") != len(epoch["batches"]):
             raise RuntimeError(f"DANN batch audit logical batch count mismatch: {path}")
+        if planned_batches < len(epoch["batches"]) or consumed_batches != len(epoch["batches"]):
+            raise RuntimeError(f"DANN batch audit planned/consumed batch mismatch: {path}")
+        if completion == "complete" and len(epoch["batches"]) != planned_batches:
+            raise RuntimeError(f"DANN batch audit marks a short traversal complete: {path}")
+        if completion == "partial" and len(epoch["batches"]) >= planned_batches:
+            raise RuntimeError(f"DANN batch audit marks a full traversal partial: {path}")
         if epoch.get("source_rows") != len(epoch["batches"]) or epoch.get("target_rows") != len(epoch["batches"]):
             raise RuntimeError(f"DANN batch audit domain row count mismatch: {path}")
-        if epoch.get("source_unique_rows") != report["source_count"] or epoch.get("target_unique_rows") != report["target_count"]:
+        if epoch.get("source_unique_rows") > report["source_count"] or epoch.get("target_unique_rows") > report["target_count"]:
             raise RuntimeError(f"DANN batch audit coverage mismatch: {path}")
+        if completion == "complete" and (epoch.get("source_unique_rows") != report["source_count"] or epoch.get("target_unique_rows") != report["target_count"]):
+            raise RuntimeError(f"DANN batch audit complete traversal coverage mismatch: {path}")
         if (
             epoch.get("source_batch_size") != 1
             or epoch.get("target_batch_size") != 1
@@ -1085,15 +1151,42 @@ def _read_dann_batch_audit(
                 raise RuntimeError(f"DANN batch audit target index/ID mapping mismatch: {path}")
             seen_source_indices.add(source_index)
             seen_target_indices.add(target_position)
-        if seen_source_indices != set(range(report["source_count"])) or seen_target_indices != set(range(report["target_count"])):
+        if epoch.get("source_unique_rows") != len(seen_source_indices) or epoch.get("target_unique_rows") != len(seen_target_indices):
+            raise RuntimeError(f"DANN batch audit reported coverage count mismatch: {path}")
+        if completion == "complete" and (seen_source_indices != set(range(report["source_count"])) or seen_target_indices != set(range(report["target_count"]))):
             raise RuntimeError(f"DANN batch audit row coverage is incomplete: {path}")
-    expected_epoch_numbers = list(range(expected_epochs)) if expected_epochs is not None else list(range(len(report["epochs"])))
-    if sorted(seen_epochs) != expected_epoch_numbers:
-        raise RuntimeError(f"DANN batch audit epochs must be contiguous from zero: {path}")
+    if any(item.get("completion") == "partial" for item in report["epochs"][:-1]):
+        raise RuntimeError(f"DANN batch audit has a partial traversal before the end: {path}")
+    if current:
+        if report.get("next_physical_traversal_index") != len(report["epochs"]):
+            raise RuntimeError(f"DANN batch audit physical traversal counter mismatch: {path}")
+        if report.get("next_sampling_epoch") != previous_sampling_epoch + 1:
+            raise RuntimeError(f"DANN batch audit sampling epoch counter mismatch: {path}")
+        if require_training_state:
+            actual_max_steps = report.get("trainer_max_steps")
+            actual_global_step = report.get("trainer_global_step")
+            if not isinstance(actual_max_steps, int) or not isinstance(actual_global_step, int):
+                raise RuntimeError(f"DANN batch audit lacks Trainer max_steps/global_step identity: {path}")
+            if expected_max_steps is not None and actual_max_steps != expected_max_steps:
+                raise RuntimeError(f"DANN batch audit max_steps mismatch: {path}")
+            if actual_global_step != actual_max_steps:
+                raise RuntimeError(f"DANN batch audit did not reach Trainer max_steps: {path}")
+        if any(item.get("completion") == "partial" for item in report["epochs"]):
+            if not require_training_state or report.get("trainer_global_step") != report.get("trainer_max_steps"):
+                raise RuntimeError(f"DANN batch audit contains a non-final or non-terminal partial traversal: {path}")
+    elif any(item.get("completion") == "partial" for item in report["epochs"]):
+        raise RuntimeError(f"DANN batch audit partial traversal is not formal evidence without Trainer state: {path}")
     return report
 
 
-def validate_external_control_dann_audit(control_reuse_audit: dict, expected_epochs: int | None = None) -> dict:
+def validate_external_control_dann_audit(
+    control_reuse_audit: dict,
+    expected_epochs: int | None = None,
+    *,
+    require_training_state: bool = False,
+    expected_max_steps: int | None = None,
+    allow_legacy: bool = True,
+) -> dict:
     path = Path(control_reuse_audit.get("dann_batch_audit_path", ""))
     expected_hash = control_reuse_audit.get("dann_batch_audit_sha256")
     if not path.is_file() or not expected_hash:
@@ -1109,6 +1202,9 @@ def validate_external_control_dann_audit(control_reuse_audit: dict, expected_epo
         expected_target_count=control_reuse_audit.get("expected_target_count"),
         expected_source_row_ids=control_reuse_audit.get("expected_source_row_ids"),
         expected_target_row_ids=control_reuse_audit.get("expected_target_row_ids"),
+        require_training_state=require_training_state,
+        expected_max_steps=expected_max_steps,
+        allow_legacy=allow_legacy,
     )
 
 
@@ -1122,6 +1218,9 @@ def _validate_control_treatment_dann_reports(
     expected_target_count: int | None = None,
     expected_source_row_ids: list | None = None,
     expected_target_row_ids: list | None = None,
+    require_training_state: bool = False,
+    expected_max_steps: int | None = None,
+    allow_legacy: bool = True,
 ) -> dict:
     treatment_path = variant_dirs["treatment"] / "dann_batch_audit.json"
     if expected_source_row_ids is None:
@@ -1140,7 +1239,13 @@ def _validate_control_treatment_dann_reports(
         "expected_source_row_ids": list(expected_source_row_ids),
         "expected_target_row_ids": list(expected_target_row_ids),
     }
-    control_report = validate_external_control_dann_audit(control_reuse_audit, expected_epochs=expected_epochs)
+    control_report = validate_external_control_dann_audit(
+        control_reuse_audit,
+        expected_epochs=expected_epochs,
+        require_training_state=require_training_state,
+        expected_max_steps=expected_max_steps,
+        allow_legacy=allow_legacy,
+    )
     treatment_report = _read_dann_batch_audit(
         treatment_path,
         expected_epochs=expected_epochs,
@@ -1149,6 +1254,9 @@ def _validate_control_treatment_dann_reports(
         expected_target_count=expected_target_count,
         expected_source_row_ids=expected_source_row_ids,
         expected_target_row_ids=expected_target_row_ids,
+        require_training_state=require_training_state,
+        expected_max_steps=expected_max_steps,
+        allow_legacy=allow_legacy,
     )
     comparable_fields = (
         "seed",
@@ -1162,6 +1270,8 @@ def _validate_control_treatment_dann_reports(
     )
     if any(control_report.get(field) != treatment_report.get(field) for field in comparable_fields):
         raise RuntimeError("Control and Treatment DANN batch orders or steps differ")
+    if control_report.get("schema_version") == 1 or treatment_report.get("schema_version") == 1:
+        raise RuntimeError("legacy DANN batch audit is diagnostic-only and cannot be formal evidence")
     return {"status": "matched", "control": control_report, "treatment": treatment_report}
 
 
@@ -1340,7 +1450,6 @@ def _stage_record(
 def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
     _validate_recipe(recipe)
-    expected_dann_epochs = int(recipe["training"]["num_train_epochs"])
     run_dir = Path(args.output_dir)
     if run_dir.exists() and not args.resume:
         raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")
@@ -1425,7 +1534,9 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 "expected_source_row_ids": expected_source_row_ids,
                 "expected_target_row_ids": expected_target_row_ids,
             },
-            expected_epochs=expected_dann_epochs,
+            expected_epochs=None,
+            require_training_state=True,
+            allow_legacy=False,
         )
         saved_actual = saved_audit.get("actual", saved_audit.get("identity", {}))
         expected_for_resume = dict(actual_identity)
@@ -1464,12 +1575,14 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         _read_initialization_audit(prior_init_path, "control", expected_seed=recipe["seed"])
         _read_dann_batch_audit(
             prior_dann_path,
-            expected_epochs=expected_dann_epochs,
+            expected_epochs=None,
             expected_seed=recipe["seed"],
             expected_source_count=len(expected_source_row_ids),
             expected_target_count=len(expected_target_row_ids),
             expected_source_row_ids=expected_source_row_ids,
             expected_target_row_ids=expected_target_row_ids,
+            require_training_state=True,
+            allow_legacy=False,
         )
         expected = dict(actual_identity)
         expected["artifact_sha256"] = prior_model_hash
@@ -1627,7 +1740,9 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     dann_batch_audit = _validate_control_treatment_dann_reports(
         variant_dirs,
         control_reuse_audit,
-        expected_epochs=expected_dann_epochs,
+        expected_epochs=None,
+        require_training_state=True,
+        allow_legacy=False,
     )
     gate_result = evaluate_phase_a_gates(metrics)
     decision = decide_phase_a(gate_result)
@@ -1668,6 +1783,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--control_run_dir", default="")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--legacy_diagnostic_resume", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     return parser
 
@@ -1677,6 +1793,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.project_root = Path(__file__).resolve().parent
     args.recipe = str((args.project_root / args.recipe).resolve()) if not Path(args.recipe).is_absolute() else args.recipe
+    if args.legacy_diagnostic_resume:
+        report_path = prepare_legacy_diagnostic_resume(
+            Path(args.output_dir),
+            current_commit=_git_identity(args.project_root).get("commit", "unknown"),
+        )
+        print(json.dumps({"status": "BLOCKED", "formal_evidence": False, "report": str(report_path)}, ensure_ascii=False))
+        return 2
     args.recipe_data = _read_json(Path(args.recipe))
     _validate_recipe(args.recipe_data)
     if args.dry_run:

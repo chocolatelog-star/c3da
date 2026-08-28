@@ -32,6 +32,7 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     validate_initialization_pair,
     _validate_recipe,
     validate_input_split,
+    prepare_legacy_diagnostic_resume,
 )
 from syntactic_graph_adapter import load_seq2seq_model
 from t5_absa_train import (
@@ -271,6 +272,243 @@ def test_dataloader_extra_iteration_does_not_advance_explicit_sampler_epoch():
     _ = list(sampler)
     sampler.set_epoch(2)
     assert list(sampler) == expected
+
+
+def test_dann_sampler_records_each_physical_traversal_without_epoch_overwrite(tmp_path):
+    audit_path = tmp_path / "dann_batch_audit.json"
+    sampler = PairedDomainBatchSampler(
+        2,
+        2,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        audit_path=audit_path,
+    )
+    list(sampler)
+    list(sampler)
+
+    report = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert [item["physical_traversal_index"] for item in report["epochs"]] == [0, 1]
+    assert [item["sampling_epoch"] for item in report["epochs"]] == [0, 1]
+    assert all(item["completion"] == "complete" for item in report["epochs"])
+
+
+def test_dann_sampler_persists_last_partial_traversal_before_generator_cleanup(tmp_path):
+    audit_path = tmp_path / "dann_batch_audit.json"
+    sampler = PairedDomainBatchSampler(
+        3,
+        3,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        audit_path=audit_path,
+    )
+    iterator = iter(sampler)
+    next(iterator)
+
+    report = json.loads(audit_path.read_text(encoding="utf-8"))
+    partial = report["epochs"][-1]
+    assert partial["completion"] == "partial"
+    assert partial["planned_batches"] == 3
+    assert partial["consumed_batches"] == 1
+    assert partial["optimizer_global_step_start"] is None
+    assert partial["optimizer_global_step_end"] is None
+
+
+def test_dann_sampler_restore_keeps_physical_traversal_identity_monotonic(tmp_path):
+    audit_path = tmp_path / "dann_batch_audit.json"
+    sampler = PairedDomainBatchSampler(
+        2,
+        2,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        audit_path=audit_path,
+    )
+    list(sampler)
+    state = sampler.state_dict()
+    audit = sampler.audit_report()
+
+    restored = PairedDomainBatchSampler(
+        2,
+        2,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        audit_path=audit_path,
+    )
+    restored.load_state_dict(state)
+    restored.load_audit_report(audit)
+    list(restored)
+
+    report = restored.audit_report()
+    assert [item["physical_traversal_index"] for item in report["epochs"]] == [0, 1]
+    assert [item["sampling_epoch"] for item in report["epochs"]] == [0, 1]
+
+
+def test_control_treatment_alignment_rejects_partial_physical_traversal(tmp_path):
+    control_dir = tmp_path / "control"
+    treatment_dir = tmp_path / "treatment"
+    control_dir.mkdir()
+    treatment_dir.mkdir()
+    for directory in (control_dir, treatment_dir):
+        (directory / "source_train.jsonl").write_text('{"id":"s1"}\n{"id":"s2"}\n', encoding="utf-8")
+        (directory / "target_unlabeled.jsonl").write_text('{"id":"t1"}\n{"id":"t2"}\n', encoding="utf-8")
+    sampler = PairedDomainBatchSampler(
+        2,
+        2,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["s1", "s2"],
+        target_row_ids=["t1", "t2"],
+    )
+    iterator = iter(sampler)
+    next(iterator)
+    report_text = json.dumps(sampler.audit_report())
+    for directory in (control_dir, treatment_dir):
+        (directory / "dann_batch_audit.json").write_text(report_text, encoding="utf-8")
+    try:
+        _validate_control_treatment_dann_reports(
+            {"control": control_dir, "treatment": treatment_dir},
+            {
+                "dann_batch_audit_path": str(control_dir / "dann_batch_audit.json"),
+                "dann_batch_audit_sha256": hashlib.sha256(report_text.encode()).hexdigest(),
+            },
+            expected_source_count=2,
+            expected_target_count=2,
+            expected_source_row_ids=["s1", "s2"],
+            expected_target_row_ids=["t1", "t2"],
+        )
+    except RuntimeError as exc:
+        assert "partial" in str(exc).lower() or "complete" in str(exc).lower()
+    else:
+        raise AssertionError("partial physical traversals must not be formal evidence")
+
+
+def test_terminal_partial_traversal_is_formal_only_when_trainer_reached_max_steps(tmp_path):
+    control_dir = tmp_path / "control"
+    treatment_dir = tmp_path / "treatment"
+    control_dir.mkdir()
+    treatment_dir.mkdir()
+    for directory in (control_dir, treatment_dir):
+        (directory / "source_train.jsonl").write_text('{"id":"s1"}\n{"id":"s2"}\n{"id":"s3"}\n', encoding="utf-8")
+        (directory / "target_unlabeled.jsonl").write_text('{"id":"t1"}\n{"id":"t2"}\n{"id":"t3"}\n', encoding="utf-8")
+    training_state = {"global_step": 0, "max_steps": 1}
+    sampler = PairedDomainBatchSampler(
+        3,
+        3,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["s1", "s2", "s3"],
+        target_row_ids=["t1", "t2", "t3"],
+    )
+    sampler.bind_training_state_provider(lambda: training_state)
+    iterator = iter(sampler)
+    next(iterator)
+    training_state["global_step"] = 1
+    report_text = json.dumps(sampler.audit_report())
+    for directory in (control_dir, treatment_dir):
+        (directory / "dann_batch_audit.json").write_text(report_text, encoding="utf-8")
+
+    result = _validate_control_treatment_dann_reports(
+        {"control": control_dir, "treatment": treatment_dir},
+        {
+            "dann_batch_audit_path": str(control_dir / "dann_batch_audit.json"),
+            "dann_batch_audit_sha256": hashlib.sha256(report_text.encode()).hexdigest(),
+        },
+        expected_source_count=3,
+        expected_target_count=3,
+        expected_source_row_ids=["s1", "s2", "s3"],
+        expected_target_row_ids=["t1", "t2", "t3"],
+        require_training_state=True,
+    )
+
+    assert result["status"] == "matched"
+    assert result["treatment"]["epochs"][-1]["completion"] == "partial"
+
+
+def test_legacy_dann_audit_cannot_be_formal_phase_a_pass(tmp_path):
+    control_dir = tmp_path / "control"
+    treatment_dir = tmp_path / "treatment"
+    control_dir.mkdir()
+    treatment_dir.mkdir()
+    for directory in (control_dir, treatment_dir):
+        (directory / "source_train.jsonl").write_text('{"id":"s1"}\n', encoding="utf-8")
+        (directory / "target_unlabeled.jsonl").write_text('{"id":"t1"}\n', encoding="utf-8")
+    report = {
+        "schema_version": 1,
+        "seed": 1000,
+        "source_batch_size": 1,
+        "target_batch_size": 1,
+        "source_count": 1,
+        "target_count": 1,
+        "source_row_ids": ["s1"],
+        "target_row_ids": ["t1"],
+        "epochs": [{
+            "epoch": 0,
+            "source_batch_size": 1,
+            "target_batch_size": 1,
+            "source_rows": 1,
+            "target_rows": 1,
+            "source_unique_rows": 1,
+            "target_unique_rows": 1,
+            "logical_batches": 1,
+            "incomplete_batches": 0,
+            "batches": [{
+                "logical_batch_id": 0,
+                "source_indices": [0],
+                "target_indices": [1],
+                "source_row_ids": ["s1"],
+                "target_row_ids": ["t1"],
+                "source_count": 1,
+                "target_count": 1,
+            }],
+        }],
+    }
+    report_text = json.dumps(report)
+    for directory in (control_dir, treatment_dir):
+        (directory / "dann_batch_audit.json").write_text(report_text, encoding="utf-8")
+    try:
+        _validate_control_treatment_dann_reports(
+            {"control": control_dir, "treatment": treatment_dir},
+            {
+                "dann_batch_audit_path": str(control_dir / "dann_batch_audit.json"),
+                "dann_batch_audit_sha256": hashlib.sha256(report_text.encode()).hexdigest(),
+            },
+            expected_epochs=1,
+            expected_source_count=1,
+            expected_target_count=1,
+            expected_source_row_ids=["s1"],
+            expected_target_row_ids=["t1"],
+        )
+    except RuntimeError as exc:
+        assert "legacy" in str(exc).lower()
+    else:
+        raise AssertionError("legacy DANN evidence must not be formally accepted")
+
+
+def test_legacy_diagnostic_resume_writes_migration_report_without_touching_stage_status(tmp_path):
+    run_dir = tmp_path / "legacy-run"
+    run_dir.mkdir()
+    stage_status = run_dir / "stage_status.json"
+    original_status = '{"status":"in_progress","completed_stages":["control_training"]}'
+    stage_status.write_text(original_status, encoding="utf-8")
+    (run_dir / "git_identity.json").write_text(json.dumps({"commit": "3d4153c"}), encoding="utf-8")
+    (run_dir / "control").mkdir()
+    (run_dir / "control" / "dann_batch_audit.json").write_text('{"schema_version":1}', encoding="utf-8")
+
+    report_path = prepare_legacy_diagnostic_resume(run_dir, current_commit="new-commit")
+
+    assert report_path == run_dir / "legacy_diagnostic_migration.json"
+    assert stage_status.read_text(encoding="utf-8") == original_status
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "BLOCKED"
+    assert report["formal_evidence"] is False
+    assert report["resume_allowed"] is False
+    assert report["source_commit"] == "3d4153c"
+    assert report["current_commit"] == "new-commit"
 
 
 def test_trainer_dataloader_preserves_the_complete_paired_domain_batch():
