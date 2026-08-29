@@ -721,7 +721,10 @@ def _validate_recipe(recipe: dict) -> None:
         "fixed_changed_weight": pseudo.get("fixed_changed_weight"),
         "use_task_prefix": pseudo.get("use_task_prefix"),
     }
-    mismatches = {key: {"actual": actual[key], "expected": expected} for key, expected in FROZEN_RECIPE.items() if actual[key] != expected}
+    expected_recipe = dict(FROZEN_RECIPE)
+    if recipe.get("recipe_id") == "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann0_v1":
+        expected_recipe["lambda_domain_adv"] = 0.0
+    mismatches = {key: {"actual": actual[key], "expected": expected} for key, expected in expected_recipe.items() if actual[key] != expected}
     mismatches.update({f"pseudo.{key}": {"actual": actual_pseudo[key], "expected": expected} for key, expected in FROZEN_PSEUDO_RECIPE.items() if actual_pseudo[key] != expected})
     expected_model_path = Path(r"J:\nlp\models\t5-base-py").resolve()
     models = recipe.get("models")
@@ -766,7 +769,7 @@ def _validate_recipe(recipe: dict) -> None:
 
 def _git_identity(project_root: Path) -> dict:
     def git(*args: str) -> str:
-        return subprocess.check_output(["git", *args], cwd=project_root, text=True).strip()
+        return subprocess.check_output(["git", *args], cwd=project_root, text=True, encoding="utf-8", errors="replace").strip()
 
     status = git("status", "--porcelain")
     commit = git("rev-parse", "HEAD")
