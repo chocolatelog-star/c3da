@@ -3556,7 +3556,7 @@ def main() -> dict | None:
         resume_from_checkpoint=str(latest_checkpoint) if resume_from_checkpoint else None
     )
     if args.dann_batch_audit_path:
-        if dann_batch_sampler is None:
+        if dann_batch_sampler is None and args.lambda_domain_adv > 0:
             raise RuntimeError("DANN batch audit requested without a paired DANN sampler")
         audit_path = Path(args.dann_batch_audit_path)
         dann_batch_sampler.flush_audit_snapshot()
