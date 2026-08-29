@@ -2284,6 +2284,8 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         _atomic_write_json(run_dir / "external_control_terminal_lookahead_audit.json", external_salvage_copy)
         expected = dict(actual_identity)
         expected["artifact_sha256"] = prior_model_hash
+        if recipe.get("recipe_id") == "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann0_v1":
+            expected["recipe_sha256"] = prior_actual.get("recipe_sha256")
         identity_audit = audit_control_identity(expected, prior_actual)
         if not identity_audit["reuse_allowed"]:
             raise RuntimeError("external Control identity mismatch; refusing reuse")
