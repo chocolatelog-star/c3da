@@ -592,6 +592,24 @@ def load_or_initialize_stage_status(path: Path, identity: dict, resume: bool) ->
     return {"schema_version": 2, "status": "initialized", "identity": identity, "completed_stages": [], "stages": {}}
 
 
+def resolve_phase_a_run_dir(output_dir: Path, *, resume: bool) -> Path:
+    """Resolve both current and legacy output-directory layouts without guessing."""
+    output_dir = Path(output_dir)
+    if not resume:
+        return output_dir
+    if (output_dir / "stage_status.json").is_file():
+        return output_dir
+    candidates = sorted(
+        child for child in output_dir.iterdir()
+        if child.is_dir() and (child / "stage_status.json").is_file()
+    ) if output_dir.is_dir() else []
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise RuntimeError(f"resume output directory has multiple run candidates: {output_dir}")
+    return output_dir
+
+
 def validate_stage_status_shape(state: dict, stages: tuple[str, ...]) -> None:
     """Reject unknown or incomplete bookkeeping before any stage is skipped."""
     completed = state.get("completed_stages")
@@ -2026,9 +2044,10 @@ def validate_phase_a_graph_cache(
 def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
     _validate_recipe(recipe)
-    run_dir = Path(args.output_dir)
-    if run_dir.exists() and not args.resume:
-        raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")
+    requested_output_dir = Path(args.output_dir)
+    run_dir = resolve_phase_a_run_dir(requested_output_dir, resume=args.resume)
+    if requested_output_dir.exists() and not args.resume:
+        raise RuntimeError(f"output directory exists; use a new directory or --resume: {requested_output_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
     git_identity = _git_identity(args.project_root)
     if git_identity["status_porcelain"]:
