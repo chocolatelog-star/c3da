@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -1747,6 +1748,27 @@ def validate_terminal_lookahead_salvage(
     return report
 
 
+def _normalize_external_control_terminal_lookahead(control_report: dict, treatment_report: dict, control_reuse_audit: dict | None = None) -> tuple[dict, dict]:
+    """Normalize one independently salvaged V6 terminal lookahead in memory only."""
+    normalized = copy.deepcopy(control_report)
+    epochs = normalized.get("epochs") or []
+    lookahead = normalized.get("terminal_lookahead_audit") or {}
+    dangling = lookahead.get("dangling_logical_batch_ids")
+    if not epochs or lookahead.get("safe") is not True or lookahead.get("lookahead_not_consumed") is not True or not isinstance(dangling, list) or len(dangling) != 1:
+        return normalized, {"applied": False, "reason": "unsafe_or_non_single_lookahead"}
+    last = epochs[-1]
+    if last.get("completion") != "partial" or last.get("issued_batches") != last.get("processed_batches") + 1:
+        return normalized, {"applied": False, "reason": "terminal_accounting_mismatch"}
+    batches = last.get("batches")
+    if not isinstance(batches, list) or len(batches) != last.get("issued_batches") or batches[-1].get("logical_batch_id") != dangling[0]:
+        return normalized, {"applied": False, "reason": "dangling_batch_identity_mismatch"}
+    trimmed = batches[:-1]
+    count = len(trimmed)
+    for key in ("logical_batches", "source_rows", "target_rows", "source_unique_rows", "target_unique_rows", "issued_batches"):
+        last[key] = count
+    last["batches"] = trimmed
+    return normalized, {"applied": True, "source": "external_control_terminal_lookahead_salvage", "trimmed_logical_batch_ids": list(dangling), "original_issued_batches": count + 1, "normalized_issued_batches": count}
+
 def _validate_control_treatment_dann_reports(
     variant_dirs: dict[str, Path],
     control_reuse_audit: dict,
@@ -1816,11 +1838,17 @@ def _validate_control_treatment_dann_reports(
         "target_row_ids",
         "epochs",
     )
+    normalized_control, lookahead_normalization = _normalize_external_control_terminal_lookahead(control_report, treatment_report, control_reuse_audit)
+    if lookahead_normalization.get("applied"):
+        control_report = normalized_control
     if any(control_report.get(field) != treatment_report.get(field) for field in comparable_fields):
         raise RuntimeError("Control and Treatment DANN batch orders or steps differ")
     if control_report.get("schema_version") == 1 or treatment_report.get("schema_version") == 1:
         raise RuntimeError("legacy DANN batch audit is diagnostic-only and cannot be formal evidence")
-    return {"status": "matched", "control": control_report, "treatment": treatment_report}
+    result = {"status": "matched", "control": control_report, "treatment": treatment_report}
+    if lookahead_normalization.get("applied"):
+        result["control_terminal_lookahead_normalization"] = lookahead_normalization
+    return result
 
 
 def _write_result_markdown(run_dir: Path, summary: dict) -> None:

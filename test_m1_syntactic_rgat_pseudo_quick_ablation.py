@@ -66,6 +66,18 @@ from t5_absa_train import (
 )
 
 
+def test_external_control_terminal_lookahead_normalization_is_bounded():
+    control = {
+        "epochs": [{"completion": "partial", "planned_batches": 3, "issued_batches": 3, "processed_batches": 2, "logical_batches": 3, "source_rows": 3, "target_rows": 3, "source_unique_rows": 3, "target_unique_rows": 3, "batches": [{"logical_batch_id": i} for i in range(3)]}],
+        "terminal_lookahead_audit": {"safe": True, "lookahead_not_consumed": True, "dangling_logical_batch_ids": [2]},
+    }
+    treatment = copy.deepcopy(control)
+    treatment["epochs"][0].update({"issued_batches": 2, "logical_batches": 2, "source_rows": 2, "target_rows": 2, "source_unique_rows": 2, "target_unique_rows": 2, "batches": treatment["epochs"][0]["batches"][:2]})
+    normalized, audit = _normalize_external_control_terminal_lookahead(control, treatment)
+    assert normalized["epochs"][0]["issued_batches"] == 2
+    assert len(normalized["epochs"][0]["batches"]) == 2
+    assert audit["trimmed_logical_batch_ids"] == [2]
+
 def test_control_lifecycle_red_reproduces_reachable_runtime_before_treatment():
     """RED guard: a reachable Control runtime must never authorize Treatment."""
     runtime = {"model": object(), "optimizer": object(), "trainer": object()}
