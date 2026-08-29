@@ -1,13 +1,13 @@
 # 当前任务
 
-> 更新时间：2026-08-29 16:50（北京时间）
+> 更新时间：2026-08-29 18:57（北京时间）
 
 - 任务编号：M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V8
 - 任务类型：QUICK_ABLATION（快速消融）/ PHASE A（阶段A）
 - 方向：laptop14 -> rest15
 - 随机种子：1000
 - 入口身份：V6 Control（对照组）受控复用 + V8 Treatment（实验组）从头训练
-- 状态：RUNNING（V8 已完成 Control 复用身份登记，当前执行 Treatment 1400 步训练）
+- 状态：BLOCKED（可恢复；训练已完成，分词器缓存身份接口修复后等待用户续跑）
 - 当前功能分支：codex/m1-syntactic-rgat-entry-audit-v1
 - 本轮性质：用户手动启动的 M1 句法 RGAT（关系图注意力网络）Phase A 快速消融；代码与配方身份冻结，不改变研究变量
 - V6 Control：训练 1400/1400 已完成；旧整次运行仍为 BLOCKED，但 Control 经 44,179 条 journal（审计日志）哈希链、零 replay（重放）、零未提交梯度、终端检查点和模型树哈希审计后允许作为唯一外部 Control 复用，reuse_depth=1
@@ -18,9 +18,10 @@
 
 - 运行目录：`J:\nlp\CD-C3DA\runs\reproducible\laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8\laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`
 - 代码提交：`33a7e3d3fa9846de2ddac52484365b4bf3c649c4`
-- 已完成阶段：`control_training`（实际为复用 V6 Control，不是重新训练）。
-- 运行中阶段：`treatment_training`；总步数 1400，当前进度以运行日志和 `stage_status.json` 为准。
-- 后续阶段：Treatment source-dev（源域开发集）评估、Control/Treatment 目标无标签伪标签推理和 A1–A4 无金标门控。
+- 已完成阶段：`control_training`（复用 V6）、`treatment_training`（1400/1400）、`control_source_dev_evaluation`。
+- 阻塞阶段：`treatment_source_dev_evaluation`；图缓存使用基础 T5 输入分词器身份，已训练检查点因新增四个 ASTE 输出标签而改变 `tokenizer.json`，旧评估接口错误地将其判为缓存不匹配。
+- 修复提交：`bbc2b21`。三划分共1730行输入 token ID（词元编号）和字符偏移逐行完全一致；恢复入口保留旧阶段 producer commit（产物提交）并单独记录修复链。
+- 后续阶段：直接复用已训练 Treatment，从其 source-dev 评估继续，再运行 Control/Treatment 目标无标签伪标签推理和 A1–A4 无金标门控；不得重训1400步。
 - 禁止事项：运行中不修改代码/配方，不删除或替换产物，不读取 target_test，不提前启动 Phase B，不把阶段性 loss（损失）当成最终研究结论。
 
 ## 当前有效修复与运行边界
