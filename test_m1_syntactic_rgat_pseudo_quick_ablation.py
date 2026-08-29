@@ -45,20 +45,10 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     append_control_return_lifecycle_event,
     classify_terminal_lookahead,
     run_isolated_phase_a_worker,
-    resolve_phase_a_run_dir,
     _serialize_rows,
     _write_inputs,
     _write_variant_inputs,
 )
-
-
-def test_resume_resolves_legacy_nested_run_directory(tmp_path):
-    output_dir = tmp_path / "phase-a-v7"
-    nested = output_dir / "laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v7"
-    nested.mkdir(parents=True)
-    (nested / "stage_status.json").write_text("{}", encoding="utf-8")
-
-    assert resolve_phase_a_run_dir(output_dir, resume=True) == nested
 from syntactic_graph_adapter import load_seq2seq_model
 from t5_absa_train import (
     PairedDomainBatchSampler,
