@@ -1,6 +1,12 @@
 # CD-C3DA 实验记录与模型索引
 
-> 更新时间：2026-08-28（北京时间）
+> 更新时间：2026-08-29（北京时间）
+
+## 2026-08-29：M1 Phase A 独立进程与 V6 Control 受控复用修复完成（未运行新实验）
+
+V6 Control 已完成 1400/1400，但旧运行在进入 Treatment 前被生命周期门控阻塞。只读审计确认末尾 `issued=321、processed=320` 是唯一未进入 `training_step` 的 DataLoader（数据加载器）预取批次：44,179 条 journal（审计日志）哈希链完整、replay（重放）为0、梯度累积余数和保存梯度数均为0、终端检查点与 best 模型存在。V6 整次运行仍为 BLOCKED，但该 Control 允许以 reuse_depth=1 受控复用。
+
+运行器已改为 Control/Treatment 操作系统独立子进程，并修复新训练末尾预取、Windows CRLF/LF 输入哈希和断点恢复身份；模型、句法图、DANN=0.03、数据、采样、训练参数和 Gate 均未改变。全项目 CPU 测试425项通过。本条不产生新 F1，正式最佳仍为54.01；下一次由用户在新目录复用 V6 Control，只运行 Treatment 及 Phase A 无金标门控。
 
 ## 2026-08-28：M1 DANN 审计恢复修复完成（未运行实验）
 
