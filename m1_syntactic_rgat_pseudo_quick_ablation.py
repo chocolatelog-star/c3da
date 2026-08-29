@@ -646,15 +646,15 @@ def stage_producer_commit_for_validation(state: dict, stage: str, current_commit
     producer = record.get("producer_commit")
     if producer == current_commit:
         return current_commit
-    for repair in state.get("repair_history", []):
-        if (
-            producer == repair.get("from_commit")
-            and current_commit == repair.get("to_commit")
-            and stage in repair.get("completed_stages", [])
-        ):
-            return str(producer)
+    reachable = {current_commit}
+    for repair in reversed(state.get("repair_history", [])):
+        to_commit = repair.get("to_commit")
+        from_commit = repair.get("from_commit")
+        if to_commit in reachable and stage in repair.get("completed_stages", []):
+            reachable.add(from_commit)
+            if producer == from_commit:
+                return str(producer)
     raise RuntimeError(f"stage {stage} producer commit is outside the audited repair chain")
-
 
 def _validate_recipe(recipe: dict) -> None:
     if not isinstance(recipe, dict) or recipe.get("task_id") != TASK_ID:
