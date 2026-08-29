@@ -1,8 +1,23 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-28 23:03（北京时间）
+> 更新时间：2026-08-29 16:50（北京时间）
 
-## 当前工程修复状态
+## 当前 V8 Phase A 运行状态
+
+- 当前运行：`laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，状态为 `RUNNING`（运行中）。
+- V8 没有重训 Control（对照组）：已按 `reuse_depth=1` 复用 V6 审计通过的 Control 模型与 DANN（领域对抗网络）批次证据；`stage_status.json` 已将 `control_training` 标记完成。
+- 当前正在从头训练带句法 RGAT（关系图注意力网络）的 Treatment（实验组），总计 1400 个优化步；用户最近观测约为 `172/1400`。阶段性 `104/110` 是 source-dev（源域开发集）评估进度，不是第二次训练。
+- 当前训练日志中的 generation/domain/joint loss（生成/领域/联合损失）和梯度范数均为有限值，训练与开发损失下降；Accelerate（加速训练库）输出仅为弃用警告，尚无运行错误。
+- V8 尚未完成 Treatment、目标无标签伪标签推理及 A1–A4 无金标 Gate，因此不能宣称图模块有效，也没有新的目标测试 F1。Phase B（阶段B）、最终 ASTE（方面级情感三元组抽取）和 target_test（目标测试集）仍未批准进入。
+
+## 当前 M1 Phase A 工程状态
+
+- 句法 RGAT（关系图注意力网络）研究变量不变；Control/Treatment 已改为独立子进程，避免同进程生命周期残留阻塞或污染显存。
+- V6 整次运行仍为 BLOCKED，但其已完成的 Control 通过严格只读 salvage（挽救）审计，可作为 reuse_depth=1 的唯一外部 Control；新运行只需执行 Treatment 及后续 Phase A 无金标门控。
+- V6 末尾差异是单个未消费 DataLoader lookahead（数据加载器预取），不是漏训练：global/max step=1400/1400、journal 44,179 条且哈希链完整、replay=0、梯度累积余数=0、保存梯度数=0、终端模型与 best 模型均存在。
+- 全项目 CPU 回归 425 项通过；当前 V8 GPU（图形处理器）Phase A 已由用户启动。当前唯一动作是等待 Treatment 与 A1–A4 门控完成，期间不新增变量、不重启 Control、不读取目标测试。
+
+## 历史工程修复状态
 
 当前工程状态为：M1 Phase A 的 v3 运行已标记 `INVALID_REPLAY_CONTAMINATED`（重放污染无效），v4 运行已标记 `INCOMPLETE_VRAM_THRASHING`（显存抖动导致不完整），二者均不得恢复或用于实验结论。历史 V2 显存报告已标记 `VALID_DIAGNOSTIC_REPORTING_INCONSISTENT`（诊断报告口径不一致）。当前任务 `M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V2` 的代码和 CPU（中央处理器）验证已完成，等待 Codex Sol（高级工程模型）只读复审；本轮只修复生命周期审计与门控，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
 
@@ -17,7 +32,6 @@
 
 ## 历史：V1 生命周期修复状态
 
-
 - `t5_absa_train.py` 在模型和 DANN（领域对抗网络）审计产物保存后复制纯 CPU（中央处理器）返回数据，再显式释放 Trainer（训练器）、模型、优化器、数据加载器、回调和训练批次引用，执行垃圾回收与 CUDA 缓存清理并记录生命周期事件。
 - Phase A 运行器记录 Control（对照组）返回前、返回后、垃圾回收后、CUDA 缓存清理后的 allocated/reserved（已分配/保留显存）、活动 CUDA 张量数量与字节数、引用标志和 RNG（随机数生成器）哈希；清理不通过时硬停止 Treatment（实验组），要求独立子进程隔离。
 - 诊断报告区分 `audit_status`（诊断完整性）与 `attribution_decision`（归因决定），历史 V2 报告不删除，只保留其口径不一致标记。
@@ -27,22 +41,37 @@
 ## 历史：显存归因诊断实现状态
 
 - `m1_vram_attribution_audit.py` 已升级为 V2：批次计数读取真实整理器字段并与图追踪形状硬校验；用户运行专用命令后才会加载真实 T5-base、现有图缓存和固定 source=1/target=1 批次。
-- V2 在 Control/Treatment 同批次的三次 zero-update 过程中继续记录各调用点显存，同时增加 Control 生命周期、Python CUDA 张量存活、对象可达性和可丢弃模型副本 AdamW 稳态状态测量；正式模型哈希必须保持不变。
-- 当前仅完成代码和 CPU/静态验证；新版 GPU 诊断、正式训练、正式伪标签、Phase B、最终 ASTE 和 target_test 均未运行，正式实验索引不更新。
+- V2 在 Control/Treatment 同批次的三次 zero-update（零更新）过程中继续记录各调用点显存，同时增加 Control 生命周期、Python CUDA（英伟达 GPU 加速）张量存活、对象可达性和可丢弃模型副本 AdamW（自适应矩估计）稳态状态测量；正式模型哈希必须保持不变。
+- 当前仅完成代码和 CPU/静态验证；新版 GPU（图形处理器）诊断、正式训练、正式伪标签、Phase B（下游阶段）、最终 ASTE（方面级情感三元组抽取）和 target_test（目标测试集）均未运行，正式实验索引不更新。
 
-- `PairedDomainBatchSampler`（成对领域批次采样器）独立记录 physical traversal（物理遍历）序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数；physical ID 不参与洗牌。
-- 审计协议使用带完整行校验和哈希链的追加式 journal（日志）；终止边界在签发前检查 Trainer 状态，`complete` 强制 issued=processed=planned。
-- 成对检查点保存并哈希校验梯度累积快照/偏移、采样器状态和审计；issued-but-unprocessed 批次从 processed 位置重签，无法证明安全的旧点硬拒绝。
+## 历史：V2 当前任务状态
+
+- 任务：`M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2`，方向 `laptop14 -> rest15`，父代码身份 `11ecef3324994060b26141ee1c7e7ffcc355e7fc`，状态 `APPROVED`。
+- 诊断使用真实 T5-base、真实图缓存、source=1/target=1、FP16（半精度）、梯度检查点和 DANN=0.03；只比较同一固定批次的 Control（对照组）与 Treatment（实验组），执行 zero-update（零更新）步骤。
+- 逐调用点记录 allocated/reserved/peak（已分配/已保留/峰值）显存、张量形状/dtype（数据类型）、理论字节数及 token/node/edge（子词/节点/边）数量，检查张量保留、GPU 张量进入 Python 容器、autograd graph（自动求导图）存活、隐式 FP32 提升、关系/注意力张量扩张和分配器碎片化。
+- V4 显存诊断期间不得恢复或继续训练；本任务只修复独立 V2 诊断脚本和 CPU（中央处理器）合成测试。GPU（图形处理器）诊断命令只交给用户手动运行。
+- 禁止完整训练、正式伪标签、Phase B（下游阶段）、最终 ASTE（方面级情感三元组抽取）、target_test（目标测试集）、图检查点、CPU 卸载、缩短长度、换优化器、改 batch（批大小）、关闭图模块或修改损失。
+
+- `PairedDomainBatchSampler`（成对领域批次采样器）现在独立记录物理 DataLoader（数据加载器）遍历序号、既有采样轮次、计划/issued（已发出）/processed（已确认）批次数、完整/部分遍历和 Trainer（训练器）global step（全局步数）身份；物理序号不再参与洗牌。
+- 审计协议升级为 schema 3（模式3）：每批只追加带完整行校验和哈希链的 journal（日志），遍历边界、检查点和正常结束时才原子压缩快照；崩溃后可从完整日志行恢复，且不会把 issued 冒充 processed。
+- 成对检查点只接受 schema 3、身份与哈希一致且恢复语义有效的点；`resume_complete` 与 `training_terminal_partial` 分离，末尾部分遍历只有 Trainer global step==max_steps 且 issued==processed 时才可作为终端恢复点，未确认批次会硬拒绝。
 - Phase A 验证器不再固定要求 `len(epochs)==num_train_epochs`；独立依据冻结配方和实际成对 DataLoader 长度计算 max_steps，并严格校验每次遍历的 optimizer step 区间、单调性、边界连续性、最终 global step 和 Control/Treatment（对照组/处理组）逐批对齐。
-- 旧运行只能通过显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）写入迁移报告；拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
+- 旧运行只能通过显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）写入 `legacy_diagnostic_migration.json`（旧版迁移报告）；该路径保留旧提交和产物哈希、拒绝训练续跑、不修改 `stage_status.json`，旧运行仍是方向性诊断而非正式通过证据。
+- TDD（测试驱动开发）新增边界覆盖重复采样轮次、906/16/25→1400 采样哈希、追加日志规模、落盘后未确认崩溃、恢复重放、步区间、终止部分遍历、Control/Treatment 对齐和 legacy 不得正式 PASS（通过）。M1 六个测试文件共97项通过；完整项目回归以最终命令输出为准。
 - V4 修复新增独立实际微批计数器；检查点状态由 `build_checkpoint_state` 复制构造，不写入 live sampler；`remainder=0` 不产生 replay/reissue（重放/重签）列表，fresh run 的 journal replay_count 必须为 0。
-- V3 六个 M1 测试文件 CPU 回归为 `103 passed`；未运行 GPU、正式实验、伪标签或 target_test，当前验收仍 BLOCKED。
 
-## 当前任务状态
+### V3 复审修复边界
 
-`M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V2`（laptop14 -> rest15）当前为 `APPROVED`（已批准），固定种子为 1000，父代码身份为 `11ecef3324994060b26141ee1c7e7ffcc355e7fc`。本轮只修复 V2 显存诊断的批次计数、报告 Gate（门控）、生命周期和 AdamW 状态测量；GPU 诊断、正式训练、正式伪标签实验和目标测试读取尚未执行，Phase B（下游阶段）仍未批准。
+- 采样器在签发下一批前读取 Trainer 的 global/max step 和在途批次预算；终止状态不再多签发。`complete` 强制 `issued_batches == processed_batches == planned_batches`，否则保持 partial（部分）或拒绝。
+- 恢复显式区分 processed 的梯度累积重放与 issued-but-unprocessed（已签发但未处理）批次；后者从 `processed_batches` 重新进入真实 `training_step`，不能从 `max(processed, issued)` 跳过。
+- 检查点原子保存梯度累积快照和偏移，恢复前校验其哈希与结构；不具备安全身份的旧检查点硬拒绝。Phase A 长训练前预检 manifest、relation vocabulary、source_train/source_dev/target_unlabeled 三个 split 及其输入/文件哈希。
+- 六个 M1 测试文件 CPU 回归为 `103 passed`，`py_compile` 和 `git diff --check` 退出码均为 0；当前代码仍尚未产生正式实验通过证据。旧运行只能执行“旧运行阻塞/迁移审计命令”，不能续跑或晋级。
 
-## 当前 Phase A 实现状态
+## 历史：V4 当前任务状态
+
+`M1_PHASE_A_LIVE_REPLAY_CONTAMINATION_FIX_V4`（laptop14 -> rest15）当前为 `APPROVED`（已批准），固定种子为 1000，父代码身份为 `158654021fc5f26bf1cfb8e803d7d1b592bd8534`。本轮只修复 Phase A（上游阶段）成对 DANN 的 live/checkpoint 状态隔离、非整除尾部更新、fresh replay 审计和恢复门控；GPU（图形处理器）运行、正式训练、正式伪标签实验和目标测试读取尚未执行，Phase B（下游阶段）仍未批准。
+
+## 历史：Phase A 实现状态
 
 - 新增专用 `m1_syntactic_rgat_pseudo_quick_ablation.py` 和固定配方，覆盖 Control（无图）/Treatment（句法 RGAT）四个上游调用点、Control 身份机器复核、A1-A4 门控、断点恢复、配置/代码/输入/模型文件哈希和中文/JSON（结构化）结果输出。
 - 现有 `t5_absa_train.py` 的直接图训练入口继续硬停止；只有专用 Phase A API 可在入口完成配方、Git（版本管理）和数据边界校验后调用既有训练主体。图模块不进入生成器、增强、NLI（自然语言推断）、选择器、最终 ASTE（方面级情感三元组抽取）或 target_test（目标测试集）。
@@ -51,19 +80,19 @@
 - 本轮修复不改变句法图传播公式、图结构、DANN=0.03、Gate、伪标签规则、Phase B 或最终 ASTE（方面级情感三元组抽取）研究范围。
 - v3 污染运行仅保留作无效审计现场，不得恢复、不得进入正式父运行；v4 必须使用全新目录，正式运行前等待 Codex Sol 复审和用户明确启动。
 
-## V4 修复验证状态
+## 历史：V4 修复验证状态
 
 - RED（失败先行）：已复现 `[-0:]` 在余数为零时重放完整历史，以及保存检查点修改 live sampler 的污染路径；新增余数、隔离和 906/16/25 边界测试在修复前失败。
 - GREEN（修复后）：M1 相关 CPU 回归共 `141 passed, 0 failed`，包括 fresh 三轮非整除训练的 `replay_count=0`、检查点隔离、显式恢复、损坏检查点回退和边界采样验证。
 - 本轮未启动 GPU、正式训练、伪标签、生成器、增强、Phase B、最终 ASTE 或 target_test（目标测试集）；正式实验索引暂不更新。
 
-## 当前任务边界
+## 历史：当前任务边界
 
 - 本轮只修复 Phase A 最终验收中的成对 DANN 生成损失语义、Control/Treatment 初始化、完整检查点恢复、配方/真实输入冻结和 DANN 审计真实性；不修改句法图公式、图结构、DANN 系数、Gate、伪标签规则、实验研究范围或数据增强逻辑。
 - Phase A 允许通过专用入口执行 Control/Treatment（对照组/实验组）抽取器训练、source-dev（源域开发集）评估、目标无标签 DANN 和目标伪推理；本轮代码修复不启动 GPU（图形处理器）实验、正式训练、正式伪标签或目标测试。
 - 不使用 `nan_to_num`、梯度裁剪、关闭图模块或改成 FP32 掩盖异常；Phase B（下游阶段）、生成器、增强、NLI（自然语言推断）、最终 ASTE（方面级情感三元组抽取）和 target test（目标测试）始终禁止。
 - 本轮复审只修复 Phase A 的成对 DANN 批次和逐阶段产物身份恢复：每个逻辑批次严格为 source=1/target=1，目标行仅承担 DANN 损失；Control/Treatment 抽取器训练、source-dev 评估和 target-unlabeled 伪推理仍只能经专用入口执行。A4 六个伪标签产物、训练模型与 DANN 审计报告均逐项记录和重算校验；外部 Control 缺少报告或报告/批次身份不一致时硬失败。
-- PairedDomainBatchSampler（成对领域批次采样器）现在由显式 `set_epoch` 控制轮次，并提供带 seed、行 ID、计数和批大小身份的 `state_dict/load_state_dict`；额外 DataLoader（数据加载器）迭代不会推进轮次，恢复后批次顺序按 seed+epoch 保持一致。
+- PairedDomainBatchSampler（成对领域批次采样器）在正式 Trainer（训练器）入口复用旧的 `int(state.epoch)` 采样轮次 provider（提供器），并以独立 physical traversal ID（物理遍历 ID）审计；额外 DataLoader（数据加载器）迭代不会覆盖身份，恢复后批次顺序按既有 `seed+sampling_epoch` 保持一致。
 
 ## 本轮接口修复状态
 

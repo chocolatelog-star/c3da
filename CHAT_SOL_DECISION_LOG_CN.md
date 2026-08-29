@@ -1,6 +1,19 @@
 # 协作决策日志
 
-> 更新时间：2026-08-28 20:40（北京时间）
+> 更新时间：2026-08-29 16:50（北京时间）
+
+## 2026-08-29：V8 Phase A 已启动并进入 Treatment 训练
+
+- 用户已从新目录启动 V8；Control（对照组）没有重训，运行器受控复用 V6 已审计 Control，`reuse_depth=1`。
+- V8 当前从头训练唯一新变量 Treatment（带句法 RGAT 的伪标签抽取器），总计 1400 步；后续只执行源域开发集评估、目标无标签伪标签推理及 A1–A4 无金标 Gate（门控）。
+- 当前日志数值有限且损失下降，只能说明运行正常，不能说明研究有效。V8 完成前不新增变量、不运行目标测试、不更新正式最佳。
+
+## 2026-08-29：采用独立子进程并严格复用 V6 Control
+
+- 同一 Python 进程清理 Control 后仍存在对象可达性，继续追加清理补丁不再作为方案；Control 与 Treatment 必须由不同操作系统子进程执行。
+- V6 的唯一 `issued-but-unprocessed`（已签发但未处理）批次经 journal、优化步、梯度累积和终端检查点联合审计，判定为 `terminal_lookahead_not_consumed`（终端预取未消费）；V6 整次运行不翻案，但其 Control 允许受控复用一次。
+- 新训练主动阻止相同预取；Windows 输入换行身份改为稳定 LF 写入与语义恢复校验。模型公式、图传播、DANN、参数、数据和 Gate 均未改变。
+- 全项目 CPU 测试 425 项通过。下一运行必须使用新目录、外部 V6 Control、reuse_depth=1；不得恢复 V6/V7，不得再训练 Control，不得读取目标测试。
 
 ## 2026-08-28 20:40：完成 M1 显存归因诊断工具实现
 
@@ -21,6 +34,13 @@
 - V4 只修复检查点序列化状态隔离、真实累积余数、非整除轮末尾部提交和 journal replay 门控；不改变句法图、DANN=0.03、数据、训练参数或研究范围。
 - fresh run 必须 `batch_replayed=0`；显式 checkpoint（检查点）恢复才允许重放，且事件必须绑定检查点路径、哈希和恢复批次身份。
 - CPU 回归已通过 141 项；未运行 GPU、正式训练、伪标签、生成器、增强、Phase B、最终 ASTE 或 target_test。等待 Codex Sol 最终只读验收后，再由用户决定是否从 v4 新目录启动。
+
+## 2026-08-28：V3 复审修复（验收仍 BLOCKED）
+
+- 不得把 `63fd1a6` 称为验收通过。复审确认的终止多签发已修复：采样器在准备下一批前读取 Trainer 状态及累积预算，终止边界不再追加 issued；`complete` 必须同时满足 issued=processed=planned，审计加载器和正式验证器均强制该条件。
+- 恢复不再使用 `max(processed, issued)`；processed-but-unfinished accumulation（已处理但梯度尚未完成的累积）通过梯度快照/偏移恢复，issued-but-unprocessed 批次从 processed 位置重新进入真实 training_step。缺失或哈希不一致的梯度身份硬拒绝。
+- Phase A 入口在长训练前预检 manifest、relation_vocab、source_train/source_dev/target_unlabeled 三个缓存文件及输入/文件哈希；缓存缺失或身份不符立即失败。正式命令必须使用已验证的 `J:\nlp\CD-C3DA\runs\diagnostics\laptop14_to_rest15_m1_syntactic_rgat_entry_audit_v4\graph_cache_resume`。
+- 保持既有 `int(Trainer.state.epoch)` 洗牌语义；physical traversal ID 仅审计用途，不改变采样顺序。未运行 GPU、正式实验、伪标签推理或 target_test。
 
 ## 2026-08-28：完成 Phase A DANN 物理遍历审计与恢复修复（CPU 验证，未启动实验）
 

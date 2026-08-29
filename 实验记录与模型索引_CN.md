@@ -1,6 +1,12 @@
 # CD-C3DA 实验记录与模型索引
 
-> 更新时间：2026-08-29（北京时间）
+> 更新时间：2026-08-29 16:50（北京时间）
+
+## 2026-08-29：M1 Phase A V8 运行中（无最终指标）
+
+V8 运行目录为 `runs/reproducible/laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，代码身份为 `33a7e3d3fa9846de2ddac52484365b4bf3c649c4`。本次没有从头重训 Control（对照组），而是以 `reuse_depth=1` 复用 V6 审计通过的 Control；当前从头训练带句法 RGAT（关系图注意力网络）的 Treatment（实验组），计划 1400 个优化步。
+
+最近人工观测约为 `172/1400`；日志中的 generation/domain/joint loss（生成/领域/联合损失）、梯度范数和 source-dev（源域开发集）损失均为有限值且总体下降，Accelerate（加速训练库）仅输出弃用警告。该运行尚未完成 Treatment、目标无标签伪标签推理或 A1–A4 Gate（门控），未运行目标测试，不产生新的 F1，也不改变正式最佳 54.01。运行完成后必须记录 Gate 结论、Control/Treatment 差异、研究结论和唯一下一步。
 
 ## 2026-08-29：M1 Phase A 独立进程与 V6 Control 受控复用修复完成（未运行新实验）
 

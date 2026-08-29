@@ -1,13 +1,21 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-29 14:00（北京时间）
+> 更新时间：2026-08-29 16:50（北京时间）
+
+## 当前 V8 Phase A 运行状态
+
+- 当前运行：`laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，状态为 `RUNNING`（运行中）。
+- V8 没有重训 Control（对照组）：已按 `reuse_depth=1` 复用 V6 审计通过的 Control 模型与 DANN（领域对抗网络）批次证据；`stage_status.json` 已将 `control_training` 标记完成。
+- 当前正在从头训练带句法 RGAT（关系图注意力网络）的 Treatment（实验组），总计 1400 个优化步；用户最近观测约为 `172/1400`。阶段性 `104/110` 是 source-dev（源域开发集）评估进度，不是第二次训练。
+- 当前训练日志中的 generation/domain/joint loss（生成/领域/联合损失）和梯度范数均为有限值，训练与开发损失下降；Accelerate（加速训练库）输出仅为弃用警告，尚无运行错误。
+- V8 尚未完成 Treatment、目标无标签伪标签推理及 A1–A4 无金标 Gate，因此不能宣称图模块有效，也没有新的目标测试 F1。Phase B（阶段B）、最终 ASTE（方面级情感三元组抽取）和 target_test（目标测试集）仍未批准进入。
 
 ## 当前 M1 Phase A 工程状态
 
 - 句法 RGAT（关系图注意力网络）研究变量不变；Control/Treatment 已改为独立子进程，避免同进程生命周期残留阻塞或污染显存。
 - V6 整次运行仍为 BLOCKED，但其已完成的 Control 通过严格只读 salvage（挽救）审计，可作为 reuse_depth=1 的唯一外部 Control；新运行只需执行 Treatment 及后续 Phase A 无金标门控。
 - V6 末尾差异是单个未消费 DataLoader lookahead（数据加载器预取），不是漏训练：global/max step=1400/1400、journal 44,179 条且哈希链完整、replay=0、梯度累积余数=0、保存梯度数=0、终端模型与 best 模型均存在。
-- 全项目 CPU 回归 425 项通过；未运行新的 GPU 实验或目标测试。当前下一动作是用户从全新输出目录启动一次带 `--control_run_dir` 的 Phase A。
+- 全项目 CPU 回归 425 项通过；当前 V8 GPU（图形处理器）Phase A 已由用户启动。当前唯一动作是等待 Treatment 与 A1–A4 门控完成，期间不新增变量、不重启 Control、不读取目标测试。
 
 ## 历史工程修复状态
 
