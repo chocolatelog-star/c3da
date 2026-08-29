@@ -1,8 +1,15 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-28 23:03（北京时间）
+> 更新时间：2026-08-29 14:00（北京时间）
 
-## 当前工程修复状态
+## 当前 M1 Phase A 工程状态
+
+- 句法 RGAT（关系图注意力网络）研究变量不变；Control/Treatment 已改为独立子进程，避免同进程生命周期残留阻塞或污染显存。
+- V6 整次运行仍为 BLOCKED，但其已完成的 Control 通过严格只读 salvage（挽救）审计，可作为 reuse_depth=1 的唯一外部 Control；新运行只需执行 Treatment 及后续 Phase A 无金标门控。
+- V6 末尾差异是单个未消费 DataLoader lookahead（数据加载器预取），不是漏训练：global/max step=1400/1400、journal 44,179 条且哈希链完整、replay=0、梯度累积余数=0、保存梯度数=0、终端模型与 best 模型均存在。
+- 全项目 CPU 回归 425 项通过；未运行新的 GPU 实验或目标测试。当前下一动作是用户从全新输出目录启动一次带 `--control_run_dir` 的 Phase A。
+
+## 历史工程修复状态
 
 当前工程状态为：M1 Phase A 的 v3 运行已标记 `INVALID_REPLAY_CONTAMINATED`（重放污染无效），v4 运行已标记 `INCOMPLETE_VRAM_THRASHING`（显存抖动导致不完整），二者均不得恢复或用于实验结论。历史 V2 显存报告已标记 `VALID_DIAGNOSTIC_REPORTING_INCONSISTENT`（诊断报告口径不一致）。当前任务 `M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V2` 的代码和 CPU（中央处理器）验证已完成，等待 Codex Sol（高级工程模型）只读复审；本轮只修复生命周期审计与门控，不改变模型、图传播、损失、数据、配方、训练参数或研究范围。
 

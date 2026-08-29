@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from tqdm import tqdm
 
+from m1_phase_a_control_terminal_lookahead_salvage import audit_v6_control
 from syntactic_graph import GraphCacheError, build_parser_identity, load_graph_cache_directory, sha256_file
 from t5_aste_data import (
     dump_json,
@@ -32,6 +33,7 @@ from t5_aste_data import (
 )
 from t5_aste_pipeline import DATASETS
 from t5_absa_train import (
+    classify_terminal_lookahead,
     compute_dann_expected_max_steps,
     compute_dann_planned_batches,
     phase_a_lifecycle_memory_snapshot,
@@ -42,6 +44,7 @@ from t5_absa_train import (
 
 TASK_ID = "M1_SYNTACTIC_RGAT_PSEUDO_QUICK_ABLATION_V1"
 FIXED_PARENT_CODE_IDENTITY = "158654021fc5f26bf1cfb8e803d7d1b592bd8534"
+TRAINING_SEMANTICS_IDENTITY = "9caba1c508d096a4d360d7940d8c9d9eb4be8333"
 PHASE_A_STOP_CODE = "STOP_M1_SYNTACTIC_GRAPH_UPSTREAM"
 PHASE_B_REQUEST_CODE = "REQUEST_PHASE_B"
 PHASE_A_CALLPOINTS = (
@@ -186,6 +189,26 @@ def _artifact_identity(path: Path) -> dict[str, str]:
     raise FileNotFoundError(resolved)
 
 
+def _normalize_lf_bytes(payload: bytes) -> bytes:
+    return payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _normalized_file_sha256(path: Path) -> str:
+    return _sha256_bytes(_normalize_lf_bytes(Path(path).read_bytes()))
+
+
+def _jsonl_semantically_matches(path: Path, expected_rows: list[dict]) -> bool:
+    try:
+        actual_rows = [
+            json.loads(line)
+            for line in Path(path).read_bytes().splitlines()
+            if line.strip()
+        ]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return actual_rows == expected_rows
+
+
 def _stage_command_fingerprint(command_argv: list[str]) -> str:
     return _sha256_bytes(_canonical_json([str(value) for value in command_argv]))
 
@@ -204,7 +227,10 @@ def build_stage_identity(
     input_identities = {}
     for name, raw_path in sorted(input_files.items()):
         path = Path(raw_path).resolve()
-        input_identities[name] = {"path": str(path), "sha256": sha256_file(path)}
+        identity = {"path": str(path), "sha256": sha256_file(path)}
+        if path.suffix.lower() == ".jsonl":
+            identity["normalized_lf_sha256"] = _normalized_file_sha256(path)
+        input_identities[name] = identity
     output_identity = _artifact_identity(Path(artifact_path))
     model_identity = _artifact_identity(Path(model_path))
     output_identities = {
@@ -275,7 +301,16 @@ def validate_stage_identity(saved: dict, expected: dict | None = None) -> bool:
                 problems.append(f"input_files:{name}")
                 continue
             path = Path(identity["path"])
-            if not path.is_file() or sha256_file(path) != identity["sha256"]:
+            if not path.is_file():
+                problems.append(f"input_files:{name}")
+                continue
+            raw_matches = sha256_file(path) == identity["sha256"]
+            normalized_matches = (
+                path.suffix.lower() == ".jsonl"
+                and identity.get("normalized_lf_sha256")
+                and _normalized_file_sha256(path) == identity.get("normalized_lf_sha256")
+            )
+            if not raw_matches and not normalized_matches:
                 problems.append(f"input_files:{name}")
     for prefix in ("output_artifact", "model_artifact"):
         path = Path(saved.get(f"{prefix}_path", ""))
@@ -321,6 +356,27 @@ def validate_stage_identity(saved: dict, expected: dict | None = None) -> bool:
         problems.append("resolved_model_path")
     if expected is not None:
         for field in required:
+            if field == "input_files":
+                saved_inputs = saved.get("input_files")
+                expected_inputs = expected.get("input_files")
+                if not isinstance(saved_inputs, dict) or not isinstance(expected_inputs, dict) or set(saved_inputs) != set(expected_inputs):
+                    problems.append("expected:input_files")
+                    continue
+                for name in sorted(expected_inputs):
+                    saved_identity = saved_inputs.get(name)
+                    expected_identity = expected_inputs.get(name)
+                    if not isinstance(saved_identity, dict) or not isinstance(expected_identity, dict):
+                        problems.append(f"expected:input_files:{name}")
+                        continue
+                    if saved_identity.get("path") != expected_identity.get("path"):
+                        problems.append(f"expected:input_files:{name}:path")
+                        continue
+                    if saved_identity.get("sha256") != expected_identity.get("sha256"):
+                        saved_normalized = saved_identity.get("normalized_lf_sha256")
+                        expected_normalized = expected_identity.get("normalized_lf_sha256")
+                        if not saved_normalized or not expected_normalized or saved_normalized != expected_normalized:
+                            problems.append(f"expected:input_files:{name}:sha256")
+                continue
             if saved.get(field) != expected.get(field):
                 problems.append(f"expected:{field}")
     if problems:
@@ -328,24 +384,31 @@ def validate_stage_identity(saved: dict, expected: dict | None = None) -> bool:
     return True
 
 
-def _atomic_write_json(path: Path, value: dict) -> None:
+def _utf8_lf_bytes(value: str) -> bytes:
+    return value.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as handle:
-        temporary = Path(handle.name)
-        json.dump(value, handle, ensure_ascii=False, indent=2)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _atomic_write_json(path: Path, value: dict) -> None:
+    _atomic_write_bytes(path, _utf8_lf_bytes(json.dumps(value, ensure_ascii=False, indent=2) + "\n"))
 
 
 def _atomic_write_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as handle:
-        temporary = Path(handle.name)
-        handle.write(value)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    _atomic_write_bytes(path, _utf8_lf_bytes(value))
 
 
 def _read_json(path: Path) -> dict:
@@ -711,10 +774,15 @@ def _write_inputs(input_rows: dict[str, list[dict]], run_dir: Path, *, resume: b
         path = run_dir / "inputs" / f"{split}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         serialized = _serialize_rows(input_rows[split])
-        if resume and path.exists() and sha256_file(path) != _sha256_bytes(serialized):
-            raise RuntimeError(f"resume input artifact mismatch: {path}")
+        if resume and path.exists():
+            observed = path.read_bytes()
+            canonical_observed = observed.replace(b"\r\n", b"\n")
+            if canonical_observed != serialized:
+                raise RuntimeError(f"resume input artifact mismatch: {path}")
         if not path.exists():
-            _atomic_write_text(path, serialized.decode("utf-8"))
+            _atomic_write_bytes(path, serialized)
+        if path.read_bytes().replace(b"\r\n", b"\n") != serialized:
+            raise RuntimeError(f"written input artifact mismatch: {path}")
 
 
 def _input_hashes(input_rows: dict[str, list[dict]], run_dir: Path) -> dict:
@@ -821,11 +889,41 @@ def _write_variant_inputs(variant_dir: Path, run_dir: Path, *, resume: bool = Fa
     for split in ("source_train", "source_dev", "target_unlabeled"):
         target = variant_dir / f"{split}.jsonl"
         source = run_dir / "inputs" / f"{split}.jsonl"
-        source_hash = sha256_file(source)
-        if resume and target.exists() and sha256_file(target) != source_hash:
-            raise RuntimeError(f"resume variant input artifact mismatch: {target}")
+        source_bytes = source.read_bytes()
+        normalized_source = _normalize_lf_bytes(source_bytes)
+        source_hash = _sha256_bytes(source_bytes)
+        source_normalized_hash = _sha256_bytes(normalized_source)
+        if resume and not target.exists():
+            raise RuntimeError(f"resume variant input artifact is missing: {target}")
+        if target.exists():
+            target_bytes = target.read_bytes()
+            if _sha256_bytes(target_bytes) != source_hash and _sha256_bytes(_normalize_lf_bytes(target_bytes)) != source_normalized_hash:
+                raise RuntimeError(f"resume variant input artifact mismatch: {target}")
         if not target.exists():
-            _atomic_write_text(target, source.read_text(encoding="utf-8"))
+            _atomic_write_bytes(target, source_bytes)
+        target_bytes = target.read_bytes()
+        if _sha256_bytes(target_bytes) != source_hash and _sha256_bytes(_normalize_lf_bytes(target_bytes)) != source_normalized_hash:
+            raise RuntimeError(f"variant input artifact mismatch: {target}")
+
+
+def _preflight_resume_inputs(input_rows: dict[str, list[dict]], run_dir: Path) -> None:
+    """Validate all persisted input bytes before any resume bookkeeping is written."""
+    for split, rows in input_rows.items():
+        validate_input_split(split)
+        path = run_dir / "inputs" / f"{split}.jsonl"
+        if not path.is_file():
+            raise RuntimeError(f"resume input artifact is missing: {path}")
+        if _normalize_lf_bytes(path.read_bytes()) != _serialize_rows(rows):
+            raise RuntimeError(f"resume input artifact mismatch: {path}")
+    for variant in ("control", "treatment"):
+        variant_dir = run_dir / variant
+        for split in input_rows:
+            path = variant_dir / f"{split}.jsonl"
+            source = run_dir / "inputs" / f"{split}.jsonl"
+            if not path.is_file():
+                raise RuntimeError(f"resume variant input artifact is missing: {path}")
+            if _normalize_lf_bytes(path.read_bytes()) != _normalize_lf_bytes(source.read_bytes()):
+                raise RuntimeError(f"resume variant input artifact mismatch: {path}")
 
 
 def _training_argv(
@@ -897,21 +995,154 @@ def _training_argv(
     return argv
 
 
-def _run_training(args: argparse.Namespace, variant_dir: Path, graph_enabled: bool) -> dict | None:
+def _phase_a_worker_command(spec_path: Path) -> list[str]:
+    return [
+        str(Path(sys.executable)),
+        str(Path(__file__).resolve()),
+        "--training_worker_spec",
+        str(Path(spec_path).resolve()),
+    ]
+
+
+def _worker_spec_path(stage: str, variant_dir: Path) -> Path:
+    return Path(variant_dir) / f"worker_spec_{stage}.json"
+
+
+def _run_training(
+    args: argparse.Namespace,
+    variant_dir: Path,
+    graph_enabled: bool,
+    *,
+    stage: str | None = None,
+) -> dict:
+    variant = "treatment" if graph_enabled else "control"
+    stage = stage or ("treatment_training" if graph_enabled else "control_training")
+    training_argv = _training_argv(
+        args,
+        variant_dir,
+        graph_enabled,
+        variant_dir / "dann_batch_audit.json",
+        variant_dir / "phase_a_initialization_audit.json",
+    )
+    result_path = variant_dir / "worker_result.json"
+    spec_path = variant_dir / f"worker_spec_{stage}.json"
+    input_identity = {
+        split: _artifact_identity(variant_dir / f"{split}.jsonl")
+        for split in ("source_train", "source_dev", "target_unlabeled")
+    }
+    model_identity = _model_hashes(Path(args.model_path).resolve())
+    graph_cache_identity = None
+    if graph_enabled:
+        graph_cache_identity = {
+            "path": str(Path(args.graph_cache_dir).resolve()),
+            "sha256": _hash_tree(Path(args.graph_cache_dir).resolve()),
+        }
+    _atomic_write_json(spec_path, {
+        "schema_version": 1,
+        "stage": stage,
+        "variant": variant,
+        "seed": int(args.recipe_data["seed"]),
+        "graph_enabled": graph_enabled,
+        "training_argv": training_argv,
+        "training_argv_fingerprint": _sha256_bytes(_canonical_json(training_argv)),
+        "result_path": str(result_path.resolve()),
+        "parent_pid": os.getpid(),
+        "target_test_access": False,
+        "code_identity": _git_identity(args.project_root),
+        "recipe_identity": {
+            "path": str(Path(args.recipe).resolve()),
+            "sha256": sha256_file(Path(args.recipe)),
+        },
+        "input_identity": input_identity,
+        "model_identity": model_identity,
+        "graph_cache_identity": graph_cache_identity,
+    })
+    command = _phase_a_worker_command(spec_path)
+    return run_isolated_phase_a_worker(
+        command,
+        result_path=result_path,
+        expected_variant=variant,
+        require_complete_result=True,
+    )
+
+
+def _run_phase_a_training_worker(spec_path: Path) -> int:
     from t5_absa_train import run_phase_a_training
 
-    result = run_phase_a_training(
-        _training_argv(
-            args,
-            variant_dir,
-            graph_enabled,
-            variant_dir / "dann_batch_audit.json",
-            variant_dir / "phase_a_initialization_audit.json",
-        )
-    )
-    if isinstance(result, dict) and isinstance(result.get("lifecycle"), dict):
-        _atomic_write_json(variant_dir / "phase_a_lifecycle_audit.json", result["lifecycle"])
-    return result
+    spec = _read_json(spec_path)
+    variant = spec.get("variant")
+    if variant not in {"control", "treatment"}:
+        raise RuntimeError("invalid Phase A worker variant")
+    training_argv = spec.get("training_argv")
+    if not isinstance(training_argv, list) or not all(isinstance(item, str) for item in training_argv):
+        raise RuntimeError("invalid Phase A worker argv")
+    if any("target_test" in item.lower() for item in training_argv):
+        raise RuntimeError("Phase A worker forbids target_test access")
+    expected_fingerprint = spec.get("training_argv_fingerprint")
+    if _sha256_bytes(_canonical_json(training_argv)) != expected_fingerprint:
+        raise RuntimeError("Phase A worker argv fingerprint mismatch")
+    result_path = Path(spec["result_path"])
+    lifecycle_path = spec_path.parent / "phase_a_lifecycle_audit.json"
+    start_time = _utc_now()
+    worker_result = {
+        "schema_version": 2,
+        "status": "FAIL",
+        "stage": spec.get("stage"),
+        "variant": variant,
+        "pid": os.getpid(),
+        "parent_pid": spec.get("parent_pid"),
+        "argv": list(training_argv),
+        "argv_fingerprint": expected_fingerprint,
+        "training_argv_fingerprint": expected_fingerprint,
+        "seed": spec.get("seed"),
+        "code_identity": spec.get("code_identity"),
+        "recipe_identity": spec.get("recipe_identity"),
+        "input_identity": spec.get("input_identity"),
+        "model_identity": spec.get("model_identity"),
+        "graph_cache_identity": spec.get("graph_cache_identity"),
+        "start_time": start_time,
+        "target_test_access": False,
+    }
+    try:
+        result = run_phase_a_training(training_argv)
+        if not isinstance(result, dict):
+            raise RuntimeError("Phase A training worker returned no result")
+        lifecycle = result.get("lifecycle")
+        if isinstance(lifecycle, dict):
+            _atomic_write_json(lifecycle_path, lifecycle)
+        model_path = spec_path.parent / "models" / "extractor" / "best"
+        dann_path = spec_path.parent / "dann_batch_audit.json"
+        initialization_path = spec_path.parent / "phase_a_initialization_audit.json"
+        dann_audit = result.get("dann_batch_audit") or {}
+        worker_result.update({
+            "status": "PASS",
+            "exit_code": 0,
+            "end_time": _utc_now(),
+            "model_path": str(model_path.resolve()) if model_path.is_dir() else None,
+            "model_tree_hash": _hash_tree(model_path) if model_path.is_dir() else None,
+            "model_tree_sha256": _hash_tree(model_path) if model_path.is_dir() else None,
+            "dann_audit_path": str(dann_path.resolve()) if dann_path.is_file() else None,
+            "dann_audit_hash": sha256_file(dann_path) if dann_path.is_file() else None,
+            "dann_batch_audit_path": str(dann_path.resolve()) if dann_path.is_file() else None,
+            "dann_batch_audit_sha256": sha256_file(dann_path) if dann_path.is_file() else None,
+            "initialization_audit_path": str(initialization_path.resolve()) if initialization_path.is_file() else None,
+            "initialization_audit_hash": sha256_file(initialization_path) if initialization_path.is_file() else None,
+            "initialization_audit_sha256": sha256_file(initialization_path) if initialization_path.is_file() else None,
+            "optimizer_global_step": dann_audit.get("trainer_global_step"),
+            "trainer_global_step": dann_audit.get("trainer_global_step"),
+            "training_result_schema": sorted(result),
+            "lifecycle_audit_path": str(lifecycle_path.resolve()) if lifecycle_path.is_file() else None,
+            "lifecycle_audit_sha256": sha256_file(lifecycle_path) if lifecycle_path.is_file() else None,
+        })
+    except Exception as exc:
+        worker_result.update({
+            "exit_code": 1,
+            "end_time": _utc_now(),
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        })
+    _atomic_write_json(result_path, worker_result)
+    return int(worker_result.get("exit_code", 1))
 
 
 def append_control_return_lifecycle_event(
@@ -1071,6 +1302,60 @@ def _triplet_counts(rows: list[dict], key: str) -> tuple[int, int]:
     return tp, fn
 
 
+def run_isolated_phase_a_worker(
+    command: list[str],
+    *,
+    result_path: Path,
+    expected_variant: str,
+    require_complete_result: bool = False,
+) -> dict:
+    """Run and validate a Phase A worker in an operating-system process."""
+    parent_pid = os.getpid()
+    completed = subprocess.run(command, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(f"Phase A {expected_variant} worker failed with exit code {completed.returncode}")
+    if not result_path.is_file():
+        raise RuntimeError(f"Phase A {expected_variant} worker produced no result: {result_path}")
+    result = _read_json(result_path)
+    if result.get("status") != "PASS" or result.get("variant") != expected_variant:
+        raise RuntimeError(f"Phase A {expected_variant} worker result identity mismatch")
+    if not isinstance(result.get("pid"), int) or result["pid"] == parent_pid:
+        raise RuntimeError(f"Phase A {expected_variant} worker was not process-isolated")
+    if require_complete_result:
+        required = (
+            "stage", "parent_pid", "argv", "argv_fingerprint", "seed", "code_identity",
+            "recipe_identity", "input_identity", "model_identity", "start_time", "end_time",
+            "exit_code", "model_tree_sha256", "dann_batch_audit_sha256",
+            "initialization_audit_sha256", "optimizer_global_step", "target_test_access",
+        )
+        missing = [field for field in required if field not in result]
+        if missing:
+            raise RuntimeError(f"Phase A {expected_variant} worker result is incomplete: {missing}")
+        if result.get("exit_code") != 0 or result.get("target_test_access") is not False:
+            raise RuntimeError(f"Phase A {expected_variant} worker result terminal identity is invalid")
+        argv = result.get("argv")
+        if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+            raise RuntimeError(f"Phase A {expected_variant} worker result argv is invalid")
+        argv_fingerprint = _sha256_bytes(_canonical_json(argv))
+        if result.get("argv_fingerprint") != argv_fingerprint or result.get("training_argv_fingerprint") != argv_fingerprint:
+            raise RuntimeError(f"Phase A {expected_variant} worker argv fingerprint mismatch")
+        if result.get("parent_pid") != parent_pid:
+            raise RuntimeError(f"Phase A {expected_variant} worker parent PID mismatch")
+        for path_field, hash_field in (
+            ("model_path", "model_tree_sha256"),
+            ("dann_batch_audit_path", "dann_batch_audit_sha256"),
+            ("initialization_audit_path", "initialization_audit_sha256"),
+        ):
+            path_value = result.get(path_field)
+            if not path_value or not Path(path_value).exists():
+                raise RuntimeError(f"Phase A {expected_variant} worker artifact is missing: {path_field}")
+            path = Path(path_value)
+            observed = _hash_tree(path) if path.is_dir() else sha256_file(path)
+            if observed != result.get(hash_field):
+                raise RuntimeError(f"Phase A {expected_variant} worker artifact hash mismatch: {path_field}")
+    return result
+
+
 def _source_dev_metrics(path: Path) -> dict:
     rows = read_jsonl(path)
     raw = micro_f1([row.get("pred_raw", "") for row in rows], [row.get("gold", "") for row in rows])
@@ -1142,6 +1427,7 @@ def _read_dann_batch_audit(
     require_training_state: bool = False,
     expected_max_steps: int | None = None,
     expected_planned_batches: int | None = None,
+    gradient_accumulation_steps: int = FROZEN_RECIPE["gradient_accumulation_steps"],
     allow_legacy: bool = True,
     require_journal: bool = False,
     require_fresh_replay_free: bool = False,
@@ -1288,11 +1574,24 @@ def _read_dann_batch_audit(
                 raise RuntimeError(f"DANN batch audit did not reach Trainer max_steps: {path}")
             if previous_step_end != actual_global_step:
                 raise RuntimeError(f"DANN batch audit final optimizer step does not match Trainer state: {path}")
-            if any(item.get("processed_batches") != item.get("issued_batches") for item in report["epochs"]):
-                raise RuntimeError(f"DANN batch audit has unacknowledged batches at terminal max_steps: {path}")
+            mismatched_epochs = [
+                item for item in report["epochs"]
+                if item.get("processed_batches") != item.get("issued_batches")
+            ]
+            terminal_lookahead = classify_terminal_lookahead(
+                report,
+                gradient_accumulation_steps=int(report.get("gradient_accumulation_steps") or gradient_accumulation_steps),
+            )
+            if mismatched_epochs and not terminal_lookahead["safe"]:
+                raise RuntimeError(f"DANN batch audit has unsafe unacknowledged batches at terminal max_steps: {path}")
+            if terminal_lookahead["safe"]:
+                report["terminal_lookahead_audit"] = terminal_lookahead
         if any(item.get("completion") == "partial" for item in report["epochs"]):
             last = report["epochs"][-1]
-            if not require_training_state or report.get("trainer_global_step") != report.get("trainer_max_steps") or last.get("processed_batches") != last.get("issued_batches"):
+            lookahead_safe = bool(report.get("terminal_lookahead_audit", {}).get("safe"))
+            if not require_training_state or report.get("trainer_global_step") != report.get("trainer_max_steps") or (
+                last.get("processed_batches") != last.get("issued_batches") and not lookahead_safe
+            ):
                 raise RuntimeError(f"DANN batch audit contains a non-final or non-terminal partial traversal: {path}")
     elif any(item.get("completion") == "partial" for item in report["epochs"]):
         raise RuntimeError(f"DANN batch audit partial traversal is not formal evidence without Trainer state: {path}")
@@ -1310,8 +1609,21 @@ def _read_dann_batch_audit(
     if journal_audit is not None:
         report["journal_audit"] = journal_audit
         report["replay_count"] = journal_audit["replay_count"]
+        if report.get("terminal_lookahead_audit", {}).get("lookahead_not_consumed"):
+            terminal_lookahead = classify_terminal_lookahead(
+                report,
+                gradient_accumulation_steps=int(report.get("gradient_accumulation_steps") or gradient_accumulation_steps),
+                journal_audit=journal_audit,
+            )
+            if not terminal_lookahead["safe"]:
+                raise RuntimeError(f"DANN terminal lookahead journal evidence is invalid: {path}")
+            report["terminal_lookahead_audit"] = terminal_lookahead
+        if report.get("terminal_lookahead_audit", {}).get("lookahead_not_consumed") and journal_audit["replay_count"] != 0:
+            raise RuntimeError(f"terminal lookahead audit cannot contain replay events: {journal_path}")
     elif require_fresh_replay_free:
         raise RuntimeError(f"fresh DANN run has no auditable journal: {journal_path}")
+    if report.get("terminal_lookahead_audit", {}).get("lookahead_not_consumed") and journal_audit is None:
+        raise RuntimeError(f"terminal lookahead requires an auditable journal: {journal_path}")
     return report
 
 
@@ -1348,6 +1660,49 @@ def validate_external_control_dann_audit(
         require_journal=require_journal,
         require_fresh_replay_free=require_fresh_replay_free,
     )
+
+
+def validate_terminal_lookahead_salvage(
+    salvage_path: Path,
+    *,
+    control_run_dir: Path,
+    model_path: Path,
+    dann_path: Path,
+) -> dict:
+    """Validate the separate, read-only V6 salvage evidence before reuse."""
+    path = Path(salvage_path).resolve()
+    if not path.is_file():
+        raise RuntimeError("external Control terminal-lookahead salvage report is missing; refusing reuse")
+    report = _read_json(path)
+    if not isinstance(report, dict) or report.get("status") != "PASS":
+        raise RuntimeError("external Control terminal-lookahead salvage is not PASS; refusing reuse")
+    if report.get("source_run_remains_blocked") is not True or report.get("target_test_access") is not False:
+        raise RuntimeError("external Control salvage boundary is invalid; refusing reuse")
+    if report.get("producer_training_semantics_commit") != TRAINING_SEMANTICS_IDENTITY:
+        raise RuntimeError("external Control salvage producer training identity mismatch; refusing reuse")
+    if report.get("reuse_depth") != 1:
+        raise RuntimeError("external Control salvage reuse depth mismatch; refusing reuse")
+    source_run = Path(report.get("source_run_dir", "")).resolve()
+    expected_source_run = model_path.resolve().parents[3]
+    if source_run != expected_source_run or source_run != Path(control_run_dir).resolve():
+        raise RuntimeError("external Control salvage source run identity mismatch; refusing reuse")
+    expected_artifacts = {
+        "model_tree_sha256": (model_path, _hash_tree),
+        "dann_audit_sha256": (dann_path, sha256_file),
+    }
+    for report_field, (artifact_path, hash_function) in expected_artifacts.items():
+        observed = hash_function(artifact_path)
+        if report.get(report_field) != observed:
+            raise RuntimeError(f"external Control salvage {report_field} mismatch; refusing reuse")
+    journal_path = dann_path.with_suffix(".journal.jsonl")
+    if not journal_path.is_file() or report.get("journal_path") is None:
+        raise RuntimeError("external Control salvage journal is missing; refusing reuse")
+    if Path(report["journal_path"]).resolve() != journal_path.resolve() or report.get("journal_sha256") != sha256_file(journal_path):
+        raise RuntimeError("external Control salvage journal identity mismatch; refusing reuse")
+    classification = report.get("classification")
+    if not isinstance(classification, dict) or classification.get("safe") is not True:
+        raise RuntimeError("external Control salvage classification is not safe; refusing reuse")
+    return report
 
 
 def _validate_control_treatment_dann_reports(
@@ -1464,7 +1819,7 @@ def _build_identity(args: argparse.Namespace, input_hashes: dict, model_hashes: 
         "checkpoint_selection_rule": args.recipe_data["training"]["checkpoint_selection"],
         "tokenizer_sha256": tokenizer_digest,
         "model_sha256": model_digest,
-        "code_semantics": git_identity["commit"],
+        "code_semantics": TRAINING_SEMANTICS_IDENTITY,
         "artifact_sha256": artifact_digest,
     }
     return actual, {
@@ -1474,6 +1829,8 @@ def _build_identity(args: argparse.Namespace, input_hashes: dict, model_hashes: 
         "model_file_hashes": model_hashes,
         "parser_identity": parser_identity,
         "git": git_identity,
+        "orchestration_commit": git_identity["commit"],
+        "training_semantics_identity": TRAINING_SEMANTICS_IDENTITY,
         "parent_run_identity": {"required_entry_code_identity": FIXED_PARENT_CODE_IDENTITY},
     }
 
@@ -1505,7 +1862,7 @@ def _stage_spec(
         if not execute_control_training and control_initialization_audit_path is None:
             raise RuntimeError("reused Control stage requires its resolved initialization audit path")
         if execute_control_training:
-            command = _training_argv(args, control_dir, False, audit_path, initialization_path)
+            command = _phase_a_worker_command(_worker_spec_path(stage, control_dir))
         else:
             command = [
                 "reuse_external_control",
@@ -1523,7 +1880,12 @@ def _stage_spec(
                     {"phase_a_lifecycle_audit": control_dir / "phase_a_lifecycle_audit.json"}
                     if execute_control_training else {}
                 ),
+                **(
+                    {"worker_result": control_dir / "worker_result.json"}
+                    if execute_control_training else {}
+                ),
             },
+            "worker_spec_path": _worker_spec_path(stage, control_dir) if execute_control_training else None,
             "variant_dir": control_dir,
         }
     if stage == "treatment_training":
@@ -1531,7 +1893,7 @@ def _stage_spec(
         audit_path = treatment_dir / "dann_batch_audit.json"
         initialization_path = treatment_dir / "phase_a_initialization_audit.json"
         return {
-            "command": _training_argv(args, treatment_dir, True, audit_path, initialization_path),
+            "command": _phase_a_worker_command(_worker_spec_path(stage, treatment_dir)),
             "artifact_path": model_path,
             "model_path": model_path,
             "output_artifacts": {
@@ -1539,7 +1901,9 @@ def _stage_spec(
                 "dann_batch_audit": audit_path,
                 "phase_a_initialization_audit": initialization_path,
                 "phase_a_lifecycle_audit": treatment_dir / "phase_a_lifecycle_audit.json",
+                "worker_result": treatment_dir / "worker_result.json",
             },
+            "worker_spec_path": _worker_spec_path(stage, treatment_dir),
             "variant_dir": treatment_dir,
         }
     if stage == "control_source_dev_evaluation":
@@ -1590,10 +1954,17 @@ def _stage_record(
     recipe_sha256: str,
     git_commit: str,
 ) -> dict:
+    input_files = _phase_stage_input_files(spec["variant_dir"])
+    worker_spec_path = spec.get("worker_spec_path")
+    if worker_spec_path is not None:
+        worker_spec_path = Path(worker_spec_path)
+        if not worker_spec_path.is_file():
+            raise RuntimeError(f"missing Phase A worker spec: {worker_spec_path}")
+        input_files["worker_spec"] = worker_spec_path
     return build_stage_identity(
         stage,
         spec["command"],
-        _phase_stage_input_files(spec["variant_dir"]),
+        input_files,
         recipe_sha256,
         spec["artifact_path"],
         spec["model_path"],
@@ -1677,6 +2048,10 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         recipe["target_dataset"],
         recipe["external_inputs"],
     )
+    if args.resume:
+        # A failed resume must be observational: validate every persisted input
+        # before touching stage_status, config_snapshot, or artifact indexes.
+        _preflight_resume_inputs(input_rows, run_dir)
     input_hashes = _input_hashes(input_rows, run_dir)
     declared_input_hashes = _declared_input_hashes(recipe)
     input_identity_hashes = {"run_inputs": input_hashes, "declared_external_inputs": declared_input_hashes}
@@ -1689,19 +2064,18 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     state = load_or_initialize_stage_status(run_dir / "stage_status.json", status_identity, args.resume)
     if state is None:
         raise RuntimeError("resume identity mismatch; refusing to mix Phase A artifacts")
+    variant_dirs = {name: run_dir / name for name in ("control", "treatment")}
+    _write_inputs(input_rows, run_dir, resume=args.resume)
+    for variant_dir in variant_dirs.values():
+        _write_variant_inputs(variant_dir, run_dir, resume=args.resume)
     state["status"] = "in_progress"
     _atomic_write_json(run_dir / "stage_status.json", state)
-    _write_inputs(input_rows, run_dir)
     _atomic_write_json(run_dir / "config_snapshot.json", {"task_id": TASK_ID, "recipe": recipe, "variant_configs": {"control": build_variant_config(False), "treatment": build_variant_config(True)}, "scope": build_phase_a_scope(), "identities": {"recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "graph_cache_identity": graph_cache_identity, "git_commit": git_identity["commit"]}})
     _atomic_write_json(run_dir / "git_identity.json", git_identity)
     _atomic_write_json(run_dir / "input_artifact_hashes.json", {"inputs": input_hashes, "raw_external_inputs": declared_input_hashes, "model": model_hashes, "parser": parser_identity, "graph_cache": graph_cache_identity, "recipe": {"path": str(args.recipe), "sha256": recipe_sha256}})
     _atomic_write_json(run_dir / "graph_cache_identity.json", graph_cache_identity)
     _atomic_write_json(run_dir / "parent_run_identity.json", {"parent_task_id": "M1_SYNTACTIC_RGAT_ZERO_UPDATE_ENTRY_AUDIT_V1", "required_entry_code_identity": FIXED_PARENT_CODE_IDENTITY, "current_code_commit": git_identity["commit"], "zero_update_entry_status": "15/15 PASS (provided by approved parent identity)"})
 
-    variant_dirs = {name: run_dir / name for name in ("control", "treatment")}
-    _write_inputs(input_rows, run_dir, resume=args.resume)
-    for variant_dir in variant_dirs.values():
-        _write_variant_inputs(variant_dir, run_dir, resume=args.resume)
     control_lifecycle_baseline = phase_a_lifecycle_memory_snapshot()
     control_reuse_audit = {
         "reuse_allowed": False,
@@ -1797,7 +2171,16 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         if not prior_init_path.is_file() or not prior_init_hash or sha256_file(prior_init_path) != prior_init_hash:
             raise RuntimeError("external Control initialization audit is missing or changed; refusing reuse")
         _read_initialization_audit(prior_init_path, "control", expected_seed=recipe["seed"])
-        _read_dann_batch_audit(
+        salvage_arg = str(getattr(args, "control_terminal_lookahead_salvage_audit", "") or "")
+        if not salvage_arg:
+            raise RuntimeError("external Control requires an independent terminal-lookahead salvage audit; refusing reuse")
+        salvage_audit = validate_terminal_lookahead_salvage(
+            Path(salvage_arg),
+            control_run_dir=control_source,
+            model_path=prior_model_path,
+            dann_path=prior_dann_path,
+        )
+        prior_dann_report = _read_dann_batch_audit(
             prior_dann_path,
             expected_epochs=None,
             expected_seed=recipe["seed"],
@@ -1810,6 +2193,17 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             expected_planned_batches=expected_dann_planned_batches,
             allow_legacy=False,
         )
+        lookahead_audit = prior_dann_report.get("terminal_lookahead_audit")
+        if lookahead_audit and not salvage_audit.get("classification", {}).get("lookahead_not_consumed"):
+            raise RuntimeError("external Control terminal-lookahead salvage does not acknowledge the dangling batch")
+        external_salvage_copy = {
+            **salvage_audit,
+            "source_salvage_report_path": str(Path(salvage_arg).resolve()),
+            "source_salvage_report_sha256": sha256_file(Path(salvage_arg)),
+            "orchestration_commit": git_identity["commit"],
+            "target_test_access": False,
+        }
+        _atomic_write_json(run_dir / "external_control_terminal_lookahead_audit.json", external_salvage_copy)
         expected = dict(actual_identity)
         expected["artifact_sha256"] = prior_model_hash
         identity_audit = audit_control_identity(expected, prior_actual)
@@ -1829,6 +2223,11 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             "dann_batch_audit_sha256": prior_dann_hash,
             "phase_a_initialization_audit_path": str(prior_init_path.resolve()),
             "phase_a_initialization_audit_sha256": prior_init_hash,
+            "terminal_lookahead_salvage_audit_path": str(Path(salvage_arg).resolve()),
+            "terminal_lookahead_salvage_audit_sha256": sha256_file(Path(salvage_arg)),
+            "producer_training_semantics_commit": salvage_audit["producer_training_semantics_commit"],
+            "orchestration_commit": git_identity["commit"],
+            "reuse_depth": salvage_audit["reuse_depth"],
         }
     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
 
@@ -1842,6 +2241,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     )
     validate_stage_status_shape(state, stages)
     initialization_pair_audit = None
+    control_worker_result = None
     progress = tqdm(total=len(stages), desc="phase-a")
     try:
         for stage in stages:
@@ -1877,9 +2277,10 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             _atomic_write_json(run_dir / "stage_status.json", state)
             if execute:
                 if stage == "control_training":
-                    training_result = _run_training(args, variant_dirs["control"], False)
+                    training_result = _run_training(args, variant_dirs["control"], False, stage=stage)
                     if not isinstance(training_result, dict):
-                        raise RuntimeError("Control Phase A training returned no lifecycle audit")
+                        raise RuntimeError("Control Phase A worker returned no isolation result")
+                    control_worker_result = training_result
                     control_model_path = variant_dirs["control"] / "models" / "extractor" / "best"
                     control_dann_batch_audit_path = (variant_dirs["control"] / "dann_batch_audit.json").resolve()
                     control_initialization_audit_path = (variant_dirs["control"] / "phase_a_initialization_audit.json").resolve()
@@ -1904,37 +2305,26 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                     }
                     _atomic_write_json(run_dir / "control_identity_audit.json", control_reuse_audit)
                 elif stage == "treatment_training":
-                    lifecycle_path = variant_dirs["control"] / "phase_a_lifecycle_audit.json"
-                    if not lifecycle_path.is_file():
-                        raise RuntimeError(
-                            "Control lifecycle audit is missing; "
-                            "independent Control/Treatment subprocess isolation is required"
-                        )
-                    lifecycle_audit = _read_json(lifecycle_path)
-                    if not lifecycle_audit.get("runner_return_recorded"):
-                        append_control_return_lifecycle_event(
-                            lifecycle_audit,
-                            baseline=control_lifecycle_baseline,
-                        )
-                    lifecycle_gate = evaluate_control_lifecycle_gate(
-                        lifecycle_audit,
-                        baseline=control_lifecycle_baseline,
+                    isolation_audit = {
+                        "schema_version": 1,
+                        "status": "PASS",
+                        "control_source": "external_completed_process" if control_training_is_reuse else "isolated_worker",
+                        "control_pid": control_worker_result.get("pid") if control_worker_result else None,
+                        "parent_pid": os.getpid(),
+                        "control_process_exited": True,
+                        "treatment_requires_distinct_worker": True,
+                        "target_test_access": False,
+                    }
+                    treatment_result = _run_training(args, variant_dirs["treatment"], True, stage=stage)
+                    isolation_audit["treatment_pid"] = treatment_result.get("pid")
+                    isolation_audit["distinct_processes"] = (
+                        isinstance(isolation_audit["treatment_pid"], int)
+                        and isolation_audit["treatment_pid"] != isolation_audit["parent_pid"]
+                        and (isolation_audit["control_pid"] is None or isolation_audit["treatment_pid"] != isolation_audit["control_pid"])
                     )
-                    lifecycle_audit["control_lifecycle_gate"] = lifecycle_gate
-                    _atomic_write_json(lifecycle_path, lifecycle_audit)
-                    if not lifecycle_gate["passed"]:
-                        state["status"] = "BLOCKED"
-                        state["decision"] = {
-                            "status": "BLOCKED",
-                            "next_action": lifecycle_gate["next_action"],
-                            "reasons": lifecycle_gate["reasons"],
-                        }
-                        _atomic_write_json(run_dir / "stage_status.json", state)
-                        raise RuntimeError(
-                            "Control lifecycle cleanup gate failed; "
-                            "independent Control/Treatment subprocess isolation is required"
-                        )
-                    _run_training(args, variant_dirs["treatment"], True)
+                    if not isolation_audit["distinct_processes"]:
+                        raise RuntimeError("Control/Treatment worker process isolation failed")
+                    _atomic_write_json(run_dir / "control_treatment_process_isolation_audit.json", isolation_audit)
                 elif stage == "control_source_dev_evaluation":
                     _run_pipeline_command(args, variant_dirs["control"], "evaluate", False, control_model_path, "source_dev")
                 elif stage == "treatment_source_dev_evaluation":
@@ -2053,6 +2443,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parser_dir", default=r"J:\nlp\models\stanza_resources")
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--control_run_dir", default="")
+    parser.add_argument("--control_terminal_lookahead_salvage_audit", default="")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--legacy_diagnostic_migration", "--legacy_diagnostic_resume",
@@ -2064,8 +2455,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if "--training_worker_spec" in raw_argv:
+        worker_parser = argparse.ArgumentParser()
+        worker_parser.add_argument("--training_worker_spec", required=True)
+        worker_args = worker_parser.parse_args(raw_argv)
+        return _run_phase_a_training_worker(Path(worker_args.training_worker_spec))
     parser = build_argument_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     args.project_root = Path(__file__).resolve().parent
     args.recipe = str((args.project_root / args.recipe).resolve()) if not Path(args.recipe).is_absolute() else args.recipe
     if args.legacy_diagnostic_migration:

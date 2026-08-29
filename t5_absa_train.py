@@ -533,14 +533,31 @@ def build_initialization_audit(model: nn.Module, *, variant: str, seed: int) -> 
     }
 
 
-def _atomic_write_json(path: Path, value: dict) -> None:
+def _utf8_lf_bytes(value: str) -> bytes:
+    """Encode durable text as UTF-8 without BOM and with fixed LF endings."""
+    return value.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as handle:
-        temporary = Path(handle.name)
-        json.dump(value, handle, ensure_ascii=False, indent=2)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _atomic_write_json(path: Path, value: dict) -> None:
+    _atomic_write_bytes(
+        path,
+        _utf8_lf_bytes(json.dumps(value, ensure_ascii=False, indent=2) + "\n"),
+    )
 
 
 def _json_sha256(path: Path) -> str:
@@ -588,6 +605,150 @@ def compute_dann_planned_batches(
         math.ceil(int(source_count) / int(source_batch_size)),
         math.ceil(int(target_count) / int(target_batch_size)),
     )
+
+
+def classify_terminal_lookahead(
+    report: dict,
+    *,
+    gradient_accumulation_steps: int,
+    journal_audit: dict | None = None,
+) -> dict:
+    """Classify a terminal DataLoader lookahead without rewriting the journal.
+
+    ``issued`` is durable loader intent while ``processed`` is an acknowledged
+    training batch.  A single final dangling issue is acceptable only when the
+    Trainer has already reached ``max_steps`` and the acknowledged prefix is a
+    complete optimizer-step boundary.  This helper is shared by the runtime
+    audit and the Phase A parent, so a terminal lookahead cannot be silently
+    counted as processed in one path and rejected in another.
+    """
+    result = {
+        "safe": False,
+        "classification": "invalid_terminal_accounting",
+        "dangling_logical_batch_ids": [],
+        "processed_batches": None,
+        "journal_chain_validated": journal_audit is not None,
+        "reasons": [],
+        "lookahead_not_consumed": False,
+    }
+    if not isinstance(report, dict) or not isinstance(report.get("epochs"), list) or not report["epochs"]:
+        result["reasons"].append("missing_epochs")
+        return result
+    if not isinstance(gradient_accumulation_steps, int) or gradient_accumulation_steps <= 0:
+        result["reasons"].append("invalid_gradient_accumulation_steps")
+        return result
+
+    epochs = report["epochs"]
+    last = epochs[-1]
+    if not isinstance(last, dict):
+        result["reasons"].append("invalid_last_epoch")
+        return result
+    issued = last.get("issued_batches")
+    processed = last.get("processed_batches")
+    planned = last.get("planned_batches")
+    batches = last.get("batches")
+    result["processed_batches"] = processed
+    if not all(isinstance(value, int) for value in (issued, processed, planned)):
+        result["reasons"].append("non_integer_accounting")
+        return result
+    if not isinstance(batches, list) or len(batches) != issued or not 0 <= processed <= issued <= planned:
+        result["reasons"].append("invalid_issued_processed_planned_accounting")
+        return result
+    if any(
+        not isinstance(batch, dict) or batch.get("logical_batch_id") != index
+        for index, batch in enumerate(batches)
+    ):
+        result["reasons"].append("logical_batch_ids_not_contiguous")
+        return result
+
+    partial_before_last = any(
+        isinstance(epoch, dict) and epoch.get("completion") == "partial"
+        for epoch in epochs[:-1]
+    )
+    if partial_before_last:
+        result["reasons"].append("partial_traversal_before_last")
+    if last.get("completion") not in {"complete", "partial"}:
+        result["reasons"].append("invalid_completion")
+
+    trainer_global_step = report.get("trainer_global_step")
+    trainer_max_steps = report.get("trainer_max_steps")
+    is_terminal = (
+        isinstance(trainer_global_step, int)
+        and isinstance(trainer_max_steps, int)
+        and trainer_global_step == trainer_max_steps
+        and trainer_max_steps > 0
+    )
+
+    if issued == processed:
+        if last.get("completion") == "complete" and issued == planned and not result["reasons"]:
+            result.update({"safe": True, "classification": "normal_complete"})
+            return result
+        if is_terminal and last.get("completion") == "partial" and not result["reasons"]:
+            result.update({"safe": True, "classification": "terminal_partial_consumed"})
+            return result
+        result["reasons"].append("issued_processed_mismatch_for_nonterminal_or_partial")
+        return result
+
+    dangling = list(range(processed, issued))
+    result["dangling_logical_batch_ids"] = dangling
+    result["reasons"].extend([
+        reason for reason, condition in (
+            ("not_at_trainer_max_steps", not is_terminal),
+            ("last_traversal_not_partial", last.get("completion") != "partial"),
+            ("multiple_dangling_issued_batches", issued != processed + 1),
+            ("dangling_batch_is_not_last_logical_id", dangling != [issued - 1]),
+            ("processed_prefix_not_optimizer_boundary", processed % gradient_accumulation_steps != 0),
+        ) if condition
+    ])
+    step_start = last.get("optimizer_global_step_start")
+    step_end = last.get("optimizer_global_step_end")
+    if not isinstance(step_start, int) or not isinstance(step_end, int) or step_end < step_start:
+        result["reasons"].append("invalid_optimizer_step_range")
+    elif step_end != trainer_global_step or step_end - step_start != processed // gradient_accumulation_steps:
+        result["reasons"].append("optimizer_step_range_does_not_match_processed_prefix")
+
+    for field, expected in (
+        ("accumulation_remainder", 0),
+        ("uncommitted_gradient_count", 0),
+    ):
+        if field in report and report.get(field) != expected:
+            result["reasons"].append(f"{field}_is_not_zero")
+        if field in last and last.get(field) != expected:
+            result["reasons"].append(f"last_{field}_is_not_zero")
+    for field in ("uncommitted_gradients", "pending_gradient_update", "optimizer_update_after_terminal", "checkpoint_after_terminal"):
+        if bool(report.get(field, False)) or bool(last.get(field, False)):
+            result["reasons"].append(f"{field}_present")
+    for field in ("later_checkpoints", "optimizer_updates_after_terminal"):
+        value = report.get(field, 0)
+        if value not in (0, [], None):
+            result["reasons"].append(f"{field}_present")
+
+    if journal_audit is not None:
+        if journal_audit.get("chain_valid") is False:
+            result["reasons"].append("journal_chain_invalid")
+        processed_ids = {
+            (item[0], item[1])
+            for item in journal_audit.get("processed_batch_ids", [])
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        }
+        physical = last.get("physical_traversal_index")
+        if physical is not None and any((physical, batch_id) in processed_ids for batch_id in dangling):
+            result["reasons"].append("dangling_batch_has_processed_event")
+        issued_ids = {
+            (item[0], item[1])
+            for item in journal_audit.get("issued_batch_ids", [])
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        }
+        if physical is not None and any((physical, batch_id) not in issued_ids for batch_id in dangling):
+            result["reasons"].append("dangling_batch_missing_issued_event")
+
+    if not result["reasons"]:
+        result.update({
+            "safe": True,
+            "classification": "terminal_lookahead_not_consumed",
+            "lookahead_not_consumed": True,
+        })
+    return result
 
 
 def _read_dann_audit_journal_records(path: Path) -> list[dict]:
@@ -663,10 +824,23 @@ def read_dann_audit_journal(path: str | Path) -> dict:
     journal_path = Path(path)
     records = _read_dann_audit_journal_records(journal_path)
     replay_events = []
+    issued_batch_ids = []
+    processed_batch_ids = []
     for record in records:
+        payload = record.get("payload") or {}
+        if record.get("event") in {"batch_issued", "batch_reissued"}:
+            batch = payload.get("batch") or {}
+            physical = payload.get("physical_traversal_index")
+            logical = batch.get("logical_batch_id")
+            if isinstance(physical, int) and isinstance(logical, int):
+                issued_batch_ids.append([physical, logical])
+        elif record.get("event") == "batch_processed":
+            physical = payload.get("physical_traversal_index")
+            logical = payload.get("logical_batch_id")
+            if isinstance(physical, int) and isinstance(logical, int):
+                processed_batch_ids.append([physical, logical])
         if record.get("event") != "batch_replayed":
             continue
-        payload = record.get("payload") or {}
         if not isinstance(payload.get("checkpoint_path"), str) or not payload.get("checkpoint_path"):
             raise ValueError("DANN replay event is missing checkpoint_path")
         if not isinstance(payload.get("checkpoint_sha256"), str) or not payload.get("checkpoint_sha256"):
@@ -688,6 +862,9 @@ def read_dann_audit_journal(path: str | Path) -> dict:
     return {
         "journal_path": str(journal_path),
         "record_count": len(records),
+        "chain_valid": True,
+        "issued_batch_ids": issued_batch_ids,
+        "processed_batch_ids": processed_batch_ids,
         "replay_count": len(replay_events),
         "replay_events": replay_events,
     }
@@ -1489,14 +1666,14 @@ class PairedDomainBatchSampler:
         body = {"event": event, "payload": payload, "previous_hash": self._journal_last_hash}
         digest = hashlib.sha256(_canonical_json_bytes(body)).hexdigest()
         record = {**body, "hash": digest}
-        line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-        with self.audit_journal_path.open("a", encoding="utf-8", newline="") as handle:
+        line = _utf8_lf_bytes(json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+        with self.audit_journal_path.open("ab") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
         self._journal_last_hash = digest
         self._journal_write_count += 1
-        self._journal_bytes += len(line.encode("utf-8"))
+        self._journal_bytes += len(line)
 
     def _training_state(self) -> dict:
         if self._training_state_provider is None:
@@ -1523,7 +1700,12 @@ class PairedDomainBatchSampler:
         if report is None or report.get("completion") == "complete":
             return False
         in_flight = sum(1 for _, _, is_replay in self._pending_acks if not is_replay)
-        return report.get("processed_batches", 0) + in_flight >= max_steps * grad_accumulation
+        step_start = report.get("optimizer_global_step_start")
+        processed = report.get("processed_batches")
+        if not isinstance(step_start, int) or not isinstance(processed, int):
+            return False
+        completed_updates_in_traversal = (processed + in_flight) // grad_accumulation
+        return step_start + completed_updates_in_traversal >= max_steps
 
     def flush_audit_snapshot(self) -> None:
         if self.audit_path is not None:
@@ -1730,7 +1912,15 @@ class PairedDomainBatchSampler:
             self._epoch = epochs[-1].get("sampling_epoch", self._epoch)
 
     def __iter__(self):
-        if self._training_has_reached_max_steps():
+        last = self.epoch_reports[-1] if self.epoch_reports else None
+        terminal_lookahead_allowed = bool(
+            self._training_has_reached_max_steps()
+            and last
+            and last.get("completion") == "partial"
+            and last.get("issued_batches") == last.get("processed_batches")
+            and last.get("issued_batches", 0) < last.get("planned_batches", 0)
+        )
+        if self._training_has_reached_max_steps() and not terminal_lookahead_allowed:
             return
         if self._resume_reissue_batch_ids and self._resume_checkpoint_identity is None:
             raise RuntimeError("DANN reissue requires an explicit checkpoint load")
@@ -1765,7 +1955,6 @@ class PairedDomainBatchSampler:
                     self.acknowledge_next_batch()
             yield from self.__iter__()
             return
-        last = self.epoch_reports[-1] if self.epoch_reports else None
         can_resume_traversal = bool(
             last
             and last.get("completion") == "partial"
@@ -1829,7 +2018,9 @@ class PairedDomainBatchSampler:
             seen_source.update(existing_batch.get("source_indices", []))
             seen_target.update(index - self.source_count for index in existing_batch.get("target_indices", []))
         for batch_id in range(start_batch, len(self)):
-            if self._training_has_reached_max_steps():
+            if self._training_has_reached_max_steps() and not terminal_lookahead_allowed:
+                break
+            if terminal_lookahead_allowed and batch_id > start_batch:
                 break
             source_positions = [
                 source_order[(batch_id * self.source_batch_size + offset) % self.source_count]
@@ -1874,6 +2065,7 @@ class PairedDomainBatchSampler:
             yield source_positions + [self.source_count + index for index in target_positions]
             if not self._acknowledgement_required:
                 self.acknowledge_next_batch()
+            terminal_lookahead_allowed = False
         report["source_unique_rows"] = len(seen_source)
         report["target_unique_rows"] = len(seen_target)
         report["optimizer_global_step_end"] = self._training_state()["global_step"]
@@ -1929,7 +2121,7 @@ class PairedDomainBatchSampler:
         training_state = self._training_state()
         if self.epoch_reports and training_state["global_step"] is not None:
             self.epoch_reports[-1]["optimizer_global_step_end"] = training_state["global_step"]
-        return {
+        report = {
             "schema_version": self.AUDIT_SCHEMA_VERSION,
             "audit_protocol": self.AUDIT_PROTOCOL,
             "source_batch_size": self.source_batch_size,
@@ -1940,12 +2132,19 @@ class PairedDomainBatchSampler:
             "next_sampling_epoch": self._next_sampling_epoch,
             "trainer_global_step": training_state["global_step"],
             "trainer_max_steps": training_state["max_steps"],
+            "gradient_accumulation_steps": training_state["gradient_accumulation_steps"],
             "source_count": self.source_count,
             "target_count": self.target_count,
             "source_row_ids": list(self.source_row_ids),
             "target_row_ids": list(self.target_row_ids),
             "epochs": list(self.epoch_reports),
         }
+        if training_state["global_step"] is not None and training_state["max_steps"] is not None:
+            report["terminal_lookahead"] = classify_terminal_lookahead(
+                report,
+                gradient_accumulation_steps=int(training_state.get("gradient_accumulation_steps") or 1),
+            )
+        return report
 
 
 def _checkpoint_step(path: Path) -> int | None:
@@ -2003,9 +2202,14 @@ def _read_complete_dann_checkpoint(checkpoint_dir: Path, sampler: PairedDomainBa
     terminal_partial = bool(epochs and epochs[-1].get("completion") == "partial")
     trainer_global_step = trainer_state.get("global_step") if isinstance(trainer_state, dict) else None
     trainer_max_steps = audit.get("trainer_max_steps")
-    terminal_is_valid = terminal_partial and isinstance(trainer_global_step, int) and isinstance(trainer_max_steps, int) and trainer_global_step == trainer_max_steps and audit.get("trainer_global_step") == trainer_global_step and epochs[-1].get("processed_batches") == epochs[-1].get("issued_batches")
+    terminal_decision = classify_terminal_lookahead(
+        audit,
+        gradient_accumulation_steps=int(audit.get("gradient_accumulation_steps") or 1),
+    )
+    terminal_consumed = terminal_partial and isinstance(trainer_global_step, int) and isinstance(trainer_max_steps, int) and trainer_global_step == trainer_max_steps and audit.get("trainer_global_step") == trainer_global_step and epochs[-1].get("processed_batches") == epochs[-1].get("issued_batches")
+    terminal_is_valid = terminal_consumed or (terminal_partial and terminal_decision.get("safe") and terminal_decision.get("lookahead_not_consumed"))
     resumable_partial = terminal_partial and isinstance(trainer_global_step, int) and isinstance(trainer_max_steps, int) and trainer_global_step < trainer_max_steps
-    terminal_processing_gap = isinstance(trainer_global_step, int) and isinstance(trainer_max_steps, int) and trainer_global_step == trainer_max_steps and any(item.get("processed_batches") != item.get("issued_batches") for item in epochs)
+    terminal_processing_gap = isinstance(trainer_global_step, int) and isinstance(trainer_max_steps, int) and trainer_global_step == trainer_max_steps and any(item.get("processed_batches") != item.get("issued_batches") for item in epochs) and not terminal_decision.get("safe")
     if not epochs or terminal_processing_gap or (terminal_partial and not terminal_is_valid and not resumable_partial) or (not terminal_partial and any(item.get("completion") != "complete" for item in epochs)):
         raise RuntimeError(f"DANN checkpoint audit is not a valid resumable terminal state: {checkpoint_dir}")
     if manifest.get("resume_complete") is not True:
@@ -2307,9 +2511,26 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         audit = self.dann_batch_sampler.audit_report()
         epochs = audit["epochs"]
         terminal_partial = bool(epochs and epochs[-1].get("completion") == "partial")
-        terminal_is_valid = terminal_partial and audit.get("trainer_global_step") == audit.get("trainer_max_steps") and epochs[-1].get("processed_batches") == epochs[-1].get("issued_batches")
+        journal_audit = None
+        journal_path = self.dann_batch_sampler.audit_journal_path
+        if journal_path is not None and Path(journal_path).is_file():
+            journal_audit = read_dann_audit_journal(journal_path)
+        terminal_decision = classify_terminal_lookahead(
+            audit,
+            gradient_accumulation_steps=int(audit.get("gradient_accumulation_steps") or 1),
+            journal_audit=journal_audit,
+        )
+        terminal_is_valid = bool(
+            terminal_partial
+            and audit.get("trainer_global_step") == audit.get("trainer_max_steps")
+            and terminal_decision.get("safe")
+        )
         resumable_partial = terminal_partial and isinstance(audit.get("trainer_global_step"), int) and isinstance(audit.get("trainer_max_steps"), int) and audit.get("trainer_global_step") < audit.get("trainer_max_steps")
-        terminal_processing_gap = audit.get("trainer_global_step") == audit.get("trainer_max_steps") and any(item.get("processed_batches") != item.get("issued_batches") for item in epochs)
+        terminal_processing_gap = bool(
+            audit.get("trainer_global_step") == audit.get("trainer_max_steps")
+            and any(item.get("processed_batches") != item.get("issued_batches") for item in epochs)
+            and not terminal_decision.get("safe")
+        )
         resume_complete = bool(epochs) and (
             not terminal_processing_gap and (all(item.get("completion") == "complete" for item in epochs) or terminal_is_valid or resumable_partial)
         )

@@ -6,6 +6,8 @@ import tempfile
 import copy
 import io
 import gc
+import os
+import sys
 import weakref
 from types import SimpleNamespace
 from pathlib import Path
@@ -15,6 +17,7 @@ import pytest
 from torch.utils.data import Dataset
 from transformers import TrainerCallback, T5Config, T5ForConditionalGeneration, Seq2SeqTrainingArguments
 
+from m1_phase_a_control_terminal_lookahead_salvage import audit_v6_control
 from m1_syntactic_rgat_pseudo_quick_ablation import (
     PHASE_A_STOP_CODE,
     PHASE_B_REQUEST_CODE,
@@ -40,6 +43,11 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     prepare_legacy_diagnostic_resume,
     evaluate_control_lifecycle_gate,
     append_control_return_lifecycle_event,
+    classify_terminal_lookahead,
+    run_isolated_phase_a_worker,
+    _serialize_rows,
+    _write_inputs,
+    _write_variant_inputs,
 )
 from syntactic_graph_adapter import load_seq2seq_model
 from t5_absa_train import (
@@ -2099,3 +2107,253 @@ def test_stage_status_unknown_or_malformed_completed_stage_hard_fails():
         assert "wrong stage name" in str(exc)
     else:
         raise AssertionError("malformed completed stage must hard-fail")
+
+
+def test_v6_single_terminal_lookahead_is_not_counted_as_training():
+    report = {
+        "trainer_global_step": 1400,
+        "trainer_max_steps": 1400,
+        "epochs": [{
+            "physical_traversal_index": 24,
+            "completion": "partial",
+            "planned_batches": 906,
+            "issued_batches": 321,
+            "processed_batches": 320,
+            "optimizer_global_step_start": 1380,
+            "optimizer_global_step_end": 1400,
+            "batches": [{"logical_batch_id": index} for index in range(321)],
+        }],
+    }
+    decision = classify_terminal_lookahead(report, gradient_accumulation_steps=16)
+    assert decision["safe"] is True
+    assert decision["classification"] == "terminal_lookahead_not_consumed"
+    assert decision["dangling_logical_batch_ids"] == [320]
+    assert decision["processed_batches"] == 320
+
+
+def test_formal_dann_gate_accepts_one_journal_proven_terminal_lookahead(tmp_path):
+    audit_path = tmp_path / "dann_batch_audit.json"
+    # Recreate the legacy V6 prefetch shape: the old sampler did not know the
+    # accumulation factor early enough to stop the terminal DataLoader fetch.
+    training_state = {"global_step": 0, "max_steps": 1, "gradient_accumulation_steps": None}
+    sampler = PairedDomainBatchSampler(
+        3,
+        3,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["s0", "s1", "s2"],
+        target_row_ids=["t0", "t1", "t2"],
+        audit_path=audit_path,
+    )
+    sampler.bind_training_state_provider(lambda: training_state)
+    iterator = iter(sampler)
+    next(iterator)
+    sampler.acknowledge_next_batch()
+    next(iterator)  # DataLoader lookahead: issued but never passed to training_step.
+    training_state["global_step"] = 1
+    training_state["gradient_accumulation_steps"] = 1
+    sampler.flush_audit_snapshot()
+
+    report = _read_dann_batch_audit(
+        audit_path,
+        expected_seed=1000,
+        expected_source_count=3,
+        expected_target_count=3,
+        expected_source_row_ids=["s0", "s1", "s2"],
+        expected_target_row_ids=["t0", "t1", "t2"],
+        require_training_state=True,
+        expected_max_steps=1,
+        expected_planned_batches=3,
+        gradient_accumulation_steps=1,
+        allow_legacy=False,
+        require_journal=True,
+        require_fresh_replay_free=True,
+    )
+    decision = report["terminal_lookahead_audit"]
+    assert decision["safe"] is True
+    assert decision["lookahead_not_consumed"] is True
+    assert decision["dangling_logical_batch_ids"] == [1]
+
+
+def test_sampler_prevents_v6_shaped_terminal_lookahead_before_issue():
+    training_state = {"global_step": 1380, "max_steps": 1400, "gradient_accumulation_steps": 16}
+    sampler = PairedDomainBatchSampler(
+        906,
+        605,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+    )
+    sampler.bind_training_state_provider(lambda: training_state)
+    iterator = iter(sampler)
+    first = next(iterator)
+    assert first
+    sampler.acknowledge_next_batch()
+    training_state["global_step"] = 1399
+    for _ in range(319):
+        next(iterator)
+        sampler.acknowledge_next_batch()
+    with pytest.raises(StopIteration):
+        next(iterator)
+    report = sampler.audit_report()["epochs"][-1]
+    assert report["issued_batches"] == 320
+    assert report["processed_batches"] == 320
+
+
+def test_v6_salvage_audit_requires_and_records_control_only_evidence(tmp_path):
+    run_dir = tmp_path / "v6"
+    control = run_dir / "control"
+    audit_path = control / "dann_batch_audit.json"
+    training_state = {"global_step": 0, "max_steps": 1, "gradient_accumulation_steps": None}
+    sampler = PairedDomainBatchSampler(
+        3,
+        3,
+        source_batch_size=1,
+        target_batch_size=1,
+        seed=1000,
+        source_row_ids=["s0", "s1", "s2"],
+        target_row_ids=["t0", "t1", "t2"],
+        audit_path=audit_path,
+    )
+    sampler.bind_training_state_provider(lambda: training_state)
+    iterator = iter(sampler)
+    next(iterator)
+    sampler.acknowledge_next_batch()
+    next(iterator)
+    training_state.update(global_step=1, gradient_accumulation_steps=1)
+    sampler.flush_audit_snapshot()
+
+    (run_dir / "stage_status.json").write_text(json.dumps({
+        "identity": {
+            "code_commit": "9caba1c508d096a4d360d7940d8c9d9eb4be8333",
+            "scope": {"target_test_access": False, "forbidden": {"target_test": False}},
+        },
+        "completed_stages": ["control_training"],
+    }), encoding="utf-8")
+    checkpoint = control / "models" / "extractor" / "checkpoint-1"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "model.safetensors").write_bytes(b"model")
+    torch.save({"accumulation_remainder": 0, "gradients": {}}, checkpoint / "dann_gradient_state.pt")
+    best = control / "models" / "extractor" / "best"
+    best.mkdir(parents=True)
+    (best / "model.safetensors").write_bytes(b"model")
+    output = tmp_path / "salvage.json"
+    result = audit_v6_control(run_dir, output)
+    assert result["status"] == "PASS"
+    assert result["classification"]["lookahead_not_consumed"] is True
+    assert result["source_run_remains_blocked"] is True
+    assert output.is_file()
+
+
+def test_multiple_terminal_unacknowledged_batches_are_rejected():
+    report = {
+        "trainer_global_step": 1400,
+        "trainer_max_steps": 1400,
+        "epochs": [{
+            "physical_traversal_index": 24,
+            "completion": "partial",
+            "planned_batches": 906,
+            "issued_batches": 322,
+            "processed_batches": 320,
+            "optimizer_global_step_start": 1380,
+            "optimizer_global_step_end": 1400,
+            "batches": [{"logical_batch_id": index} for index in range(322)],
+        }],
+    }
+    assert classify_terminal_lookahead(report, gradient_accumulation_steps=16)["safe"] is False
+
+
+def test_phase_a_training_worker_runs_in_a_distinct_process(tmp_path):
+    result_path = tmp_path / "worker_result.json"
+    child_code = (
+        "import json,os,sys; "
+        "json.dump({'status':'PASS','variant':'treatment','pid':os.getpid()},"
+        "open(sys.argv[1],'w',encoding='utf-8'))"
+    )
+    result = run_isolated_phase_a_worker(
+        [sys.executable, "-c", child_code, str(result_path)],
+        result_path=result_path,
+        expected_variant="treatment",
+    )
+    assert result["status"] == "PASS"
+    assert result["pid"] != os.getpid()
+
+
+def test_phase_a_input_artifact_hash_matches_serialized_identity_on_windows(tmp_path):
+    rows = {
+        "source_train": [{"id": 0, "text": "a", "target": "b"}],
+        "source_dev": [{"id": 0, "text": "c", "target": "d"}],
+        "target_unlabeled": [{"id": 0, "text": "e"}],
+    }
+    _write_inputs(rows, tmp_path)
+    for split, split_rows in rows.items():
+        artifact = (tmp_path / "inputs" / f"{split}.jsonl").read_bytes()
+        assert artifact == _serialize_rows(split_rows)
+
+
+def test_phase_a_resume_accepts_crlf_only_and_rejects_semantic_change(tmp_path):
+    rows = {
+        "source_train": [{"id": 0, "text": "a", "target": "b"}],
+        "source_dev": [{"id": 0, "text": "c", "target": "d"}],
+        "target_unlabeled": [{"id": 0, "text": "e"}],
+    }
+    _write_inputs(rows, tmp_path)
+    source = tmp_path / "inputs" / "source_train.jsonl"
+    source.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
+    _write_inputs(rows, tmp_path, resume=True)
+    source.write_text('{"id":0,"text":"changed","target":"b"}\r\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="resume input artifact mismatch"):
+        _write_inputs(rows, tmp_path, resume=True)
+
+
+def test_variant_inputs_are_byte_identical_and_resume_safe(tmp_path):
+    rows = {
+        "source_train": [{"id": 0, "text": "a", "target": "b"}],
+        "source_dev": [{"id": 0, "text": "c", "target": "d"}],
+        "target_unlabeled": [{"id": 0, "text": "e"}],
+    }
+    _write_inputs(rows, tmp_path)
+    variant = tmp_path / "treatment"
+    _write_variant_inputs(variant, tmp_path)
+    _write_variant_inputs(variant, tmp_path, resume=True)
+    for split in rows:
+        assert (variant / f"{split}.jsonl").read_bytes() == (tmp_path / "inputs" / f"{split}.jsonl").read_bytes()
+
+
+@pytest.mark.parametrize("global_step,processed", [(1399, 320), (1400, 319)])
+def test_terminal_lookahead_rejects_nonterminal_or_incomplete_accumulation(global_step, processed):
+    issued = processed + 1
+    report = {
+        "trainer_global_step": global_step,
+        "trainer_max_steps": 1400,
+        "epochs": [{
+            "physical_traversal_index": 24,
+            "completion": "partial",
+            "planned_batches": 906,
+            "issued_batches": issued,
+            "processed_batches": processed,
+            "optimizer_global_step_start": 1380,
+            "optimizer_global_step_end": global_step,
+            "batches": [{"logical_batch_id": index} for index in range(issued)],
+        }],
+    }
+    assert classify_terminal_lookahead(report, gradient_accumulation_steps=16)["safe"] is False
+
+
+def test_phase_a_worker_rejects_parent_pid_or_wrong_variant(tmp_path):
+    for name, payload, expected in (
+        ("same_pid", {"status": "PASS", "variant": "treatment", "pid": os.getpid()}, "not process-isolated"),
+        ("wrong_variant", {"status": "PASS", "variant": "control", "pid": os.getpid() + 1}, "identity mismatch"),
+    ):
+        result_path = tmp_path / f"{name}.json"
+        child_code = (
+            "import json,sys; "
+            f"json.dump({payload!r},open(sys.argv[1],'w',encoding='utf-8'))"
+        )
+        with pytest.raises(RuntimeError, match=expected):
+            run_isolated_phase_a_worker(
+                [sys.executable, "-c", child_code, str(result_path)],
+                result_path=result_path,
+                expected_variant="treatment",
+            )

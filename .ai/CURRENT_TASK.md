@@ -1,19 +1,28 @@
 # 当前任务
 
-> 更新时间：2026-08-28 23:03（北京时间）
+> 更新时间：2026-08-29 14:00（北京时间）
 
-- 任务编号：M1_PHASE_A_CONTROL_TREATMENT_LIFECYCLE_FIX_V2
+- 任务编号：M1_PHASE_A_PROCESS_ISOLATION_AND_V6_CONTROL_SALVAGE_V1
 - 任务类型：ENGINEERING FIX（工程修复）
 - 方向：laptop14 -> rest15
 - 随机种子：1000
-- 入口身份：M1 Phase A Control（对照组）到 Treatment（实验组）训练生命周期
-- 状态：COMPLETE（V2代码修复和CPU验证完成，等待 Codex Sol（高级工程模型）只读复审）
+- 入口身份：M1 Phase A Control（对照组）复用与 Treatment（实验组）独立进程训练
+- 状态：COMPLETE（工程修复、全项目 CPU 回归和 V6 只读复用审计均通过；等待用户手动启动新运行）
 - 当前功能分支：codex/m1-syntactic-rgat-entry-audit-v1
-- 本轮性质：只修复生命周期审计与门控，不启动实验
+- 本轮性质：只修复运行编排、终止预取审计和 Windows（视窗系统）断点输入身份，不改变研究变量；不由 Codex 启动实验
+- V6 Control：训练 1400/1400 已完成；旧整次运行仍为 BLOCKED，但 Control 经 44,179 条 journal（审计日志）哈希链、零 replay（重放）、零未提交梯度、终端检查点和模型树哈希审计后允许作为唯一外部 Control 复用，reuse_depth=1
 - V4 运行：INCOMPLETE_VRAM_THRASHING（显存抖动导致不完整），不得恢复、不得删除、不得用于实验结论
 - V3 运行：INVALID_REPLAY_CONTAMINATED（重放污染无效），不得恢复、不得用于实验结论
 
-## 本轮 V2 生命周期修复
+## 当前有效修复与运行边界
+
+- Control 与 Treatment 改为操作系统独立子进程；子进程退出后才允许启动下一变体，不再依赖同一 Python（Python语言）进程中的 weakref（弱引用）或 CUDA（英伟达GPU加速）缓存清理判断。
+- V6 的 `issued=321、processed=320` 已证明是达到 1400/1400 后 DataLoader（数据加载器）预取但未进入 `training_step` 的唯一末尾批次；该批次不计入训练，V6 原目录和 BLOCKED 状态不改写。
+- 新训练器在签发下一批前用“当前遍历起始优化步 + 已完成梯度累积步”阻止相同末尾预取；正式门控仍拒绝多个悬空批次、非终态、非完整累积、journal 不一致、重放或未提交梯度。
+- JSONL（逐行JSON）输入和 journal 统一按 UTF-8/LF（二进制固定换行）原子写入；`--resume` 只容忍 CRLF/LF 的字节换行差异，任何行内容变化仍硬拒绝。
+- 固定模型、图传播、DANN=0.03、数据、采样顺序、训练参数、Gate（门控）和研究范围均未改变。全项目 CPU 测试 425 项通过，AST（抽象语法树）和 `git diff --check` 通过；未运行 GPU、Treatment、伪标签推理或目标测试。
+
+## 历史：V2 生命周期修复
 
 - Codex Sol 已确认 V1 的 P0：外层 main（主函数）仍持有 Trainer（训练器）和模型强引用时，早期 `control_cuda_empty_cache_after` 事件会误用于最终门控；V2 已将其降级为过程记录。
 - 清理前为 Trainer、模型、优化器、数据加载器、callbacks（回调）及其他训练运行对象建立真实 weakref（弱引用）；最终 `phase_a_return_after_local_release` 在外层强引用释放后重新采集真实弱引用、CUDA（英伟达 GPU 加速）张量和显存状态。
@@ -21,7 +30,7 @@
 - 生命周期清理同时处理 Trainer/Accelerator（加速器）的 `_models`、`_optimizers`、`_dataloaders`、scheduler（调度器）、scaler（缩放器）、callbacks 和训练批次引用；只改变对象释放时机，不改变训练过程。
 - V2 不改变模型、图传播公式、损失、数据、采样、随机种子、DANN=0.03、训练参数或研究范围；不启动 V5、Phase A（阶段A）、GPU（图形处理器）、正式伪标签或 target_test（目标测试集）。
 
-## 当前验证边界
+## 历史：V2 验证边界
 
 - RED（失败先行）：新增的最终生命周期回归测试在实现前因缺少 `finalize_phase_a_training_runtime` 入口而导入失败，复现了 V1 不能提供最终真实弱引用证据的问题。
 - GREEN（修复后）：全部 M1 相关 CPU 直接测试共137项通过；覆盖外层强引用顺序、最终弱引用死亡、保留对象硬失败、写死空引用硬失败和 Trainer/Accelerator 持有器清理。
