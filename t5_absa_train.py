@@ -3243,8 +3243,6 @@ def main() -> dict | None:
     args = parser.parse_args()
 
     enforce_graph_training_boundary(args.use_syntactic_graph_adapter)
-    if args.paired_domain_batches and args.lambda_domain_adv <= 0:
-        raise ValueError("paired DANN batches require positive --lambda_domain_adv")
     if args.paired_domain_batches and (args.dann_source_batch_size != 1 or args.dann_target_batch_size != 1):
         raise ValueError("Phase A paired DANN batches require source=1 and target=1")
 
@@ -3351,7 +3349,7 @@ def main() -> dict | None:
                 target_row_ids=[row.get("id") for row in target_domain_rows],
                 audit_path=args.dann_batch_audit_path or None,
             )
-    elif args.paired_domain_batches:
+    elif args.paired_domain_batches and args.lambda_domain_adv > 0:
         raise ValueError("paired DANN batches require --target_unlabeled_file and positive lambda_domain_adv")
     if resume_from_checkpoint and dann_batch_sampler is not None:
         latest_checkpoint = find_latest_complete_dann_checkpoint(output_dir, dann_batch_sampler)
