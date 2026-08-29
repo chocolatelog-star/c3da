@@ -1393,6 +1393,8 @@ def run_isolated_phase_a_worker(
             ("initialization_audit_path", "initialization_audit_sha256"),
         ):
             path_value = result.get(path_field)
+            if path_field == "dann_batch_audit_path" and args.recipe_data["training"]["lambda_domain_adv"] == 0:
+                continue
             if not path_value or not Path(path_value).exists():
                 raise RuntimeError(f"Phase A {expected_variant} worker artifact is missing: {path_field}")
             path = Path(path_value)
