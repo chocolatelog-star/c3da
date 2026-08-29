@@ -1,12 +1,32 @@
 # 协作决策日志
 
-> 更新时间：2026-08-28 20:40（北京时间）
+> 更新时间：2026-08-29 16:50（北京时间）
+
+## 2026-08-29：V8 Phase A 已启动并进入 Treatment 训练
+
+- 用户已从新目录启动 V8；Control（对照组）没有重训，运行器受控复用 V6 已审计 Control，`reuse_depth=1`。
+- V8 当前从头训练唯一新变量 Treatment（带句法 RGAT 的伪标签抽取器），总计 1400 步；后续只执行源域开发集评估、目标无标签伪标签推理及 A1–A4 无金标 Gate（门控）。
+- 当前日志数值有限且损失下降，只能说明运行正常，不能说明研究有效。V8 完成前不新增变量、不运行目标测试、不更新正式最佳。
+
+## 2026-08-29：采用独立子进程并严格复用 V6 Control
+
+- 同一 Python 进程清理 Control 后仍存在对象可达性，继续追加清理补丁不再作为方案；Control 与 Treatment 必须由不同操作系统子进程执行。
+- V6 的唯一 `issued-but-unprocessed`（已签发但未处理）批次经 journal、优化步、梯度累积和终端检查点联合审计，判定为 `terminal_lookahead_not_consumed`（终端预取未消费）；V6 整次运行不翻案，但其 Control 允许受控复用一次。
+- 新训练主动阻止相同预取；Windows 输入换行身份改为稳定 LF 写入与语义恢复校验。模型公式、图传播、DANN、参数、数据和 Gate 均未改变。
+- 全项目 CPU 测试 425 项通过。下一运行必须使用新目录、外部 V6 Control、reuse_depth=1；不得恢复 V6/V7，不得再训练 Control，不得读取目标测试。
 
 ## 2026-08-28 20:40：完成 M1 显存归因诊断工具实现
 
 - 新增独立只读 `m1_vram_attribution_audit.py` 和 CPU 合成测试；诊断固定使用真实 T5-base/图缓存、source=1/target=1、FP16、梯度检查点和 DANN=0.03，但只在用户手动运行 GPU 命令后执行。
 - 记录模型加载、优化器、批次搬运、T5 编码器、词池化、节点/边投影、注意力、关系消息/聚合、图融合、解码、反向和清理后的显存与张量元数据，并比较三次 zero-update 的 Control/Treatment 峰值。
 - 未改变模型、图传播、损失、数据、配方、训练参数或实验范围；GPU 诊断、正式训练、正式伪标签、Phase B、最终 ASTE 和 target_test 均未运行。V4 仍为 `INCOMPLETE_VRAM_THRASHING`，不得恢复或用于实验结论。
+
+## 2026-08-28 20:17：批准 M1 显存归因专项诊断
+
+- 任务 `M1_SYNTACTIC_RGAT_VRAM_ATTRIBUTION_AUDIT_V1` 已由用户批准，方向为 `laptop14 -> rest15`，父代码身份为 `8f165cf50ac30bcdee1a4173af54813087194f6c`。
+- V4 运行因 Treatment（实验组）显存压力/抖动在约 134/1400 处不完整，状态标记为 `INCOMPLETE_VRAM_THRASHING`；不得恢复、删除或用于任何实验结论。
+- 本轮只实现独立显存归因与入口审计：同一 source=1/target=1 批次、真实 T5-base、真实图缓存、FP16、梯度检查点和 DANN=0.03；记录 Control/Treatment 各调用点显存和张量信息，并执行至少三次 zero-update（零更新）诊断。
+- 只运行 CPU（中央处理器）测试和静态检查；不运行 GPU（图形处理器）诊断、完整训练、正式伪标签、Phase B、最终 ASTE 或 target_test，不实施优化方案，不改变模型、图传播、损失、配方、训练参数或研究范围。
 
 ## 2026-08-28 17:16：V4 修复 live replay 污染（等待最终复审）
 
@@ -15,15 +35,22 @@
 - fresh run 必须 `batch_replayed=0`；显式 checkpoint（检查点）恢复才允许重放，且事件必须绑定检查点路径、哈希和恢复批次身份。
 - CPU 回归已通过 141 项；未运行 GPU、正式训练、伪标签、生成器、增强、Phase B、最终 ASTE 或 target_test。等待 Codex Sol 最终只读验收后，再由用户决定是否从 v4 新目录启动。
 
-## 2026-08-28：完成 Phase A DANN 物理遍历审计与恢复修复（复审阻塞项已闭环）
+## 2026-08-28：V3 复审修复（验收仍 BLOCKED）
+
+- 不得把 `63fd1a6` 称为验收通过。复审确认的终止多签发已修复：采样器在准备下一批前读取 Trainer 状态及累积预算，终止边界不再追加 issued；`complete` 必须同时满足 issued=processed=planned，审计加载器和正式验证器均强制该条件。
+- 恢复不再使用 `max(processed, issued)`；processed-but-unfinished accumulation（已处理但梯度尚未完成的累积）通过梯度快照/偏移恢复，issued-but-unprocessed 批次从 processed 位置重新进入真实 training_step。缺失或哈希不一致的梯度身份硬拒绝。
+- Phase A 入口在长训练前预检 manifest、relation_vocab、source_train/source_dev/target_unlabeled 三个缓存文件及输入/文件哈希；缓存缺失或身份不符立即失败。正式命令必须使用已验证的 `J:\nlp\CD-C3DA\runs\diagnostics\laptop14_to_rest15_m1_syntactic_rgat_entry_audit_v4\graph_cache_resume`。
+- 保持既有 `int(Trainer.state.epoch)` 洗牌语义；physical traversal ID 仅审计用途，不改变采样顺序。未运行 GPU、正式实验、伪标签推理或 target_test。
+
+## 2026-08-28：完成 Phase A DANN 物理遍历审计与恢复修复（CPU 验证，未启动实验）
 
 - 根因确认：旧采样器把浮点 `state.epoch`（轮次状态）取整后作为审计编号，并在生成器完全耗尽后才追加报告；梯度累积和训练器立即停止造成重复编号覆盖、缺失轮次和末尾报告丢失。旧运行 `control/dann_batch_audit.json` 保留为 legacy（旧版）方向性诊断，不伪造缺失观测、不把门槛降为21。
-- P0 修复：物理遍历 ID 与既有 `int(Trainer.state.epoch)` 采样轮次分离；`seed+sampling_epoch` 的旧洗牌语义保持，906 行/16 累积/25 轮的 max_steps 独立计算为1400，并以重复标签序列和批次哈希回归核对。
-- P1 修复：审计协议升级为 schema 3（模式3），每批追加小型完整行/哈希链 journal；`issued_batches` 与训练器成功 `training_step` 后的 `processed_batches` 分离，检查点记录必要的梯度累积重放身份；步区间、连续性、planned batches 和独立 max_steps 严格校验。
-- 恢复修复：检查点区分 `resume_complete` 与 `training_terminal_partial`，只接受身份、哈希和 issued/processed 语义有效的点；达到 max_steps 但仍有未确认批次的点明确拒绝，终止部分遍历只能在 issued==processed 时作为终端恢复点，不能伪装为完整遍历。
-- 兼容边界：新增显式 `--legacy_diagnostic_migration`（旧运行阻塞/迁移审计）路径，仅原子写 `legacy_diagnostic_migration.json`，保留源提交/产物哈希并硬拒绝训练续跑，不修改 `stage_status.json`，只能在新目录正式重跑。
-- 测试结果：TDD RED 阶段先确认新接口缺失/旧字段不满足；GREEN 阶段六个 M1 测试文件97项 CPU 测试通过，覆盖 journal 崩溃窗口、Control/Treatment 对齐、真实非整除 Trainer 的 terminal 审计和终端检查点门控；未启动 GPU（图形处理器）训练、正式实验、伪标签推理或 target_test（目标测试集）。
-- 实验逻辑：模型公式、图传播、DANN=0.03、数据、采样顺序、batch（批大小）、优化器、调度器和研究范围不变；旧运行不晋级，修复后新目录从头运行。
+- P0 修复：物理 DataLoader（数据加载器）遍历序号与既有采样轮次分离；Trainer（训练器）仍通过显式 provider（提供器）使用修复前的 `int(state.epoch)` 洗牌语义。906/906、梯度累积16、25轮/1400步边界模拟已核对轮次标签和批次哈希，未改变采样顺序。
+- P1 修复：schema 3（模式3）采用带哈希链的追加式 JSONL journal（日志），每批只追加小记录；epoch/checkpoint/正常结束再写原子快照。`issued_batches` 与 `processed_batches` 分离，Trainer 的成功 `training_step` 后才 acknowledge（确认）；恢复严格校验身份、单调性、步数区间、物理遍历完成度和 Control/Treatment（对照组/处理组）逐批对应。
+- 终止与恢复：区分 `resume_complete` 与 `training_terminal_partial`；最终达到 max_steps（最大步数）但物理遍历未完整时，仅在 issued==processed 且身份有效时允许终端恢复，未确认或身份缺口硬拒绝。旧 schema 与旧运行不静默续跑。
+- 兼容边界：新增显式 `--legacy_diagnostic_migration`（旧版阻塞/迁移审计）路径，并保留旧参数别名；只写迁移报告，保留源提交/产物哈希，不修改 `stage_status.json`，返回 BLOCKED（阻塞），只能在新目录正式重跑。
+- 测试结果：六个 M1 测试文件 97 项 CPU 测试通过；全项目 CPU 测试 366 通过、7 项失败均为基线已有的 Windows 编码/工作流 Skill 断言问题，与本修复无关；AST（抽象语法树）编译检查和 `git diff --check` 在最终提交前复核。未启动 GPU（图形处理器）训练、正式实验、伪标签推理或 target_test（目标测试集）。
+- 实验逻辑：模型公式、图传播、DANN=0.03、数据、batch（批大小）、优化器、调度器和研究范围不变；旧采样语义已由 provider 与边界哈希测试保持。最早失效阶段是 Phase A target-unlabeled DANN 审计及其真实下游，旧运行不晋级，修复后新目录从头运行。
 
 ## 2026-08-27 10:53：完成全量词—子词对齐只读预检入口，等待实际 GPU 预检
 

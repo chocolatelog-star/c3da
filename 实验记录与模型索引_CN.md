@@ -1,6 +1,12 @@
 # CD-C3DA 实验记录与模型索引
 
-> 更新时间：2026-08-29（北京时间）
+> 更新时间：2026-08-29 16:50（北京时间）
+
+## 2026-08-29：M1 Phase A V8 运行中（无最终指标）
+
+V8 运行目录为 `runs/reproducible/laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，代码身份为 `33a7e3d3fa9846de2ddac52484365b4bf3c649c4`。本次没有从头重训 Control（对照组），而是以 `reuse_depth=1` 复用 V6 审计通过的 Control；当前从头训练带句法 RGAT（关系图注意力网络）的 Treatment（实验组），计划 1400 个优化步。
+
+最近人工观测约为 `172/1400`；日志中的 generation/domain/joint loss（生成/领域/联合损失）、梯度范数和 source-dev（源域开发集）损失均为有限值且总体下降，Accelerate（加速训练库）仅输出弃用警告。该运行尚未完成 Treatment、目标无标签伪标签推理或 A1–A4 Gate（门控），未运行目标测试，不产生新的 F1，也不改变正式最佳 54.01。运行完成后必须记录 Gate 结论、Control/Treatment 差异、研究结论和唯一下一步。
 
 ## 2026-08-29：M1 Phase A 独立进程与 V6 Control 受控复用修复完成（未运行新实验）
 
@@ -10,7 +16,7 @@ V6 Control 已完成 1400/1400，但旧运行在进入 Treatment 前被生命周
 
 ## 2026-08-28：M1 DANN 审计恢复修复完成（未运行实验）
 
-本轮完成 `M1_DANN_AUDIT_RESUME_FIX_V1`（M1 DANN 审计与恢复修复），不产生新的模型指标，也不改变正式最佳。根因是旧采样器把浮点 `state.epoch`（轮次状态）取整后作为审计编号，并在生成器完全耗尽后才落盘，导致旧运行只有21个唯一轮次标签而缺少7、15、23、24。新实现把物理 DataLoader（数据加载器）遍历 ID 与既有 `int(state.epoch)` 洗牌语义分离，按物理遍历记录计划、issued/processed（已发出/已确认）批次数、完整/部分遍历和 Trainer（训练器）global step（全局步数），以哈希链 journal 追加并在边界压缩快照。
+本轮完成 `M1_DANN_AUDIT_RESUME_FIX_V1`（M1 DANN 审计与恢复修复），不产生新的模型指标，也不改变正式最佳。根因是旧采样器把浮点 `state.epoch`（轮次状态）取整后作为报告编号，并在生成器完全耗尽后才落盘，导致旧运行只有21个唯一轮次标签而缺少7、15、23、24。新实现把物理 DataLoader（数据加载器）遍历 ID 与既有 `int(state.epoch)` 洗牌语义分离，按物理遍历记录计划、issued/processed（已发出/已确认）批次数、完整/部分遍历和 Trainer（训练器）global step（全局步数），以哈希链 journal 追加并在边界压缩快照。
 
 旧运行保留为方向性 `QUICK_ABLATION_DIAGNOSTIC`（快速消融诊断），不能通过降低门槛或复制报告晋级。显式 `legacy_diagnostic_migration`（旧运行阻塞/迁移审计）只写迁移/兼容报告并硬拒绝改变训练语义的续跑；修复后的正式证据必须在新目录从头运行。模型公式、句法图传播、DANN=0.03、数据、旧采样顺序、训练参数、目标测试隔离和研究范围不变。仅完成 CPU（中央处理器）测试与静态检查，未启动 GPU（图形处理器）训练、正式实验、伪标签推理或目标测试。
 > 主指标：raw F1（原始严格 F1）；fixed F1（修正后 F1）仅用于辅助分析。
