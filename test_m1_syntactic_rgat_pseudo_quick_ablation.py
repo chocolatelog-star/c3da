@@ -48,6 +48,8 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     _serialize_rows,
     _write_inputs,
     _write_variant_inputs,
+    _pipeline_argv,
+    stage_producer_commit_for_validation,
 )
 from syntactic_graph_adapter import load_seq2seq_model
 from t5_absa_train import (
@@ -498,6 +500,79 @@ def test_resume_identity_and_phase_b_boundary():
         resumed = load_or_initialize_stage_status(status_path, identity, resume=True)
         assert resumed["completed_stages"] == []
         assert load_or_initialize_stage_status(status_path, {"code": "changed", "recipe": "def"}, resume=True) is None
+
+
+def test_resume_repair_migrates_only_code_identity_and_preserves_completed_producers():
+    old_identity = {"task_id": "phase-a", "code_commit": "old", "recipe_sha256": "recipe"}
+    new_identity = {"task_id": "phase-a", "code_commit": "new", "recipe_sha256": "recipe"}
+    with tempfile.TemporaryDirectory() as directory:
+        status_path = Path(directory) / "stage_status.json"
+        status_path.write_text(
+            json.dumps({
+                "schema_version": 2,
+                "identity": old_identity,
+                "completed_stages": ["treatment_training"],
+                "stages": {"treatment_training": {"producer_commit": "old"}},
+            }),
+            encoding="utf-8",
+        )
+        resumed = load_or_initialize_stage_status(
+            status_path,
+            new_identity,
+            resume=True,
+            repair_from_commit="old",
+        )
+        assert resumed["identity"] == new_identity
+        assert resumed["repair_history"][-1]["from_commit"] == "old"
+        assert resumed["repair_history"][-1]["to_commit"] == "new"
+        assert resumed["repair_history"][-1]["completed_stages"] == ["treatment_training"]
+        assert resumed["stages"]["treatment_training"]["producer_commit"] == "old"
+        assert stage_producer_commit_for_validation(resumed, "treatment_training", "new") == "old"
+
+
+def test_resume_repair_rejects_stage_producer_outside_audited_chain():
+    state = {
+        "stages": {"treatment_training": {"producer_commit": "unknown"}},
+        "repair_history": [{
+            "from_commit": "old",
+            "to_commit": "new",
+            "completed_stages": ["treatment_training"],
+        }],
+    }
+    try:
+        stage_producer_commit_for_validation(state, "treatment_training", "new")
+    except RuntimeError as exc:
+        assert "outside the audited repair chain" in str(exc)
+    else:
+        raise AssertionError("unaudited stage producer was accepted")
+
+
+def test_graph_pipeline_uses_frozen_base_tokenizer_for_cache_identity():
+    args = SimpleNamespace(
+        graph_cache_dir=Path("graph-cache"),
+        parser_dir=Path("parser"),
+        model_path=Path("base-t5"),
+        cuda="0",
+        recipe_data={
+            "training": {"extractor_eval_batch_size": 2, "target_pseudo_batch_size": 1},
+            "pseudo": {
+                "num_beams": 4,
+                "max_new_tokens": 96,
+                "length_penalty": 1.0,
+                "max_target_unlabeled": 0,
+                "pseudo_model_variant": "best",
+                "pseudo_source_tag": "phase-a",
+                "base_weight": 0.65,
+                "high_precision_max_triplets": 1,
+                "high_precision_max_token_distance": 5,
+                "fixed_changed_min_score": 0.65,
+                "fixed_changed_weight": 0.35,
+            },
+        },
+    )
+    argv = _pipeline_argv(args, Path("treatment"), "evaluate", True, Path("checkpoint"), "source_dev")
+    index = argv.index("--syntactic_graph_cache_tokenizer_path")
+    assert argv[index + 1] == "base-t5"
 
 
 def test_target_test_is_rejected_before_execution():

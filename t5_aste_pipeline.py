@@ -39,6 +39,7 @@ from syntactic_graph import (
     build_parser_identity,
     build_tokenizer_identity,
     load_graph_cache_directory,
+    verify_tokenizer_input_equivalence,
 )
 from syntactic_graph_adapter import load_seq2seq_model
 
@@ -110,6 +111,7 @@ def generate_texts(
     graph_cache_identity_rows: list[dict] | None = None,
     graph_parser_dir: str | Path = r"J:\nlp\models\stanza_resources",
     graph_split: str = "target_unlabeled",
+    graph_cache_tokenizer_path: str | Path = "",
 ) -> list[str]:
     import torch
     from tqdm import tqdm
@@ -124,7 +126,9 @@ def generate_texts(
         if graph_cache_identity_rows is None:
             graph_cache_identity_rows = graph_rows
         tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-        tokenizer_identity = build_tokenizer_identity(model_path, tokenizer)
+        cache_tokenizer_path = Path(graph_cache_tokenizer_path) if graph_cache_tokenizer_path else Path(model_path)
+        cache_tokenizer = AutoTokenizer.from_pretrained(cache_tokenizer_path, local_files_only=True)
+        tokenizer_identity = build_tokenizer_identity(cache_tokenizer_path, cache_tokenizer)
         parser_identity = build_parser_identity(graph_parser_dir)
         if len(graph_rows) != len(inputs):
             raise GraphCacheError("graph rows and generation inputs must have identical lengths")
@@ -134,6 +138,13 @@ def generate_texts(
             graph_cache_identity_rows,
             tokenizer_identity=tokenizer_identity,
             parser_identity=parser_identity,
+        )
+        verify_tokenizer_input_equivalence(
+            cache_tokenizer,
+            tokenizer,
+            graph_cache_identity_rows,
+            use_task_prefix=graph_cache.use_task_prefix,
+            max_length=128,
         )
         model = load_seq2seq_model(
             str(model_path),
@@ -2638,6 +2649,7 @@ def pseudo(args: argparse.Namespace) -> None:
         graph_cache_dir=getattr(args, "syntactic_graph_cache_dir", ""),
         graph_rows=target_rows if getattr(args, "use_syntactic_graph_adapter", False) else None,
         graph_parser_dir=getattr(args, "syntactic_graph_parser_dir", r"J:\nlp\models\stanza_resources"),
+        graph_cache_tokenizer_path=getattr(args, "syntactic_graph_cache_tokenizer_path", ""),
     )
     pseudo_rows = []
     for row, pred in zip(target_rows, preds):
@@ -3508,6 +3520,7 @@ def evaluate(args: argparse.Namespace) -> None:
         graph_rows=rows if getattr(args, "use_syntactic_graph_adapter", False) else None,
         graph_parser_dir=getattr(args, "syntactic_graph_parser_dir", r"J:\nlp\models\stanza_resources"),
         graph_split=getattr(args, "syntactic_graph_split", "source_dev"),
+        graph_cache_tokenizer_path=getattr(args, "syntactic_graph_cache_tokenizer_path", ""),
     )
     preds = [canonicalize_triplet_text(pred) for pred in preds]
     golds = [canonicalize_triplet_text(row["label"]) for row in rows]
@@ -3662,6 +3675,7 @@ def main() -> None:
     p.add_argument("--use_syntactic_graph_adapter", action="store_true")
     p.add_argument("--syntactic_graph_cache_dir", default="")
     p.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
+    p.add_argument("--syntactic_graph_cache_tokenizer_path", default="")
     p.set_defaults(func=pseudo)
 
     p = sub.add_parser("memory")
@@ -3774,6 +3788,7 @@ def main() -> None:
     p.add_argument("--use_syntactic_graph_adapter", action="store_true")
     p.add_argument("--syntactic_graph_cache_dir", default="")
     p.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
+    p.add_argument("--syntactic_graph_cache_tokenizer_path", default="")
     p.add_argument("--syntactic_graph_split", choices=["source_dev", "target_unlabeled"], default="source_dev")
     p.add_argument("--output_tag", default="")
     p.add_argument("--eval_file", default="")

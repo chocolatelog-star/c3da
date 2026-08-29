@@ -981,6 +981,37 @@ def _graph_cache_stats(records_by_split: dict[str, list[dict]]) -> dict:
     }
 
 
+def verify_tokenizer_input_equivalence(
+    reference_tokenizer,
+    runtime_tokenizer,
+    rows: list[dict],
+    *,
+    use_task_prefix: bool,
+    max_length: int,
+) -> dict:
+    """Prove that task-output tokens did not alter graph input alignment."""
+    for index, row in enumerate(rows):
+        row_id = str(row.get("id", index))
+        text = str(row.get("text", ""))
+        input_text = f"extract aste: {text}" if use_task_prefix else text
+        common = {
+            "add_special_tokens": True,
+            "return_offsets_mapping": True,
+            "truncation": True,
+            "max_length": int(max_length),
+        }
+        reference = reference_tokenizer(input_text, **common)
+        runtime = runtime_tokenizer(input_text, **common)
+        if (
+            list(reference.get("input_ids", [])) != list(runtime.get("input_ids", []))
+            or list(reference.get("offset_mapping", [])) != list(runtime.get("offset_mapping", []))
+        ):
+            raise GraphCacheError(
+                f"runtime tokenizer changes graph input tokenization: row_id={row_id}"
+            )
+    return {"rows_checked": len(rows), "differences": 0}
+
+
 def build_graph_cache_records(
     split_rows: dict[str, list[dict]],
     output_dir: str | Path,

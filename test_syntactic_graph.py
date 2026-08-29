@@ -13,6 +13,7 @@ from syntactic_graph import (
     load_graph_cache_directory,
     load_graph_cache_rows,
     sha256_file,
+    verify_tokenizer_input_equivalence,
     validate_alignment_policy,
 )
 
@@ -60,6 +61,45 @@ class FakeTokenizer:
         input_ids.append(0)
         offsets.append((0, 0))
         return {"input_ids": input_ids, "offset_mapping": offsets}
+
+
+class FakeTaskTokenTokenizer(FakeTokenizer):
+    def __init__(self, *, shift_inputs=False):
+        self.shift_inputs = shift_inputs
+
+    def __call__(self, text, **kwargs):
+        encoded = super().__call__(text, **kwargs)
+        if self.shift_inputs:
+            encoded["input_ids"] = [value + 1 for value in encoded["input_ids"]]
+        return encoded
+
+
+def test_graph_cache_identity_accepts_output_only_task_tokens_when_inputs_are_equivalent():
+    rows = [{"id": "row-1", "text": "The service was excellent."}]
+    report = verify_tokenizer_input_equivalence(
+        FakeTokenizer(),
+        FakeTaskTokenTokenizer(),
+        rows,
+        use_task_prefix=False,
+        max_length=128,
+    )
+    assert report == {"rows_checked": 1, "differences": 0}
+
+
+def test_graph_cache_identity_rejects_any_input_tokenization_change():
+    rows = [{"id": "row-1", "text": "The service was excellent."}]
+    try:
+        verify_tokenizer_input_equivalence(
+            FakeTokenizer(),
+            FakeTaskTokenTokenizer(shift_inputs=True),
+            rows,
+            use_task_prefix=False,
+            max_length=128,
+        )
+    except GraphCacheError as exc:
+        assert "row-1" in str(exc)
+    else:
+        raise AssertionError("input tokenization change was not rejected")
 
 
 def test_typed_edges_include_dependency_directions_neighbors_and_self_loops():

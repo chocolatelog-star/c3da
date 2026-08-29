@@ -577,13 +577,38 @@ def decide_phase_a(gate_result: dict) -> dict:
     }
 
 
-def load_or_initialize_stage_status(path: Path, identity: dict, resume: bool) -> dict | None:
+def load_or_initialize_stage_status(
+    path: Path,
+    identity: dict,
+    resume: bool,
+    repair_from_commit: str = "",
+) -> dict | None:
     if path.exists():
         saved = _read_json(path)
         if not resume:
             raise RuntimeError(f"run already exists; use --resume: {path.parent}")
         if saved.get("identity") != identity:
-            return None
+            previous = saved.get("identity")
+            previous_without_commit = dict(previous) if isinstance(previous, dict) else {}
+            current_without_commit = dict(identity)
+            previous_commit = previous_without_commit.pop("code_commit", None)
+            current_commit = current_without_commit.pop("code_commit", None)
+            repair_allowed = (
+                bool(repair_from_commit)
+                and previous_commit == repair_from_commit
+                and current_commit
+                and previous_without_commit == current_without_commit
+            )
+            if not repair_allowed:
+                return None
+            saved.setdefault("repair_history", []).append({
+                "reason": "graph_cache_runtime_tokenizer_identity_contract_fix",
+                "from_commit": previous_commit,
+                "to_commit": current_commit,
+                "completed_stages": list(saved.get("completed_stages", [])),
+                "target_test_access": False,
+            })
+            saved["identity"] = identity
         if saved.get("schema_version") != 2 or not isinstance(saved.get("stages"), dict):
             raise RuntimeError("stage_status.json has no complete per-stage identity records; refusing resume")
         return saved
@@ -613,6 +638,21 @@ def validate_stage_status_shape(state: dict, stages: tuple[str, ...]) -> None:
             raise RuntimeError(f"completed stage {stage} has no identity record; refusing resume")
         if record.get("stage") != stage:
             raise RuntimeError(f"completed stage {stage} identity record has the wrong stage name; refusing resume")
+
+
+def stage_producer_commit_for_validation(state: dict, stage: str, current_commit: str) -> str:
+    record = state.get("stages", {}).get(stage, {})
+    producer = record.get("producer_commit")
+    if producer == current_commit:
+        return current_commit
+    for repair in state.get("repair_history", []):
+        if (
+            producer == repair.get("from_commit")
+            and current_commit == repair.get("to_commit")
+            and stage in repair.get("completed_stages", [])
+        ):
+            return str(producer)
+    raise RuntimeError(f"stage {stage} producer commit is outside the audited repair chain")
 
 
 def _validate_recipe(recipe: dict) -> None:
@@ -1251,6 +1291,7 @@ def _pipeline_argv(
                 "--use_syntactic_graph_adapter",
                 "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
                 "--syntactic_graph_parser_dir", str(args.parser_dir),
+                "--syntactic_graph_cache_tokenizer_path", str(args.model_path),
                 "--syntactic_graph_split", "source_dev",
             ])
     elif command == "pseudo":
@@ -1276,6 +1317,7 @@ def _pipeline_argv(
                 "--use_syntactic_graph_adapter",
                 "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
                 "--syntactic_graph_parser_dir", str(args.parser_dir),
+                "--syntactic_graph_cache_tokenizer_path", str(args.model_path),
             ])
     else:
         raise ValueError(command)
@@ -2061,7 +2103,12 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     recipe_sha256 = sha256_file(Path(args.recipe))
     actual_identity, identity_metadata = _build_identity(args, input_identity_hashes, model_hashes, parser_identity, recipe_sha256, git_identity)
     status_identity = {"task_id": TASK_ID, "code_commit": git_identity["commit"], "recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "graph_cache_identity": graph_cache_identity, "scope": build_phase_a_scope()}
-    state = load_or_initialize_stage_status(run_dir / "stage_status.json", status_identity, args.resume)
+    state = load_or_initialize_stage_status(
+        run_dir / "stage_status.json",
+        status_identity,
+        args.resume,
+        repair_from_commit=args.resume_repair_from_commit,
+    )
     if state is None:
         raise RuntimeError("resume identity mismatch; refusing to mix Phase A artifacts")
     variant_dirs = {name: run_dir / name for name in ("control", "treatment")}
@@ -2269,7 +2316,10 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 saved_stage = state.get("stages", {}).get(stage)
                 if not isinstance(saved_stage, dict):
                     raise RuntimeError(f"completed stage {stage} has no identity record; refusing resume")
-                expected_stage = _stage_record(args, stage, spec, recipe_sha256, git_identity["commit"])
+                expected_producer = stage_producer_commit_for_validation(
+                    state, stage, git_identity["commit"]
+                )
+                expected_stage = _stage_record(args, stage, spec, recipe_sha256, expected_producer)
                 validate_stage_identity(saved_stage, expected_stage)
                 progress.update(1)
                 continue
@@ -2362,8 +2412,25 @@ def run_phase_a(args: argparse.Namespace) -> dict:
             control_dann_batch_audit_path=control_dann_batch_audit_path,
             control_initialization_audit_path=control_initialization_audit_path,
         )
-        expected_stage = _stage_record(args, stage, spec, recipe_sha256, git_identity["commit"])
+        expected_producer = stage_producer_commit_for_validation(
+            state, stage, git_identity["commit"]
+        )
+        expected_stage = _stage_record(args, stage, spec, recipe_sha256, expected_producer)
         validate_stage_identity(state["stages"][stage], expected_stage)
+
+    if state.get("repair_history"):
+        _atomic_write_json(run_dir / "orchestration_repair_resume_audit.json", {
+            "schema_version": 1,
+            "task_id": TASK_ID,
+            "repair_history": state["repair_history"],
+            "completed_stage_producers": {
+                stage: state["stages"][stage]["producer_commit"] for stage in stages
+            },
+            "input_tokenizer_equivalence_scope": [
+                "source_train", "source_dev", "target_unlabeled"
+            ],
+            "target_test_access": False,
+        })
 
     if initialization_pair_audit is None:
         if control_initialization_audit_path is None:
@@ -2445,6 +2512,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control_run_dir", default="")
     parser.add_argument("--control_terminal_lookahead_salvage_audit", default="")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--resume_repair_from_commit",
+        default="",
+        help="Allow a code-only audited resume from this exact failed producer commit.",
+    )
     parser.add_argument(
         "--legacy_diagnostic_migration", "--legacy_diagnostic_resume",
         dest="legacy_diagnostic_migration", action="store_true",
