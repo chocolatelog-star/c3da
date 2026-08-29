@@ -1,12 +1,12 @@
 # CD-C3DA 实验记录与模型索引
 
-> 更新时间：2026-08-29 16:50（北京时间）
+> 更新时间：2026-08-29 18:57（北京时间）
 
-## 2026-08-29：M1 Phase A V8 运行中（无最终指标）
+## 2026-08-29：M1 Phase A V8 训练完成、评估身份接口阻塞（可恢复）
 
-V8 运行目录为 `runs/reproducible/laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，代码身份为 `33a7e3d3fa9846de2ddac52484365b4bf3c649c4`。本次没有从头重训 Control（对照组），而是以 `reuse_depth=1` 复用 V6 审计通过的 Control；当前从头训练带句法 RGAT（关系图注意力网络）的 Treatment（实验组），计划 1400 个优化步。
+V8 运行目录为 `runs/reproducible/laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，原运行代码身份为 `33a7e3d3fa9846de2ddac52484365b4bf3c649c4`。本次以 `reuse_depth=1` 复用 V6 Control（对照组），Treatment（实验组）1400/1400训练已经完成；Control source-dev（源域开发集）raw/fixed F1为57.84/59.06。
 
-最近人工观测约为 `172/1400`；日志中的 generation/domain/joint loss（生成/领域/联合损失）、梯度范数和 source-dev（源域开发集）损失均为有限值且总体下降，Accelerate（加速训练库）仅输出弃用警告。该运行尚未完成 Treatment、目标无标签伪标签推理或 A1–A4 Gate（门控），未运行目标测试，不产生新的 F1，也不改变正式最佳 54.01。运行完成后必须记录 Gate 结论、Control/Treatment 差异、研究结论和唯一下一步。
+Treatment source-dev评估在推理前被`tokenizer identity mismatch`阻塞：图缓存绑定基础T5输入分词器，而训练保存的检查点加入四个ASTE输出标签后改变完整`tokenizer.json`哈希。三划分1730行输入token ID与字符偏移逐行差异为0，确认输入图对齐没有变化。修复提交`bbc2b21`分离缓存输入身份与运行时输出词表验证，并记录旧提交到修复提交的恢复链。下一步只续跑剩余评估、目标无标签伪标签推理和A1–A4 Gate，不重训两臂；当前仍无Treatment最终指标、无目标测试，不改变正式最佳54.01。
 
 ## 2026-08-29：M1 Phase A 独立进程与 V6 Control 受控复用修复完成（未运行新实验）
 

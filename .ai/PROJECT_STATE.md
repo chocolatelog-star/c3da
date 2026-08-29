@@ -1,14 +1,14 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-29 16:50（北京时间）
+> 更新时间：2026-08-29 18:57（北京时间）
 
 ## 当前 V8 Phase A 运行状态
 
-- 当前运行：`laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，状态为 `RUNNING`（运行中）。
+- 当前运行：`laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，状态为 `BLOCKED`（可恢复）。
 - V8 没有重训 Control（对照组）：已按 `reuse_depth=1` 复用 V6 审计通过的 Control 模型与 DANN（领域对抗网络）批次证据；`stage_status.json` 已将 `control_training` 标记完成。
-- 当前正在从头训练带句法 RGAT（关系图注意力网络）的 Treatment（实验组），总计 1400 个优化步；用户最近观测约为 `172/1400`。阶段性 `104/110` 是 source-dev（源域开发集）评估进度，不是第二次训练。
-- 当前训练日志中的 generation/domain/joint loss（生成/领域/联合损失）和梯度范数均为有限值，训练与开发损失下降；Accelerate（加速训练库）输出仅为弃用警告，尚无运行错误。
-- V8 尚未完成 Treatment、目标无标签伪标签推理及 A1–A4 无金标 Gate，因此不能宣称图模块有效，也没有新的目标测试 F1。Phase B（阶段B）、最终 ASTE（方面级情感三元组抽取）和 target_test（目标测试集）仍未批准进入。
+- Treatment（实验组）1400/1400训练已完成；Control（对照组）source-dev评估完成，raw/fixed F1为57.84/59.06。Treatment source-dev评估因缓存分词器身份接口错误在推理前停止，因此尚无实验组指标。
+- 根因是图缓存绑定基础 T5 输入分词器，而检查点加入`<pos>/<neg>/<neu>/<opinion>`四个输出标签后改变完整`tokenizer.json`哈希。三划分1730行的输入token ID和字符偏移逐行差异为0，证明输入图对齐未改变。
+- 修复提交`bbc2b21`把缓存输入身份与运行时输出词表分开验证，并增加旧提交到修复提交的可审计恢复链。下一步只续跑剩余评估、伪标签推理和A1–A4门控，不重训Control或Treatment；Phase B和target_test仍未批准。
 
 ## 当前 M1 Phase A 工程状态
 
