@@ -3558,8 +3558,9 @@ def main() -> dict | None:
     if args.dann_batch_audit_path:
         if dann_batch_sampler is None and args.lambda_domain_adv > 0:
             raise RuntimeError("DANN batch audit requested without a paired DANN sampler")
-        audit_path = Path(args.dann_batch_audit_path)
-        dann_batch_sampler.flush_audit_snapshot()
+        if dann_batch_sampler is not None:
+            audit_path = Path(args.dann_batch_audit_path)
+            dann_batch_sampler.flush_audit_snapshot()
     best_dir = output_dir / "best"
     if best_dir.exists():
         shutil.rmtree(best_dir)
