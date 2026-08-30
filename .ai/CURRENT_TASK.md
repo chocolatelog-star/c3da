@@ -1,6 +1,6 @@
 # 当前任务
 
-> 更新时间：2026-08-30 23:17（北京时间）
+> 更新时间：2026-08-30 23:41（北京时间）
 
 ## 任务身份
 
@@ -28,10 +28,13 @@ seed：1000
 ```text
 分支：codex/m1-element-aware-multi-triplet-rgat-v1
 已推送HEAD：135c8be
-当前未跟踪测试：test_element_aware_component_ablation.py
+本地实现HEAD：11aaac4
+服务器可见提交：135c8be
 ```
 
-未跟踪测试必须先完成只读复审、CPU测试、提交和推送，才能提供服务器GPU（图形处理器）运行命令。
+本地已完成G1/G2权重校验、V9e（第9e版）固定批次入口、同目录自动恢复、运行身份与目标测试隔离实现。`test_element_aware_component_ablation.py`已提交；组件测试与现有元素感知回归共26项通过，Python（编程语言）语法检查和Git diff（差异格式检查）通过。
+
+当前Codex Sol（高级工程模型）只读工程验收进行中。本地提交尚未推送，服务器实例当前SSH（安全外壳）不可达，未启动新的GPU（图形处理器）实验。验收、最终CPU复测、推送和服务器提交核验完成前，不提供正式GPU启动命令。
 
 ## 固定项
 
@@ -44,3 +47,7 @@ seed：1000
 ## 完成条件
 
 两组均输出source-dev总体/单/多结构指标、元素absence（缺失）、合格伪标签总量与multi/3+数量、身份哈希和结果卡。两组完成后返回Chat Sol（研究负责人）作`KEEP_FOCUS / KEEP_COVERAGE / INTERACTION_ONLY / STOP_GRAPH_TUNING`判定。
+
+## 当前唯一下一步
+
+等待Codex Sol工程验收；若无阻塞问题，则完成最终CPU复测和双目录提交。获得用户推送许可后推送功能分支，再在服务器按明确提交先做5至10步GPU烟雾测试，随后由用户启动G1/G2两个独立正式诊断目录。

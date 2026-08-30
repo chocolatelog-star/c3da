@@ -187,6 +187,15 @@ def test_run_identity_allows_exact_resume_and_rejects_variant_change(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8")) == identity
 
 
+def test_run_identity_rejects_existing_artifacts_without_identity(tmp_path):
+    path = tmp_path / "component_ablation_identity.json"
+    checkpoint = tmp_path / "models" / "extractor" / "checkpoint-100"
+    checkpoint.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="existing artifacts without identity"):
+        ensure_run_identity(path, {"task_id": "component"})
+    assert not path.exists()
+
+
 def test_result_record_preserves_phase_a_data_boundary():
     variant = resolve_variant(_runner_args(focus_only=True))
     result = build_result_record(

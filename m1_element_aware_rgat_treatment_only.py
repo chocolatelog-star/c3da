@@ -176,6 +176,13 @@ def ensure_run_identity(path: Path, identity: dict) -> None:
         if existing != identity:
             raise RuntimeError(f"component ablation identity mismatch: {path}")
         return
+    if path.parent.exists():
+        existing_artifacts = [item for item in path.parent.iterdir() if item != path]
+        if existing_artifacts:
+            raise RuntimeError(
+                "component ablation run has existing artifacts without identity: "
+                + ", ".join(str(item) for item in sorted(existing_artifacts))
+            )
     write_json_atomic(path, identity)
 
 
