@@ -1783,6 +1783,7 @@ def _validate_control_treatment_dann_reports(
     variant_dirs: dict[str, Path],
     control_reuse_audit: dict,
     expected_epochs: int | None = None,
+    skip_treatment_report: bool = False,
     *,
     expected_seed: int = 1000,
     expected_source_count: int | None = None,
@@ -1823,6 +1824,8 @@ def _validate_control_treatment_dann_reports(
         require_journal=require_journal,
         require_fresh_replay_free=require_fresh_replay_free,
     )
+    if skip_treatment_report:
+        return {"status": "disabled", "reason": "lambda_domain_adv_zero", "control": control_report, "treatment": None}
     treatment_report = _read_dann_batch_audit(
         treatment_path,
         expected_epochs=expected_epochs,
@@ -2496,6 +2499,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         variant_dirs,
         control_reuse_audit,
         expected_epochs=None,
+        skip_treatment_report=(args.recipe_data["training"]["lambda_domain_adv"] == 0),
         require_training_state=True,
         expected_max_steps=expected_dann_max_steps,
         expected_planned_batches=expected_dann_planned_batches,
