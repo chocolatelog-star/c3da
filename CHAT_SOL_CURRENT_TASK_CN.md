@@ -1,13 +1,44 @@
-# Chat Sol 当前任务镜像
+# 当前任务
 
-> 更新时间：2026-08-30 16:55（北京时间）
+> 更新时间：2026-08-30 23:10（北京时间）
 
-当前唯一任务是 `M1_ELEMENT_AWARE_MULTI_TRIPLET_RGAT_IMPLEMENTATION_V1`，性质为实现与工程入口审计，不是正式训练。
+## 任务身份
 
-代码已实现 Element Salience Gate（元素显著性门控）与 Multi-Element Coverage Loss（多元素覆盖损失）；DANN（领域对抗网络）固定为0，两个辅助损失固定权重0.05，默认关闭，目标域不提供辅助金标监督。CPU（中央处理器）测试9+28+35项通过；源域元素对齐率97.05%，未匹配0，歧义86。
+```text
+TASK：M1_ELEMENT_AWARE_COMPONENT_ATTRIBUTION_V1
+状态：RUNNING
+方向：laptop14 -> rest15
+seed：1000
+实验类型：QUICK_DIAGNOSTIC
+```
 
-服务器首次GPU（图形处理器）入口因低内存加载报告漏报图参数而误判基础T5为部分图检查点；该工程识别错误已用原始配置身份修复，新增回归通过，未发生训练或参数更新。
+## 当前目标
 
-后续暴露的缺失图参数元张量移动错误也已修复：只实体化检查点中本来不存在的新参数，完整图参数不重置；38+35项CPU（中央处理器）回归通过。
+在普通RGAT（关系图注意力网络）、完整Treatment（实验组）之间增加两个严格组件对照：
 
-服务器入口审计 `v2` 已正式 `PASS`（通过）：2826/2912个元素明确对齐，未匹配0、歧义86；零更新、源域梯度、FP32/FP16（单精度/半精度）有限性、single/multi coverage（单/多三元组覆盖）和目标无金标边界全部通过。审计参数更新为0、两种精度参数哈希不变、未访问目标测试。当前状态为 `READY_FOR_QUICK_ABLATION_RESEARCH_APPROVAL`，等待Chat Sol审批固定配方快速消融，不自行启动。
+- Focus-only（仅聚焦）：`lambda_focus=0.05`，`lambda_coverage=0`；
+- Coverage-only（仅覆盖）：`lambda_focus=0`，`lambda_coverage=0.05`。
+
+只判断多三元组召回和元素缺失改善来自哪个组件，不搜索系数。
+
+## 当前代码身份
+
+```text
+分支：codex/m1-element-aware-multi-triplet-rgat-v1
+已推送HEAD：135c8be
+当前未跟踪测试：test_element_aware_component_ablation.py
+```
+
+未跟踪测试必须先完成只读复审、CPU测试、提交和推送，才能提供服务器GPU（图形处理器）运行命令。
+
+## 固定项
+
+固定数据、T5-base、图缓存、解析器、图层1、隐藏维256、头数4、DANN=0、训练参数、伪标签规则、source-dev（源域开发集）选模和目标无金标边界。
+
+## 禁止事项
+
+不得从完整Treatment检查点热启动；不得运行Phase B（阶段B）、增强、最终ASTE（方面级情感三元组抽取）或目标测试；不得改变batch、损失系数、阈值、注意力头、DANN或伪标签配额；不得用目标测试选择组件。
+
+## 完成条件
+
+两组均输出source-dev总体/单/多结构指标、元素absence（缺失）、合格伪标签总量与multi/3+数量、身份哈希和结果卡。两组完成后返回Chat Sol（研究负责人）作`KEEP_FOCUS / KEEP_COVERAGE / INTERACTION_ONLY / STOP_GRAPH_TUNING`判定。
