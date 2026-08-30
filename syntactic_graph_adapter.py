@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -401,6 +403,16 @@ if AutoModelForSeq2SeqLM is not None:
         @classmethod
         def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
             """Load core graph and optional salience parameters without silent partial resets."""
+            checkpoint_declares_graph = None
+            checkpoint_declares_salience = None
+            config_path = Path(pretrained_model_name_or_path) / "config.json"
+            if config_path.is_file():
+                checkpoint_config = json.loads(config_path.read_text(encoding="utf-8"))
+                checkpoint_declares_graph = bool(
+                    checkpoint_config.get("use_syntactic_graph_adapter", False)
+                )
+                element_config = checkpoint_config.get("element_aware_attention", {}) or {}
+                checkpoint_declares_salience = bool(element_config.get("enabled", False))
             caller_requested_loading_info = bool(kwargs.get("output_loading_info", False))
             kwargs["output_loading_info"] = True
             model, loading_info = super().from_pretrained(
@@ -419,9 +431,17 @@ if AutoModelForSeq2SeqLM is not None:
                 for name, _ in model.syntactic_graph_adapter.named_parameters()
             }
             core_graph_parameter_names = graph_parameter_names - salience_parameter_names
-            missing_core = core_graph_parameter_names.intersection(missing_keys)
+            missing_core = (
+                set(core_graph_parameter_names)
+                if checkpoint_declares_graph is False
+                else core_graph_parameter_names.intersection(missing_keys)
+            )
             loaded_core = core_graph_parameter_names - missing_core
-            missing_salience = salience_parameter_names.intersection(missing_keys)
+            missing_salience = (
+                set(salience_parameter_names)
+                if checkpoint_declares_salience is False
+                else salience_parameter_names.intersection(missing_keys)
+            )
             loaded_salience = salience_parameter_names - missing_salience
             if missing_core and loaded_core:
                 missing = ", ".join(sorted(missing_core))

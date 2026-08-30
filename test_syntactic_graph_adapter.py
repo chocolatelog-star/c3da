@@ -116,6 +116,29 @@ def test_base_checkpoint_loading_initializes_graph_parameters_deterministically(
     assert first.graph_parameter_initialization["graph_checkpoint_detected"] is False
 
 
+def test_base_checkpoint_low_cpu_memory_loading_is_not_misclassified_as_partial(tmp_path):
+    base_dir = _write_tiny_base_checkpoint(tmp_path)
+    config = T5Config.from_pretrained(base_dir, local_files_only=True)
+    graph_model_config(
+        config,
+        8,
+        element_aware_enabled=True,
+        focus_enabled=True,
+        coverage_enabled=True,
+    )
+
+    loaded = SyntacticGraphT5ForConditionalGeneration.from_pretrained(
+        base_dir,
+        config=config,
+        local_files_only=True,
+        low_cpu_mem_usage=True,
+    )
+
+    assert loaded.graph_parameter_initialization["initialized_from_base_checkpoint"] is True
+    assert loaded.graph_parameter_initialization["graph_checkpoint_detected"] is False
+    assert loaded.graph_parameter_initialization["salience_initialization"] == "zero"
+
+
 def test_base_checkpoint_loading_uses_seed_for_nonzero_graph_parameters(tmp_path):
     base_dir = _write_tiny_base_checkpoint(tmp_path)
     first = _load_graph_model_from_base(base_dir, seed=1000)
