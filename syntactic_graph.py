@@ -645,6 +645,19 @@ class GraphCache:
         return max(1, len(self.relation_vocab))
 
     def get(self, row: dict) -> dict:
+        record = self.get_record(row)
+        return {
+            "word_to_subword": [list(indices) for indices in record["word_to_subword"]],
+            "word_mask": [1] * len(record["word_to_subword"]),
+            "edge_src": [int(edge["src"]) for edge in record["edges"]],
+            "edge_dst": [int(edge["dst"]) for edge in record["edges"]],
+            "relation_id": [int(edge["relation_id"]) for edge in record["edges"]],
+            "dependency_relation_id": [int(edge["dependency_relation_id"]) for edge in record["edges"]],
+            "pos_pair_id": [int(edge["pos_pair_id"]) for edge in record["edges"]],
+            "edge_mask": [1] * len(record["edges"]),
+        }
+
+    def get_record(self, row: dict) -> dict:
         row_id = str(row.get("id", ""))
         if not row_id:
             raise GraphCacheError(f"{self.split} row has no id")
@@ -663,16 +676,10 @@ class GraphCache:
         expected_input_hash = hashlib.sha256(input_text.encode("utf-8")).hexdigest()
         if record.get("input_text_sha256") != expected_input_hash:
             raise GraphCacheError(f"input hash mismatch: split={self.split} row_id={row_id}")
-        return {
-            "word_to_subword": [list(indices) for indices in record["word_to_subword"]],
-            "word_mask": [1] * len(record["word_to_subword"]),
-            "edge_src": [int(edge["src"]) for edge in record["edges"]],
-            "edge_dst": [int(edge["dst"]) for edge in record["edges"]],
-            "relation_id": [int(edge["relation_id"]) for edge in record["edges"]],
-            "dependency_relation_id": [int(edge["dependency_relation_id"]) for edge in record["edges"]],
-            "pos_pair_id": [int(edge["pos_pair_id"]) for edge in record["edges"]],
-            "edge_mask": [1] * len(record["edges"]),
-        }
+        return record
+
+    def get_parser_tokens(self, row: dict) -> list[dict]:
+        return [dict(token) for token in self.get_record(row)["parser_tokens"]]
 
 
 class CompositeGraphCache:
@@ -692,6 +699,10 @@ class CompositeGraphCache:
     def get(self, row: dict) -> dict:
         split = "target_unlabeled" if row.get("augmentation") == "target_unlabeled" else "source_train"
         return self.caches[split].get(row)
+
+    def get_parser_tokens(self, row: dict) -> list[dict]:
+        split = "target_unlabeled" if row.get("augmentation") == "target_unlabeled" else "source_train"
+        return self.caches[split].get_parser_tokens(row)
 
 
 def load_graph_cache_rows(

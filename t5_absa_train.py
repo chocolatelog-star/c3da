@@ -44,6 +44,11 @@ from syntactic_graph import (
     load_graph_cache_directory,
 )
 from syntactic_graph_adapter import load_seq2seq_model
+from element_aware_rgat import (
+    align_gold_elements_to_graph_words,
+    balanced_element_focus_loss,
+    multi_element_coverage_loss,
+)
 
 
 _PHASE_A_GRAPH_TRAINING_AUTHORIZED = False
@@ -1045,6 +1050,7 @@ class JsonlSeq2SeqDataset(Dataset):
         sentiment_contrastive_exclude_augment: bool = False,
         sentiment_contrastive_source_only: bool = False,
         graph_cache=None,
+        element_aware_enabled: bool = False,
     ):
         self.rows = rows
         self.tokenizer = tokenizer
@@ -1072,6 +1078,7 @@ class JsonlSeq2SeqDataset(Dataset):
         self.sentiment_contrastive_exclude_augment = sentiment_contrastive_exclude_augment
         self.sentiment_contrastive_source_only = sentiment_contrastive_source_only
         self.graph_cache = graph_cache
+        self.element_aware_enabled = bool(element_aware_enabled)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -1101,7 +1108,38 @@ class JsonlSeq2SeqDataset(Dataset):
         model_inputs.update(self.sentiment_contrastive_features(row, model_inputs["input_ids"], sample_weight))
         if self.graph_cache is not None:
             model_inputs.update(self.graph_cache.get(row))
+            if self.element_aware_enabled:
+                model_inputs.update(self.element_aware_features(row))
         return model_inputs
+
+    @staticmethod
+    def is_source_gold_row(row: dict) -> bool:
+        return row.get("augmentation") in {None, "source_gold"}
+
+    def element_aware_features(self, row: dict) -> dict:
+        parser_tokens = self.graph_cache.get_parser_tokens(row)
+        triplets = parse_triplet_text_list(row.get("target", ""))
+        source_gold = self.is_source_gold_row(row)
+        if source_gold:
+            alignment = align_gold_elements_to_graph_words(
+                text=str(row.get("text", "")),
+                parser_tokens=parser_tokens,
+                triplets=triplets,
+            )
+        else:
+            alignment = {
+                "node_labels": [0] * len(parser_tokens),
+                "node_loss_mask": [0] * len(parser_tokens),
+                "element_spans": [],
+            }
+        return {
+            "element_node_labels": alignment["node_labels"],
+            "element_node_loss_mask": alignment["node_loss_mask"],
+            "element_spans": alignment["element_spans"],
+            "element_span_mask": [1] * len(alignment["element_spans"]),
+            "element_source_row": int(source_gold),
+            "element_triplet_count": len(triplets) if source_gold else 0,
+        }
 
     def sample_weight(self, row: dict) -> float:
         if row.get("augmentation") == "target_unlabeled":
@@ -1302,6 +1340,18 @@ class DataCollatorForSeq2SeqWithPairing:
         if any(graph_present) and not all(graph_present):
             raise ValueError("graph fields must be present for every feature or for none of them")
         graph_values = {key: [feature.pop(key, None) for feature in features] for key in graph_keys}
+        element_keys = (
+            "element_node_labels",
+            "element_node_loss_mask",
+            "element_spans",
+            "element_span_mask",
+            "element_source_row",
+            "element_triplet_count",
+        )
+        element_present = [key in feature for feature in features for key in element_keys]
+        if any(element_present) and not all(element_present):
+            raise ValueError("element-aware fields must be present for every feature or for none of them")
+        element_values = {key: [feature.pop(key, None) for feature in features] for key in element_keys}
         pairing_aspect_spans = [feature.pop("pairing_aspect_spans", []) for feature in features]
         pairing_opinion_spans = [feature.pop("pairing_opinion_spans", []) for feature in features]
         pairing_masks = [feature.pop("pairing_mask", []) for feature in features]
@@ -1393,6 +1443,28 @@ class DataCollatorForSeq2SeqWithPairing:
             batch["graph_dependency_relation_id"] = edge_tensors["dependency_relation_id"]
             batch["graph_pos_pair_id"] = edge_tensors["pos_pair_id"]
             batch["graph_edge_mask"] = edge_mask
+            if any(element_present):
+                max_elements = max(len(value) for value in element_values["element_spans"])
+                node_labels = torch.zeros((len(features), max_words), dtype=torch.long)
+                node_loss_mask = torch.zeros((len(features), max_words), dtype=torch.bool)
+                spans = torch.zeros((len(features), max_elements, 2), dtype=torch.long)
+                span_mask = torch.zeros((len(features), max_elements), dtype=torch.bool)
+                for row_index in range(len(features)):
+                    labels = element_values["element_node_labels"][row_index]
+                    masks = element_values["element_node_loss_mask"][row_index]
+                    node_labels[row_index, : len(labels)] = torch.tensor(labels, dtype=torch.long)
+                    node_loss_mask[row_index, : len(masks)] = torch.tensor(masks, dtype=torch.bool)
+                    row_spans = element_values["element_spans"][row_index]
+                    row_span_mask = element_values["element_span_mask"][row_index]
+                    for element_index, span in enumerate(row_spans):
+                        spans[row_index, element_index] = torch.tensor(span, dtype=torch.long)
+                        span_mask[row_index, element_index] = bool(row_span_mask[element_index])
+                batch["element_node_labels"] = node_labels
+                batch["element_node_loss_mask"] = node_loss_mask
+                batch["element_spans"] = spans
+                batch["element_span_mask"] = span_mask
+                batch["element_source_row"] = torch.tensor(element_values["element_source_row"], dtype=torch.bool)
+                batch["element_triplet_count"] = torch.tensor(element_values["element_triplet_count"], dtype=torch.long)
         return batch
 
 
@@ -2328,6 +2400,12 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         "sentiment_contrastive_labels",
         "sentiment_contrastive_mask",
         "sentiment_contrastive_weights",
+        "element_node_labels",
+        "element_node_loss_mask",
+        "element_spans",
+        "element_span_mask",
+        "element_source_row",
+        "element_triplet_count",
     }
     _graph_input_keys = {
         "graph_word_to_subword",
@@ -2353,6 +2431,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         sentiment_contrastive_temperature: float = 0.1,
         sentiment_contrastive_class_weights: list[float] | None = None,
         dann_batch_sampler: PairedDomainBatchSampler | None = None,
+        element_focus_enabled: bool = False,
+        element_coverage_enabled: bool = False,
+        element_focus_weight: float = 0.05,
+        element_coverage_weight: float = 0.05,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -2366,6 +2448,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.sentiment_contrastive_temperature = sentiment_contrastive_temperature
         self.sentiment_contrastive_class_weights = sentiment_contrastive_class_weights
         self.dann_batch_sampler = dann_batch_sampler
+        self.element_focus_enabled = bool(element_focus_enabled)
+        self.element_coverage_enabled = bool(element_coverage_enabled)
+        self.element_focus_weight = float(element_focus_weight)
+        self.element_coverage_weight = float(element_coverage_weight)
         self._dann_microbatches_since_optimizer_step = 0
         if self.dann_batch_sampler is not None:
             # Paired checkpoints are written only at epoch boundaries.  A
@@ -2632,6 +2718,12 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         sentiment_contrastive_labels = inputs.pop("sentiment_contrastive_labels", None)
         sentiment_contrastive_mask = inputs.pop("sentiment_contrastive_mask", None)
         sentiment_contrastive_weights = inputs.pop("sentiment_contrastive_weights", None)
+        element_node_labels = inputs.pop("element_node_labels", None)
+        element_node_loss_mask = inputs.pop("element_node_loss_mask", None)
+        element_spans = inputs.pop("element_spans", None)
+        element_span_mask = inputs.pop("element_span_mask", None)
+        element_source_row = inputs.pop("element_source_row", None)
+        element_triplet_count = inputs.pop("element_triplet_count", None)
         graph_inputs = {
             key: inputs.pop(key, None)
             for key in self._graph_input_keys
@@ -2674,6 +2766,42 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         else:
             loss = per_sample_loss.mean()
         generation_loss = loss
+        if model.training and (self.element_focus_enabled or self.element_coverage_enabled):
+            salience_scores = getattr(outputs, "element_salience_scores", None)
+            if salience_scores is None:
+                raise RuntimeError("element-aware losses require graph salience scores")
+            if element_source_row is None:
+                raise RuntimeError("element-aware losses require explicit source-row identity")
+            source_rows = element_source_row.to(salience_scores.device).bool()
+            if self.element_focus_enabled:
+                if element_node_labels is None or element_node_loss_mask is None:
+                    raise RuntimeError("element focus loss requires node labels and masks")
+                focus_mask = element_node_loss_mask.to(salience_scores.device).bool()
+                focus_mask = focus_mask & source_rows.unsqueeze(-1)
+                focus_loss, focus_stats = balanced_element_focus_loss(
+                    salience_scores,
+                    element_node_labels.to(salience_scores.device),
+                    focus_mask,
+                )
+                loss = loss + self.element_focus_weight * focus_loss
+                self._track_component("loss_focus", focus_loss)
+                for name, value in focus_stats.items():
+                    self._track_component(name, value, reduction="sum" if name.endswith("_count") else "mean")
+            if self.element_coverage_enabled:
+                if element_spans is None or element_span_mask is None or element_triplet_count is None:
+                    raise RuntimeError("element coverage loss requires spans, masks, and triplet counts")
+                coverage_loss, coverage_stats = multi_element_coverage_loss(
+                    salience_scores,
+                    element_spans.to(salience_scores.device),
+                    element_span_mask.to(salience_scores.device),
+                    source_rows,
+                    element_triplet_count.to(salience_scores.device),
+                )
+                loss = loss + self.element_coverage_weight * coverage_loss
+                self._track_component("loss_coverage", coverage_loss)
+                for name, value in coverage_stats.items():
+                    self._track_component(name, value, reduction="sum" if name.endswith("_count") else "mean")
+            self._track_component("loss_aste", generation_loss)
         if consistency_group is not None and self.lambda_consistency_loss > 0:
             consistency_loss = grouped_representation_consistency_loss(
                 outputs.encoder_last_hidden_state,
@@ -3196,6 +3324,11 @@ def main() -> dict | None:
     parser.add_argument("--use_syntactic_graph_adapter", action="store_true")
     parser.add_argument("--syntactic_graph_cache_dir", default="")
     parser.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
+    parser.add_argument("--element_aware_attention", action="store_true")
+    parser.add_argument("--element_focus_loss", action="store_true")
+    parser.add_argument("--multi_element_coverage_loss", action="store_true")
+    parser.add_argument("--element_focus_weight", type=float, default=0.05)
+    parser.add_argument("--element_coverage_weight", type=float, default=0.05)
     parser.add_argument("--target_unlabeled_file", default="")
     parser.add_argument("--paired_domain_batches", action="store_true")
     parser.add_argument("--dann_source_batch_size", type=int, default=1)
@@ -3243,6 +3376,14 @@ def main() -> dict | None:
     args = parser.parse_args()
 
     enforce_graph_training_boundary(args.use_syntactic_graph_adapter)
+    if (args.element_focus_loss or args.multi_element_coverage_loss) and not args.element_aware_attention:
+        raise ValueError("element auxiliary losses require --element_aware_attention")
+    if args.element_aware_attention and not args.use_syntactic_graph_adapter:
+        raise ValueError("element-aware attention requires the syntactic graph adapter")
+    if args.element_aware_attention and args.lambda_domain_adv != 0:
+        raise ValueError("the approved element-aware M1 configuration requires lambda_domain_adv=0")
+    if args.element_focus_weight != 0.05 or args.element_coverage_weight != 0.05:
+        raise ValueError("element-aware M1 weights are frozen at focus=0.05 and coverage=0.05")
     if args.paired_domain_batches and (args.dann_source_batch_size != 1 or args.dann_target_batch_size != 1):
         raise ValueError("Phase A paired DANN batches require source=1 and target=1")
 
@@ -3357,6 +3498,11 @@ def main() -> dict | None:
         args.model_path,
         use_syntactic_graph_adapter=args.use_syntactic_graph_adapter,
         relation_vocab_size=graph_relation_vocab_size,
+        element_aware_enabled=args.element_aware_attention,
+        focus_enabled=args.element_focus_loss,
+        coverage_enabled=args.multi_element_coverage_loss,
+        focus_weight=args.element_focus_weight,
+        coverage_weight=args.element_coverage_weight,
     )
     # Graph-only construction is deliberately outside the shared training RNG
     # stream.  Restore the stream before common token initialization so
@@ -3447,6 +3593,11 @@ def main() -> dict | None:
             "graph_hidden_size": 256 if args.use_syntactic_graph_adapter else 0,
             "graph_attention_heads": 4 if args.use_syntactic_graph_adapter else 0,
             "graph_head_size": 64 if args.use_syntactic_graph_adapter else 0,
+            "element_aware_attention": args.element_aware_attention,
+            "element_focus_loss": args.element_focus_loss,
+            "multi_element_coverage_loss": args.multi_element_coverage_loss,
+            "element_focus_weight": args.element_focus_weight,
+            "element_coverage_weight": args.element_coverage_weight,
         },
     )
     if args.lambda_sentiment_contrastive > 0:
@@ -3487,6 +3638,7 @@ def main() -> dict | None:
         sentiment_contrastive_exclude_augment=args.sentiment_contrastive_exclude_augment,
         sentiment_contrastive_source_only=args.sentiment_contrastive_source_only,
         graph_cache=train_graph_cache,
+        element_aware_enabled=args.element_aware_attention,
     )
     print("effective generation weights:", summarize_generation_weights(train_data))
     dev_data = JsonlSeq2SeqDataset(
@@ -3540,6 +3692,10 @@ def main() -> dict | None:
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
         sentiment_contrastive_class_weights=sentiment_class_weights,
         dann_batch_sampler=dann_batch_sampler,
+        element_focus_enabled=args.element_focus_loss,
+        element_coverage_enabled=args.multi_element_coverage_loss,
+        element_focus_weight=args.element_focus_weight,
+        element_coverage_weight=args.element_coverage_weight,
         compute_metrics=(
             build_aste_compute_metrics(tokenizer)
             if args.checkpoint_selection == "aste_f1"

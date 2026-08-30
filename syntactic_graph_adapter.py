@@ -19,6 +19,9 @@ class GraphAdapterOutput:
     word_hidden: torch.Tensor
     residual: torch.Tensor
     gate: torch.Tensor
+    salience_logits: torch.Tensor | None
+    salience_scores: torch.Tensor | None
+    attention_probabilities: torch.Tensor | None
 
 
 class SyntacticGraphAdapter(nn.Module):
@@ -34,6 +37,7 @@ class SyntacticGraphAdapter(nn.Module):
         dropout: float = 0.1,
         num_dependency_relations: int | None = None,
         num_pos_pair_relations: int | None = None,
+        element_aware_enabled: bool = False,
     ):
         super().__init__()
         if graph_hidden_size != attention_heads * head_size:
@@ -43,6 +47,7 @@ class SyntacticGraphAdapter(nn.Module):
         self.attention_heads = int(attention_heads)
         self.head_size = int(head_size)
         self.num_relations = max(1, int(num_relations))
+        self.element_aware_enabled = bool(element_aware_enabled)
         self.node_projection = nn.Linear(hidden_size, graph_hidden_size)
         self.query_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
         self.key_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
@@ -57,6 +62,11 @@ class SyntacticGraphAdapter(nn.Module):
         self.graph_dropout = nn.Dropout(float(dropout))
         self.output_projection = nn.Linear(graph_hidden_size, hidden_size, bias=False)
         self.gate_projection = nn.Linear(hidden_size * 2, hidden_size)
+        self.salience_head = (
+            nn.Linear(graph_hidden_size, 1)
+            if self.element_aware_enabled
+            else None
+        )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -71,6 +81,12 @@ class SyntacticGraphAdapter(nn.Module):
         self.output_projection.reset_parameters()
         self.gate_projection.reset_parameters()
         nn.init.zeros_(self.output_projection.weight)
+        self.reset_salience_parameters()
+
+    def reset_salience_parameters(self) -> None:
+        if self.salience_head is not None:
+            nn.init.zeros_(self.salience_head.weight)
+            nn.init.zeros_(self.salience_head.bias)
 
     def _pool_word_hidden(
         self,
@@ -120,8 +136,9 @@ class SyntacticGraphAdapter(nn.Module):
         pos_pair_id: torch.Tensor,
         edge_mask: torch.Tensor,
         word_mask: torch.Tensor,
+        salience_scores: torch.Tensor | None = None,
         trace=None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, node_count, _ = projected_nodes.shape
         edge_count = edge_src.size(1)
         valid_edges = edge_mask.bool()
@@ -181,11 +198,23 @@ class SyntacticGraphAdapter(nn.Module):
             _record_trace(trace, "pos_pair_bias", pos_pair_bias, ("batch", "edge", "head"))
             logits = logits_scaled + dependency_bias + pos_pair_bias
             _record_trace(trace, "final_attention_logits", logits, ("batch", "edge", "head"))
-            softmax_input_float32 = logits.float()
-            _record_trace(trace, "softmax_input_float32_logits", softmax_input_float32, ("batch", "edge", "head"))
-            attention_probabilities = torch.zeros_like(softmax_input_float32)
             edge_messages = edge_values + relation
             _record_trace(trace, "edge_messages", edge_messages, ("batch", "edge", "head", "feature"))
+        if salience_scores is not None:
+            source_salience = self._gather_nodes(
+                salience_scores.unsqueeze(-1), safe_src
+            ).squeeze(-1)
+            salience_gate = 0.5 + 0.5 * source_salience.float()
+            salience_bias = torch.log(salience_gate).unsqueeze(-1)
+            logits = logits.float() + salience_bias
+            _record_trace(trace, "element_salience_gate", salience_gate, ("batch", "edge"))
+            _record_trace(trace, "element_salience_log_bias", salience_bias, ("batch", "edge", "head"))
+        softmax_input_float32 = logits.float()
+        _record_trace(trace, "softmax_input_float32_logits", softmax_input_float32, ("batch", "edge", "head"))
+        capture_attention = trace is not None or salience_scores is not None
+        attention_probabilities = (
+            torch.zeros_like(softmax_input_float32) if capture_attention else None
+        )
         messages = torch.zeros(
             batch_size,
             node_count,
@@ -200,14 +229,17 @@ class SyntacticGraphAdapter(nn.Module):
                 if not bool(word_mask[batch_index, node_index]) or not bool(active.any()):
                     continue
                 attention = torch.softmax(logits[batch_index, active].float(), dim=0).to(projected_nodes.dtype)
-                if trace is not None:
+                if attention_probabilities is not None:
                     attention_probabilities[batch_index, active] = attention.float()
                 message = edge_values[batch_index, active] + relation[batch_index, active]
                 messages[batch_index, node_index] = (attention.unsqueeze(-1) * message).sum(dim=0)
         if trace is not None:
             _record_trace(trace, "attention_probabilities", attention_probabilities, ("batch", "edge", "head"))
             _record_trace(trace, "aggregated_messages", messages, ("batch", "node", "head", "feature"))
-        return messages.reshape(batch_size, node_count, self.graph_hidden_size)
+        return (
+            messages.reshape(batch_size, node_count, self.graph_hidden_size),
+            attention_probabilities,
+        )
 
     def _broadcast_to_subwords(
         self,
@@ -251,7 +283,14 @@ class SyntacticGraphAdapter(nn.Module):
         _record_trace(trace, "pooled_word_hidden", word_hidden, ("batch", "node", "feature"))
         projected = self.node_projection(word_hidden)
         _record_trace(trace, "node_projection", projected, ("batch", "node", "feature"))
-        graph_hidden = self._graph_attention(
+        salience_logits = None
+        salience_scores = None
+        if self.salience_head is not None:
+            salience_logits = self.salience_head(projected).squeeze(-1)
+            salience_scores = torch.sigmoid(salience_logits)
+            _record_trace(trace, "element_salience_logits", salience_logits, ("batch", "node"))
+            _record_trace(trace, "element_salience_scores", salience_scores, ("batch", "node"))
+        graph_hidden, attention_probabilities = self._graph_attention(
             projected,
             edge_src,
             edge_dst,
@@ -260,6 +299,7 @@ class SyntacticGraphAdapter(nn.Module):
             pos_pair_id,
             edge_mask,
             word_mask,
+            salience_scores=salience_scores,
             trace=trace,
         )
         _record_trace(trace, "graph_hidden", graph_hidden, ("batch", "node", "feature"))
@@ -287,10 +327,22 @@ class SyntacticGraphAdapter(nn.Module):
             word_hidden=word_hidden,
             residual=residual,
             gate=gate,
+            salience_logits=salience_logits,
+            salience_scores=salience_scores,
+            attention_probabilities=attention_probabilities,
         )
 
 
-def graph_model_config(config, relation_vocab_size: int) -> None:
+def graph_model_config(
+    config,
+    relation_vocab_size: int,
+    *,
+    element_aware_enabled: bool = False,
+    focus_enabled: bool = False,
+    coverage_enabled: bool = False,
+    focus_weight: float = 0.05,
+    coverage_weight: float = 0.05,
+) -> None:
     config.use_syntactic_graph_adapter = True
     config.graph_layers = 1
     config.graph_hidden_size = 256
@@ -303,9 +355,17 @@ def graph_model_config(config, relation_vocab_size: int) -> None:
     config.graph_use_self_loop = True
     config.graph_external_word_embeddings = False
     config.graph_sentiment_embedding = False
+    config.element_aware_attention = {
+        "enabled": bool(element_aware_enabled),
+        "focus_enabled": bool(focus_enabled),
+        "coverage_enabled": bool(coverage_enabled),
+        "focus_weight": float(focus_weight),
+        "coverage_weight": float(coverage_weight),
+    }
 
 
 def _graph_adapter_from_config(config) -> SyntacticGraphAdapter:
+    element_config = getattr(config, "element_aware_attention", {}) or {}
     return SyntacticGraphAdapter(
         hidden_size=int(config.d_model),
         graph_hidden_size=int(getattr(config, "graph_hidden_size", 256)),
@@ -313,6 +373,7 @@ def _graph_adapter_from_config(config) -> SyntacticGraphAdapter:
         head_size=int(getattr(config, "graph_head_size", 64)),
         num_relations=int(getattr(config, "graph_relation_vocab_size", 1)),
         dropout=float(getattr(config, "dropout_rate", 0.1)),
+        element_aware_enabled=bool(element_config.get("enabled", False)),
     )
 
 
@@ -339,7 +400,7 @@ if AutoModelForSeq2SeqLM is not None:
 
         @classmethod
         def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-            """Load T5 weights while initializing only missing graph parameters."""
+            """Load core graph and optional salience parameters without silent partial resets."""
             caller_requested_loading_info = bool(kwargs.get("output_loading_info", False))
             kwargs["output_loading_info"] = True
             model, loading_info = super().from_pretrained(
@@ -347,32 +408,56 @@ if AutoModelForSeq2SeqLM is not None:
                 *model_args,
                 **kwargs,
             )
+            missing_keys = set(loading_info.get("missing_keys", []))
+            salience_parameter_names = {
+                f"syntactic_graph_adapter.salience_head.{name}"
+                for name, _ in (model.syntactic_graph_adapter.salience_head.named_parameters()
+                                if model.syntactic_graph_adapter.salience_head is not None else [])
+            }
             graph_parameter_names = {
                 f"syntactic_graph_adapter.{name}"
                 for name, _ in model.syntactic_graph_adapter.named_parameters()
             }
-            missing_graph_parameters = graph_parameter_names.intersection(
-                set(loading_info.get("missing_keys", []))
-            )
-            loaded_graph_parameters = graph_parameter_names - missing_graph_parameters
-            if missing_graph_parameters and loaded_graph_parameters:
-                missing = ", ".join(sorted(missing_graph_parameters))
+            core_graph_parameter_names = graph_parameter_names - salience_parameter_names
+            missing_core = core_graph_parameter_names.intersection(missing_keys)
+            loaded_core = core_graph_parameter_names - missing_core
+            missing_salience = salience_parameter_names.intersection(missing_keys)
+            loaded_salience = salience_parameter_names - missing_salience
+            if missing_core and loaded_core:
+                missing = ", ".join(sorted(missing_core))
                 raise RuntimeError(
                     "checkpoint contains only a partial syntactic graph adapter; "
                     f"refusing to reset or overwrite graph parameters (missing: {missing})"
                 )
-            if missing_graph_parameters:
+            if missing_salience and loaded_salience:
+                missing = ", ".join(sorted(missing_salience))
+                raise RuntimeError(
+                    "checkpoint contains only a partial element salience head; "
+                    f"refusing silent initialization (missing: {missing})"
+                )
+            if missing_core:
+                if loaded_salience:
+                    raise RuntimeError("checkpoint has salience parameters without a complete graph adapter")
                 model.syntactic_graph_adapter.reset_parameters()
                 model.graph_parameter_initialization = {
                     "initialization_mode": "base_checkpoint_missing_graph_parameters",
                     "initialized_from_base_checkpoint": True,
                     "graph_checkpoint_detected": False,
+                    "salience_initialization": "zero" if salience_parameter_names else "disabled",
                 }
             else:
+                if missing_salience:
+                    model.syntactic_graph_adapter.reset_salience_parameters()
+                    salience_initialization = "old_graph_checkpoint_missing_salience_zero_initialized"
+                elif salience_parameter_names:
+                    salience_initialization = "checkpoint_loaded"
+                else:
+                    salience_initialization = "disabled"
                 model.graph_parameter_initialization = {
                     "initialization_mode": "graph_checkpoint_loaded",
                     "initialized_from_base_checkpoint": False,
                     "graph_checkpoint_detected": True,
+                    "salience_initialization": salience_initialization,
                 }
             if caller_requested_loading_info:
                 return model, loading_info
@@ -396,6 +481,7 @@ if AutoModelForSeq2SeqLM is not None:
             pos_pair_id=None,
             edge_mask=None,
             trace=None,
+            return_adapter_output: bool = False,
         ):
             graph_fields = {
                 "word_to_subword": word_to_subword,
@@ -428,11 +514,14 @@ if AutoModelForSeq2SeqLM is not None:
                 **graph_fields,
                 trace=trace,
             )
-            return BaseModelOutput(
+            base_output = BaseModelOutput(
                 last_hidden_state=adapter_output.fused_hidden,
                 hidden_states=encoder_outputs.hidden_states,
                 attentions=encoder_outputs.attentions,
             )
+            if return_adapter_output:
+                return base_output, adapter_output
+            return base_output
 
         def forward(
             self,
@@ -463,8 +552,9 @@ if AutoModelForSeq2SeqLM is not None:
             graph_trace=None,
             **kwargs,
         ):
+            adapter_output = None
             if encoder_outputs is None:
-                encoder_outputs = self._encode_with_graph(
+                encoder_outputs, adapter_output = self._encode_with_graph(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     inputs_embeds=inputs_embeds,
@@ -477,6 +567,7 @@ if AutoModelForSeq2SeqLM is not None:
                     pos_pair_id=graph_pos_pair_id,
                     edge_mask=graph_edge_mask,
                     trace=graph_trace,
+                    return_adapter_output=True,
                 )
             outputs = super().forward(
                 input_ids=input_ids,
@@ -506,6 +597,12 @@ if AutoModelForSeq2SeqLM is not None:
                     )
                 if getattr(outputs, "loss", None) is not None:
                     _record_trace(graph_trace, "final_loss", outputs.loss, ())
+            if adapter_output is not None and return_dict is not False:
+                if adapter_output.salience_logits is not None:
+                    outputs["element_salience_logits"] = adapter_output.salience_logits
+                    outputs["element_salience_scores"] = adapter_output.salience_scores
+                if adapter_output.attention_probabilities is not None:
+                    outputs["graph_attention_probabilities"] = adapter_output.attention_probabilities
             return outputs
 
         def generate(self, inputs=None, **kwargs):
@@ -541,15 +638,32 @@ def load_seq2seq_model(
     model_path: str,
     use_syntactic_graph_adapter: bool = False,
     relation_vocab_size: int = 1,
+    element_aware_enabled: bool = False,
+    focus_enabled: bool = False,
+    coverage_enabled: bool = False,
+    focus_weight: float = 0.05,
+    coverage_weight: float = 0.05,
+    low_cpu_mem_usage: bool = False,
 ):
     if not use_syntactic_graph_adapter:
-        return AutoModelForSeq2SeqLM.from_pretrained(model_path)
+        return AutoModelForSeq2SeqLM.from_pretrained(
+            model_path, low_cpu_mem_usage=low_cpu_mem_usage
+        )
     from transformers import AutoConfig
 
     config = AutoConfig.from_pretrained(model_path, local_files_only=True)
-    graph_model_config(config, relation_vocab_size)
+    graph_model_config(
+        config,
+        relation_vocab_size,
+        element_aware_enabled=element_aware_enabled,
+        focus_enabled=focus_enabled,
+        coverage_enabled=coverage_enabled,
+        focus_weight=focus_weight,
+        coverage_weight=coverage_weight,
+    )
     return SyntacticGraphT5ForConditionalGeneration.from_pretrained(
         model_path,
         config=config,
         local_files_only=True,
+        low_cpu_mem_usage=low_cpu_mem_usage,
     )

@@ -150,6 +150,78 @@ def test_graph_checkpoint_round_trip_preserves_every_graph_parameter(tmp_path):
     assert loaded.graph_parameter_initialization["graph_checkpoint_detected"] is True
 
 
+def test_old_graph_checkpoint_upgrades_to_zero_salience_deterministically(tmp_path):
+    old_config = _tiny_t5_config()
+    graph_model_config(old_config, 8)
+    old_model = SyntacticGraphT5ForConditionalGeneration(old_config).eval()
+    checkpoint_dir = tmp_path / "old-graph-checkpoint"
+    old_model.save_pretrained(checkpoint_dir)
+
+    new_config = T5Config.from_pretrained(checkpoint_dir, local_files_only=True)
+    graph_model_config(new_config, 8, element_aware_enabled=True, focus_enabled=True, coverage_enabled=True)
+    loaded = SyntacticGraphT5ForConditionalGeneration.from_pretrained(
+        checkpoint_dir,
+        config=new_config,
+        local_files_only=True,
+    )
+
+    assert torch.count_nonzero(loaded.syntactic_graph_adapter.salience_head.weight) == 0
+    assert torch.count_nonzero(loaded.syntactic_graph_adapter.salience_head.bias) == 0
+    assert loaded.graph_parameter_initialization["salience_initialization"] == (
+        "old_graph_checkpoint_missing_salience_zero_initialized"
+    )
+
+
+def test_new_element_aware_checkpoint_round_trip_preserves_salience(tmp_path):
+    config = _tiny_t5_config()
+    graph_model_config(config, 8, element_aware_enabled=True, focus_enabled=True, coverage_enabled=True)
+    source = SyntacticGraphT5ForConditionalGeneration(config).eval()
+    with torch.no_grad():
+        source.syntactic_graph_adapter.salience_head.weight.fill_(0.125)
+        source.syntactic_graph_adapter.salience_head.bias.fill_(-0.25)
+    checkpoint_dir = tmp_path / "new-element-aware-checkpoint"
+    source.save_pretrained(checkpoint_dir)
+
+    loaded = SyntacticGraphT5ForConditionalGeneration.from_pretrained(
+        checkpoint_dir,
+        local_files_only=True,
+    )
+
+    assert torch.equal(
+        loaded.syntactic_graph_adapter.salience_head.weight,
+        source.syntactic_graph_adapter.salience_head.weight,
+    )
+    assert torch.equal(
+        loaded.syntactic_graph_adapter.salience_head.bias,
+        source.syntactic_graph_adapter.salience_head.bias,
+    )
+    assert loaded.graph_parameter_initialization["salience_initialization"] == "checkpoint_loaded"
+
+
+def test_partial_salience_checkpoint_is_rejected(tmp_path):
+    config = _tiny_t5_config()
+    graph_model_config(config, 8, element_aware_enabled=True, focus_enabled=True, coverage_enabled=True)
+    source = SyntacticGraphT5ForConditionalGeneration(config).eval()
+    checkpoint_dir = tmp_path / "partial-salience-checkpoint"
+    source.save_pretrained(checkpoint_dir, safe_serialization=False)
+    weights_path = checkpoint_dir / "pytorch_model.bin"
+    state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    removed_name = "syntactic_graph_adapter.salience_head.bias"
+    del state[removed_name]
+    torch.save(state, weights_path)
+
+    try:
+        SyntacticGraphT5ForConditionalGeneration.from_pretrained(
+            checkpoint_dir,
+            local_files_only=True,
+        )
+    except RuntimeError as exc:
+        assert "partial element salience head" in str(exc)
+        assert removed_name in str(exc)
+    else:
+        raise AssertionError("partial salience checkpoints must be rejected")
+
+
 def test_partial_graph_checkpoint_is_rejected_without_resetting_graph_parameters(tmp_path):
     config = _tiny_t5_config()
     graph_model_config(config, 8)

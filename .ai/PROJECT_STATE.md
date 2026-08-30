@@ -1,6 +1,13 @@
 # CD-C3DA 项目状态
 
-> 更新时间：2026-08-29 18:57（北京时间）
+> 更新时间：2026-08-30 16:10（北京时间）
+
+## 当前有效状态：元素感知多三元组 RGAT 工程入口
+
+- 当前任务：`M1_ELEMENT_AWARE_MULTI_TRIPLET_RGAT_IMPLEMENTATION_V1`；只实现 Element Salience Gate（元素显著性门控）与 Multi-Element Coverage Loss（多元素覆盖损失），不改变原 T5/依存-POS图/4头RGAT/门控融合。
+- DANN（领域对抗网络）固定为0；focus/coverage（聚焦/覆盖）权重固定为0.05；默认开关关闭；只使用source-train gold（源域训练金标）做辅助监督。
+- 代码和CPU（中央处理器）回归已通过；source-train元素对齐率97.05%，未匹配0，歧义86。
+- 当前唯一阻塞是服务器GPU（图形处理器）不可用，尚未完成FP32/FP16（单精度/半精度）、零更新和梯度入口门控。正式训练、Phase B（阶段B）和目标测试均未批准。
 
 ## 当前 V8 Phase A 运行状态
 
