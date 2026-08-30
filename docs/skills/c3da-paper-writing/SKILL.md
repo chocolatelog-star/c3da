@@ -1,9 +1,17 @@
 ---
 name: c3da-paper-writing
 description: Use when drafting, revising, auditing, or preparing manuscript content for the CD-C3DA cross-domain ASTE project, including ACL, EMNLP, NAACL, EACL, ARR papers, rebuttals, tables, figures, claims, citations, and submission materials.
+metadata:
+  updated: "2026-08-30 23:17（北京时间）"
 ---
 
 # C3DA Paper Writing
+
+## 当前投稿目标
+
+当前投稿场所为ICASSP 2027，常规会议论文4页英文技术正文，可选第5页仅放参考文献、资助和伦理声明；全文提交截止日期为2026年9月16日。目标是在截止前完成最终方法、正式实验、必要多随机种子、消融、基线对比、图表、引文核验、IEEE模板检查、PDF兼容检查和正式提交，而不是只交初稿。
+
+项目内部时间边界：9月8日前冻结方法，9月12日前冻结数字，9月15日前完成提交演练。最新倒排计划以`03_CD-C3DA下一阶段改进计划_CN.md`为准；官方格式和政策仍须在提交前从ICASSP 2027官网再次核验。
 
 ## Purpose
 

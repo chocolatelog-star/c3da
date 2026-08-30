@@ -1,4 +1,8 @@
-# Pending Evidence
+# CD-C3DA 待补论文证据
+
+> 更新时间：2026-08-30 23:17（北京时间）
+
+投稿目标：ICASSP 2027常规4+1页论文，2026年9月16日截止。本文只登记尚未完成的证据，不推断缺失结果。
 
 This file records evidence the manuscript still needs.
 
