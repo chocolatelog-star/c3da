@@ -18,7 +18,12 @@ def main():
     p.add_argument("--cuda", default="0")
     p.add_argument("--train_batch_size", type=int, default=1)
     p.add_argument("--gradient_accumulation_steps", type=int, default=16)
+    g=p.add_mutually_exclusive_group()
+    g.add_argument("--focus_only", action="store_true")
+    g.add_argument("--coverage_only", action="store_true")
     a=p.parse_args()
+    focus_enabled = not a.coverage_only
+    coverage_enabled = not a.focus_only
     root=Path(a.output_dir); root.mkdir(parents=True, exist_ok=True)
     project_root=Path(__file__).resolve().parent
     data_root=project_root / "data" / "aste" / "cross_domain"
@@ -43,8 +48,8 @@ def main():
       "--fp16","--gradient_checkpointing","--cuda",a.cuda,"--seed","1000","--legacy_stochastic",
       "--use_syntactic_graph_adapter","--syntactic_graph_cache_dir",a.graph_cache_dir,
       "--syntactic_graph_parser_dir",a.parser_dir,"--element_aware_attention",
-      "--element_focus_loss","--multi_element_coverage_loss","--element_focus_weight","0.05",
-      "--element_coverage_weight","0.05","--target_unlabeled_file",str(root/"target_unlabeled.jsonl"),"--initialization_audit_path",str(root/"phase_a_initialization_audit.json")
+      "--element_focus_loss" if focus_enabled else  "--multi_element_coverage_loss" if coverage_enabled else "", "--element_focus_weight","0.05" if focus_enabled else "0",
+      "--element_coverage_weight","0.05" if coverage_enabled else "0","--target_unlabeled_file",str(root/"target_unlabeled.jsonl"),"--initialization_audit_path",str(root/"phase_a_initialization_audit.json")
     ]
     train_mod._PHASE_A_GRAPH_TRAINING_AUTHORIZED=True
     train_mod._PHASE_A_LIFECYCLE_CLEANUP_REQUESTED=True
