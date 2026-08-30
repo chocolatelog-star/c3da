@@ -361,11 +361,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     py = sys.executable
     common_train = [
         "--per_device_train_batch_size",
-        "1",
+        str(args.train_batch_size),
         "--per_device_eval_batch_size",
-        "2",
+        str(args.eval_batch_size),
         "--gradient_accumulation_steps",
-        "16",
+        str(args.gradient_accumulation_steps),
         "--learning_rate",
         str(args.learning_rate),
         "--fp16",
@@ -1562,6 +1562,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source_count4plus_weight", type=positive_finite_float, default=1.30)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--eval_batch_size", type=int, default=2)
+    parser.add_argument("--train_batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--seed", type=int, default=1000)
     reproducibility_group = parser.add_mutually_exclusive_group()
