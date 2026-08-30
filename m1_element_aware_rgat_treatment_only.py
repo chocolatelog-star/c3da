@@ -16,6 +16,8 @@ def main():
     p.add_argument("--graph_cache_dir", required=True)
     p.add_argument("--parser_dir", required=True)
     p.add_argument("--cuda", default="0")
+    p.add_argument("--train_batch_size", type=int, default=1)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=16)
     a=p.parse_args()
     root=Path(a.output_dir); root.mkdir(parents=True, exist_ok=True)
     project_root=Path(__file__).resolve().parent
@@ -32,8 +34,8 @@ def main():
       "--augment_weight","0.2","--lambda_structure_loss","0","--lambda_consistency_loss","0",
       "--lambda_pairing_loss","0","--multi_triplet_loss_gain","0","--neutral_loss_gain","0",
       "--checkpoint_selection","last","--resume_from_checkpoint","none",
-      "--per_device_train_batch_size","1","--per_device_eval_batch_size","2",
-      "--max_source_length","128","--max_target_length","96","--gradient_accumulation_steps","16",
+      "--per_device_train_batch_size",str(a.train_batch_size),"--per_device_eval_batch_size","2",
+      "--max_source_length","128","--max_target_length","96","--gradient_accumulation_steps",str(a.gradient_accumulation_steps),
       "--learning_rate","0.0003","--lambda_domain_adv","0","--domain_adv_grl_lambda","1.0",
       "--domain_adv_hidden_size","256","--pairing_temperature","0.1","--max_effective_weight","1.0",
       "--neutral_generation_loss_gain","0","--neutral_generation_max_effective_weight","0",
