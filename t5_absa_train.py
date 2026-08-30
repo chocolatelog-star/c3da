@@ -3276,6 +3276,30 @@ def enforce_graph_training_boundary(use_syntactic_graph_adapter: bool) -> None:
         )
 
 
+def validate_element_aware_training_configuration(
+    *,
+    element_aware_attention: bool,
+    use_syntactic_graph_adapter: bool,
+    focus_enabled: bool,
+    coverage_enabled: bool,
+    focus_weight: float,
+    coverage_weight: float,
+    lambda_domain_adv: float,
+) -> None:
+    if (focus_enabled or coverage_enabled) and not element_aware_attention:
+        raise ValueError("element auxiliary losses require --element_aware_attention")
+    if element_aware_attention and not use_syntactic_graph_adapter:
+        raise ValueError("element-aware attention requires the syntactic graph adapter")
+    if element_aware_attention and lambda_domain_adv != 0.0:
+        raise ValueError("the approved element-aware M1 configuration requires lambda_domain_adv=0")
+    if not element_aware_attention:
+        return
+    expected_focus_weight = 0.05 if focus_enabled else 0.0
+    expected_coverage_weight = 0.05 if coverage_enabled else 0.0
+    if focus_weight != expected_focus_weight or coverage_weight != expected_coverage_weight:
+        raise ValueError("element-aware weights must match enabled losses")
+
+
 def run_phase_a_training(argv: list[str]) -> dict | None:
     """Run the existing trainer through a narrow in-process Phase A entry.
 
@@ -3376,14 +3400,15 @@ def main() -> dict | None:
     args = parser.parse_args()
 
     enforce_graph_training_boundary(args.use_syntactic_graph_adapter)
-    if (args.element_focus_loss or args.multi_element_coverage_loss) and not args.element_aware_attention:
-        raise ValueError("element auxiliary losses require --element_aware_attention")
-    if args.element_aware_attention and not args.use_syntactic_graph_adapter:
-        raise ValueError("element-aware attention requires the syntactic graph adapter")
-    if args.element_aware_attention and args.lambda_domain_adv != 0:
-        raise ValueError("the approved element-aware M1 configuration requires lambda_domain_adv=0")
-    if args.element_focus_weight != 0.05 or args.element_coverage_weight != 0.05:
-        raise ValueError("element-aware M1 weights are frozen at focus=0.05 and coverage=0.05")
+    validate_element_aware_training_configuration(
+        element_aware_attention=args.element_aware_attention,
+        use_syntactic_graph_adapter=args.use_syntactic_graph_adapter,
+        focus_enabled=args.element_focus_loss,
+        coverage_enabled=args.multi_element_coverage_loss,
+        focus_weight=args.element_focus_weight,
+        coverage_weight=args.element_coverage_weight,
+        lambda_domain_adv=args.lambda_domain_adv,
+    )
     if args.paired_domain_batches and (args.dann_source_batch_size != 1 or args.dann_target_batch_size != 1):
         raise ValueError("Phase A paired DANN batches require source=1 and target=1")
 
