@@ -12,13 +12,13 @@
   },
   "external_inputs": {
     "source_train": {
-      "path": "data/aste/cross_domain\\laptop14\\train.txt"
+      "path": "data/aste/cross_domain/laptop14/train.txt"
     },
     "source_dev": {
-      "path": "data/aste/cross_domain\\laptop14\\dev.txt"
+      "path": "data/aste/cross_domain/laptop14/dev.txt"
     },
     "target_unlabeled": {
-      "path": "data/aste/cross_domain\\rest15\\train.txt"
+      "path": "data/aste/cross_domain/rest15/train.txt"
     },
     "target_test_access": false
   },
