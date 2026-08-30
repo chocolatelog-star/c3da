@@ -1,5 +1,13 @@
+from argparse import Namespace
+from pathlib import Path
+
 import pytest
 
+from m1_element_aware_rgat_treatment_only import (
+    build_train_args,
+    resolve_variant,
+    validate_frozen_training_recipe,
+)
 from t5_absa_train import validate_element_aware_training_configuration
 
 
@@ -74,3 +82,74 @@ def test_legacy_non_element_aware_configuration_is_unchanged():
         coverage_weight=0.05,
         lambda_domain_adv=0.03,
     )
+
+
+def _runner_args(**overrides):
+    values = {
+        "model_path": "models/t5-base-py",
+        "graph_cache_dir": "graph_cache/graph_cache_resume",
+        "parser_dir": "models/stanza_resources",
+        "cuda": "0",
+        "train_batch_size": 1,
+        "gradient_accumulation_steps": 16,
+        "focus_only": False,
+        "coverage_only": False,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+def _assert_frozen_train_args(command):
+    assert command[command.index("--per_device_train_batch_size") + 1] == "1"
+    assert command[command.index("--gradient_accumulation_steps") + 1] == "16"
+    assert command[command.index("--per_device_eval_batch_size") + 1] == "2"
+    assert command[command.index("--resume_from_checkpoint") + 1] == "auto"
+    assert command[command.index("--lambda_domain_adv") + 1] == "0"
+    assert "" not in command
+
+
+def test_focus_only_train_args_are_exact_v9e_component_ablation():
+    args = _runner_args(focus_only=True)
+    variant = resolve_variant(args)
+    command, config = build_train_args(args, Path("run"), variant)
+    _assert_frozen_train_args(command)
+    assert "--element_focus_loss" in command
+    assert "--multi_element_coverage_loss" not in command
+    assert command[command.index("--element_focus_weight") + 1] == "0.05"
+    assert command[command.index("--element_coverage_weight") + 1] == "0"
+    assert config["variant"] == "focus_only"
+    assert config["effective_batch_size"] == 16
+
+
+def test_coverage_only_train_args_are_exact_v9e_component_ablation():
+    args = _runner_args(coverage_only=True)
+    variant = resolve_variant(args)
+    command, config = build_train_args(args, Path("run"), variant)
+    _assert_frozen_train_args(command)
+    assert "--element_focus_loss" not in command
+    assert "--multi_element_coverage_loss" in command
+    assert command[command.index("--element_focus_weight") + 1] == "0"
+    assert command[command.index("--element_coverage_weight") + 1] == "0.05"
+    assert config["variant"] == "coverage_only"
+
+
+def test_focus_plus_coverage_train_args_enable_both_losses():
+    args = _runner_args()
+    variant = resolve_variant(args)
+    command, config = build_train_args(args, Path("run"), variant)
+    _assert_frozen_train_args(command)
+    assert "--element_focus_loss" in command
+    assert "--multi_element_coverage_loss" in command
+    assert config["variant"] == "focus_plus_coverage"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"train_batch_size": 16}, "train_batch_size=1"),
+        ({"gradient_accumulation_steps": 1}, "gradient_accumulation_steps=16"),
+    ],
+)
+def test_formal_component_ablation_rejects_non_v9e_batch_recipe(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        validate_frozen_training_recipe(_runner_args(**overrides))
