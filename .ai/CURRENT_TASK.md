@@ -1,6 +1,6 @@
 # 当前任务
 
-> 更新时间：2026-08-30 16:10（北京时间）
+> 更新时间：2026-08-30 16:45（北京时间）
 
 - 任务编号：`M1_ELEMENT_AWARE_MULTI_TRIPLET_RGAT_IMPLEMENTATION_V1`
 - 类型：`IMPLEMENTATION + ENGINEERING ENTRY AUDIT`（实现与工程入口审计）
@@ -15,6 +15,7 @@
 - 已加入单一标量 Element Salience Head（元素显著性头）、消息源显著性注意力偏置、balanced focus loss（平衡元素聚焦损失）和multi coverage loss（多元素覆盖损失）。
 - DANN（领域对抗网络）固定为0，辅助损失权重固定为0.05，默认关闭，只使用source-train gold（源域训练金标）。
 - CPU（中央处理器）测试9+28+35项通过；source-train 906行元素对齐率97.05%，未匹配0、歧义86。
+- 已修复 `low_cpu_mem_usage`（低中央处理器内存加载）下基础T5检查点被误判为部分图检查点的问题；部分图/显著性检查点仍硬拒绝。
 
 ## 当前阻塞与下一动作
 

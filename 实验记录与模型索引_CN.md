@@ -8,6 +8,8 @@
 
 服务器当前无可见GPU（图形处理器），因此FP32/FP16（单精度/半精度）、零更新和梯度入口审计未执行，状态为`BLOCKED_GPU_UNAVAILABLE`。本条不产生模型F1，不改变正式最佳54.01；正式快速消融、Phase B（阶段B）和目标测试均未启动。
 
+GPU恢复后的首次入口运行在加载基础T5时停止：低内存加载的缺失键报告漏报图偏置，导致基础T5被误判为部分图检查点。修复后以检查点原始配置身份识别基础T5/旧图/新图，部分检查点仍硬拒绝；38项相关CPU（中央处理器）测试和35项入口回归通过。该次运行未进入数值审计、训练或参数更新。
+
 ## 2026-08-29：M1 Phase A V8 训练完成、评估身份接口阻塞（可恢复）
 
 V8 运行目录为 `runs/reproducible/laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v8/laptop14-rest15-m1-syntactic-rgat-pseudo-phase-a-seed1000-v8`，原运行代码身份为 `33a7e3d3fa9846de2ddac52484365b4bf3c649c4`。本次以 `reuse_depth=1` 复用 V6 Control（对照组），Treatment（实验组）1400/1400训练已经完成；Control source-dev（源域开发集）raw/fixed F1为57.84/59.06。
