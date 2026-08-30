@@ -905,9 +905,12 @@ def validate_initialization_pair(
         raise RuntimeError("Control/Treatment shared T5 parameter names differ")
     if control_groups["shared_t5"]["sha256"] != treatment_groups["shared_t5"]["sha256"]:
         raise RuntimeError("Control/Treatment shared T5 parameters differ before training")
-    if control_groups["domain_adversarial_head"]["parameter_names"] != treatment_groups["domain_adversarial_head"]["parameter_names"]:
+    control_dann_names = control_groups["domain_adversarial_head"]["parameter_names"]
+    treatment_dann_names = treatment_groups["domain_adversarial_head"]["parameter_names"]
+    if treatment_dann_names and control_dann_names != treatment_dann_names:
         raise RuntimeError("Control/Treatment DANN head parameter names differ")
-    if control_groups["domain_adversarial_head"]["sha256"] != treatment_groups["domain_adversarial_head"]["sha256"]:
+        raise RuntimeError("Control/Treatment DANN head parameter names differ")
+    if treatment_dann_names and control_groups["domain_adversarial_head"]["sha256"] != treatment_groups["domain_adversarial_head"]["sha256"]:
         raise RuntimeError("Control/Treatment DANN head parameters differ before training")
     if control_groups["syntactic_graph_adapter"]["parameter_names"]:
         raise RuntimeError("Control unexpectedly contains syntactic graph parameters")
