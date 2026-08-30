@@ -458,7 +458,10 @@ if AutoModelForSeq2SeqLM is not None:
             if missing_core:
                 if loaded_salience:
                     raise RuntimeError("checkpoint has salience parameters without a complete graph adapter")
-                model.syntactic_graph_adapter.reset_parameters()
+                if any(parameter.is_meta for parameter in model.syntactic_graph_adapter.parameters()):
+                    model.syntactic_graph_adapter = _graph_adapter_from_config(model.config)
+                else:
+                    model.syntactic_graph_adapter.reset_parameters()
                 model.graph_parameter_initialization = {
                     "initialization_mode": "base_checkpoint_missing_graph_parameters",
                     "initialized_from_base_checkpoint": True,
@@ -467,6 +470,13 @@ if AutoModelForSeq2SeqLM is not None:
                 }
             else:
                 if missing_salience:
+                    salience_head = model.syntactic_graph_adapter.salience_head
+                    if salience_head is not None and any(
+                        parameter.is_meta for parameter in salience_head.parameters()
+                    ):
+                        model.syntactic_graph_adapter.salience_head = nn.Linear(
+                            model.syntactic_graph_adapter.graph_hidden_size, 1
+                        )
                     model.syntactic_graph_adapter.reset_salience_parameters()
                     salience_initialization = "old_graph_checkpoint_missing_salience_zero_initialized"
                 elif salience_parameter_names:

@@ -137,6 +137,8 @@ def test_base_checkpoint_low_cpu_memory_loading_is_not_misclassified_as_partial(
     assert loaded.graph_parameter_initialization["initialized_from_base_checkpoint"] is True
     assert loaded.graph_parameter_initialization["graph_checkpoint_detected"] is False
     assert loaded.graph_parameter_initialization["salience_initialization"] == "zero"
+    assert all(not parameter.is_meta for parameter in loaded.parameters())
+    loaded.to(torch.device("cpu"))
 
 
 def test_base_checkpoint_loading_uses_seed_for_nonzero_graph_parameters(tmp_path):
