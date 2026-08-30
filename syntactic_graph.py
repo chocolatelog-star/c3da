@@ -731,6 +731,16 @@ def load_graph_cache_rows(
     return rows
 
 
+def _parser_identity_matches(observed: dict | None, expected: dict | None) -> bool:
+    if observed is None or expected is None:
+        return observed == expected
+    observed_norm = dict(observed)
+    expected_norm = dict(expected)
+    observed_norm.pop("resource_dir", None)
+    expected_norm.pop("resource_dir", None)
+    return observed_norm == expected_norm
+
+
 def load_graph_cache_directory(
     cache_dir: str | Path,
     split: str,
@@ -760,7 +770,7 @@ def load_graph_cache_directory(
         raise GraphCacheError(f"target_test graph cache is forbidden: {split}")
     if tokenizer_identity is not None and manifest.get("tokenizer_identity") != tokenizer_identity:
         raise GraphCacheError(f"tokenizer identity mismatch in cache manifest: split={split}")
-    if parser_identity is not None and manifest.get("parser_identity") != parser_identity:
+    if parser_identity is not None and not _parser_identity_matches(manifest.get("parser_identity"), parser_identity):
         raise GraphCacheError(f"parser identity mismatch in cache manifest: split={split}")
     use_task_prefix = bool(manifest.get("use_task_prefix", True))
     expected_input_sha256 = _split_input_identity(expected_rows, use_task_prefix)
@@ -772,7 +782,7 @@ def load_graph_cache_directory(
     for record in rows:
         if tokenizer_identity is not None and record.get("tokenizer_identity") != tokenizer_identity:
             raise GraphCacheError(f"tokenizer identity mismatch: split={split} row_id={record['row_id']}")
-        if parser_identity is not None and record.get("parser_identity") != parser_identity:
+        if parser_identity is not None and not _parser_identity_matches(record.get("parser_identity"), parser_identity):
             raise GraphCacheError(f"parser identity mismatch: split={split} row_id={record['row_id']}")
         if record.get("alignment_policy_version") != ALIGNMENT_POLICY_VERSION:
             raise GraphCacheError(f"alignment policy mismatch: split={split} row_id={record['row_id']}")
