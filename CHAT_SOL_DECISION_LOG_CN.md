@@ -130,3 +130,9 @@
 - 新对话入口固定为：AGENTS.md → .ai/PROJECT_STATE.md → .ai/CURRENT_TASK.md → .ai/DECISION_LOG.md → 项目 Skill；实验索引、03 和 07 按任务需要读取，00 和 02 不作为日常入口。
 - Chat Sol 不能直接读取 J 盘，只能读取已推送 GitHub 的文件或用户上传文件；本地未推送状态由 Codex 使用 RUN / CODE / CHANGE / REUSE / RESULT / BOUNDARY 精简格式传递。
 - Skill 和 07 不重复维护完整角色列表，角色、升级和通信规则统一以 AGENTS.md 为准；Skill 保留实验协议，07 保留研究事实和同步边界。
+
+## 2026-08-30 服务器元素感知快速诊断结果
+
+- `laptop14 -> rest15` 的 Element-aware Treatment（元素感知实验组，RGAT + Element Salience + Coverage Loss，DANN=0）batch=1/4/8/16均完成；未访问target test（目标测试金标），未启动Phase B（阶段B）。
+- batch=16最稳定：strict F1（严格F1）56.58%、multi recall（多三元组召回率）48.11%、overall absence（整体缺失率）69.77%、qualified total/multi（合格伪标签总量/多三元组）552/209。
+- 相对Plain Control（原始无图T5）仍未同时达到正式A1/A2门槛，仅记录为QUICK_DIAGNOSTIC（快速诊断），不进入Graph Freeze（图模块冻结）。服务器已删除旧b100运行和非代表模型副本，仅保留关键指标、日志、分析与batch=16 best模型。

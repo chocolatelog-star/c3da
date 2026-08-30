@@ -169,3 +169,5 @@ V2六模块已全部完成入口审计并输出`NO_TRAINING_ROUTE`。M1冻结为
 ## 6. 账号交接入口（仅换账号时更新）
 
 当前接手已完成，本节不参与日常维护。只有用户明确要求更换账号时，才全面刷新 `00/01/02/03/06/07`、项目 Skill、Git 状态、分支、运行目录和完整复现命令，形成新的接手快照。
+
+| 2026-08-30 | M1元素感知RGAT四组batch快速诊断 | laptop14_to_rest15_element_aware_b1/b4/b8/b16 | QUICK_DIAGNOSTIC（快速诊断） | batch=16：strict F1 56.58%、multi recall 48.11%、overall absence 69.77%、qualified total/multi 552/209；未访问target test，未启动Phase B。 |

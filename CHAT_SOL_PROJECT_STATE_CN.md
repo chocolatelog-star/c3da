@@ -169,3 +169,9 @@ laptop14 -> rest15 的正式基线为 raw P/R/F1（精确率/召回率/F1）= 56
 ## 协作入口
 
 先读取仓库事实，但不得自行猜测关键需求。普通实现由 Codex Luna（默认执行器）处理；复杂工程问题升级 Codex Sol（高级工程模型）；大量 JSON、CSV、日志和多运行分析交给 Work Luna（重文件分析模型）；新的研究决策交给 Chat Sol，并由用户最终批准。
+
+## 2026-08-30 服务器元素感知快速诊断结果
+
+- `laptop14 -> rest15` 的 Element-aware Treatment（元素感知实验组，RGAT + Element Salience + Coverage Loss，DANN=0）batch=1/4/8/16均完成；未访问target test（目标测试金标），未启动Phase B（阶段B）。
+- batch=16最稳定：strict F1（严格F1）56.58%、multi recall（多三元组召回率）48.11%、overall absence（整体缺失率）69.77%、qualified total/multi（合格伪标签总量/多三元组）552/209。
+- 相对Plain Control（原始无图T5）仍未同时达到正式A1/A2门槛，仅记录为QUICK_DIAGNOSTIC（快速诊断），不进入Graph Freeze（图模块冻结）。服务器已删除旧b100运行和非代表模型副本，仅保留关键指标、日志、分析与batch=16 best模型。
