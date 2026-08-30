@@ -44,7 +44,7 @@ from syntactic_graph import (
 from syntactic_graph_adapter import load_seq2seq_model
 
 
-DATA_ROOT = Path(r"J:\nlp\BGCA-master\data\aste\cross_domain")
+DATA_ROOT = Path("data/aste/cross_domain")
 DATASETS = {
     "rest14": DATA_ROOT / "rest14",
     "rest15": DATA_ROOT / "rest15",
