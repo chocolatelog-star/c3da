@@ -1975,7 +1975,7 @@ def _stage_spec(
             "model_path": model_path,
             "output_artifacts": {
                 "extractor_best": model_path,
-                "dann_batch_audit": audit_path,
+                **({"dann_batch_audit": audit_path} if args.recipe_data["training"]["lambda_domain_adv"] != 0 else {}),
                 "phase_a_initialization_audit": initialization_path,
                 "phase_a_lifecycle_audit": treatment_dir / "phase_a_lifecycle_audit.json",
                 "worker_result": treatment_dir / "worker_result.json",
