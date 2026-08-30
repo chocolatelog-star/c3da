@@ -1107,6 +1107,7 @@ def _run_training(
         result_path=result_path,
         expected_variant=variant,
         require_complete_result=True,
+        allow_missing_dann_audit=(args.recipe_data["training"]["lambda_domain_adv"] == 0),
     )
 
 
@@ -1354,6 +1355,7 @@ def run_isolated_phase_a_worker(
     result_path: Path,
     expected_variant: str,
     require_complete_result: bool = False,
+    allow_missing_dann_audit: bool = False,
 ) -> dict:
     """Run and validate a Phase A worker in an operating-system process."""
     parent_pid = os.getpid()
@@ -1393,7 +1395,7 @@ def run_isolated_phase_a_worker(
             ("initialization_audit_path", "initialization_audit_sha256"),
         ):
             path_value = result.get(path_field)
-            if path_field == "dann_batch_audit_path" and args.recipe_data["training"]["lambda_domain_adv"] == 0:
+            if path_field == "dann_batch_audit_path" and allow_missing_dann_audit:
                 continue
             if not path_value or not Path(path_value).exists():
                 raise RuntimeError(f"Phase A {expected_variant} worker artifact is missing: {path_field}")
