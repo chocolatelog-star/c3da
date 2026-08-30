@@ -1,3 +1,4 @@
+import json
 from argparse import Namespace
 from pathlib import Path
 
@@ -5,6 +6,8 @@ import pytest
 
 from m1_element_aware_rgat_treatment_only import (
     build_train_args,
+    build_result_record,
+    ensure_run_identity,
     resolve_variant,
     validate_frozen_training_recipe,
 )
@@ -153,3 +156,42 @@ def test_focus_plus_coverage_train_args_enable_both_losses():
 def test_formal_component_ablation_rejects_non_v9e_batch_recipe(overrides, message):
     with pytest.raises(ValueError, match=message):
         validate_frozen_training_recipe(_runner_args(**overrides))
+
+
+def test_run_identity_allows_exact_resume_and_rejects_variant_change(tmp_path):
+    path = tmp_path / "component_ablation_identity.json"
+    identity = {
+        "task_id": "M1_ELEMENT_AWARE_COMPONENT_ATTRIBUTION_V1",
+        "variant": "focus_only",
+        "training": {
+            "train_batch_size": 1,
+            "gradient_accumulation_steps": 16,
+            "effective_batch_size": 16,
+            "eval_batch_size": 2,
+            "dann": 0.0,
+        },
+        "git_commit": "abc",
+    }
+    ensure_run_identity(path, identity)
+    ensure_run_identity(path, identity)
+    changed = dict(identity, variant="coverage_only")
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        ensure_run_identity(path, changed)
+    assert json.loads(path.read_text(encoding="utf-8")) == identity
+
+
+def test_result_record_preserves_phase_a_data_boundary():
+    variant = resolve_variant(_runner_args(focus_only=True))
+    result = build_result_record(
+        root=Path("run"),
+        model=Path("run/models/extractor/best"),
+        variant=variant,
+        frozen_config={"variant": "focus_only"},
+        identity_sha256="ABC",
+    )
+    assert result["task"] == "M1_ELEMENT_AWARE_COMPONENT_ATTRIBUTION_V1"
+    assert result["variant"] == "focus_only"
+    assert result["target_test_accessed"] is False
+    assert result["target_test_gold"] is False
+    assert result["augmentation_started"] is False
+    assert result["phase_b_started"] is False

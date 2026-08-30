@@ -1,7 +1,15 @@
 from __future__ import annotations
-import argparse, json, subprocess, sys
+import argparse, hashlib, json, subprocess, sys
 from pathlib import Path
-from m1_syntactic_rgat_pseudo_quick_ablation import _build_input_rows, _serialize_rows
+from m1_syntactic_rgat_pseudo_quick_ablation import (
+    _build_input_rows,
+    _git_identity,
+    _model_hashes,
+    _serialize_rows,
+    validate_phase_a_graph_cache,
+)
+from reproducibility import sha256_file, write_json_atomic
+from syntactic_graph import build_parser_identity
 from t5_aste_data import parse_triplet_text_list, micro_f1, read_jsonl
 import t5_absa_train as train_mod
 
@@ -151,6 +159,123 @@ def build_train_args(
     return train_args, config
 
 
+def ensure_run_identity(path: Path, identity: dict) -> None:
+    path = Path(path)
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read component ablation identity: {path}") from exc
+        if existing != identity:
+            raise RuntimeError(f"component ablation identity mismatch: {path}")
+        return
+    write_json_atomic(path, identity)
+
+
+def _resolve_project_path(project_root: Path, value: str | Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
+def build_run_identity(
+    *,
+    args: argparse.Namespace,
+    root: Path,
+    project_root: Path,
+    variant: dict,
+    frozen_config: dict,
+    train_args: list[str],
+    input_rows: dict[str, list[dict]],
+    external_inputs: dict,
+) -> dict:
+    git_identity = _git_identity(project_root)
+    if not git_identity["worktree_clean"]:
+        raise RuntimeError(
+            "formal component ablation requires a clean Git worktree: "
+            + git_identity["status_porcelain"]
+        )
+    model_path = _resolve_project_path(project_root, args.model_path)
+    parser_path = _resolve_project_path(project_root, args.parser_dir)
+    graph_cache_path = _resolve_project_path(project_root, args.graph_cache_dir)
+    parser_identity = build_parser_identity(parser_path)
+    graph_cache_identity = validate_phase_a_graph_cache(
+        graph_cache_path,
+        input_rows,
+        parser_identity,
+    )
+    input_hashes = {
+        name: {
+            "path": str((root / f"{name}.jsonl").resolve()),
+            "sha256": sha256_file(root / f"{name}.jsonl"),
+            "rows": len(input_rows[name]),
+        }
+        for name in ("source_train", "source_dev", "target_unlabeled")
+    }
+    raw_input_hashes = {
+        name: {
+            "path": str(Path(item["path"]).resolve()),
+            "sha256": sha256_file(Path(item["path"])),
+        }
+        for name, item in external_inputs.items()
+    }
+    config_payload = json.dumps(
+        {"training": frozen_config, "train_argv": train_args},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "schema_version": 1,
+        "task_id": TASK_ID,
+        "variant": variant["name"],
+        "source_dataset": "laptop14",
+        "target_dataset": "rest15",
+        "seed": 1000,
+        "training": frozen_config,
+        "train_argv": train_args,
+        "config_sha256": hashlib.sha256(config_payload).hexdigest().upper(),
+        "input_hashes": input_hashes,
+        "raw_external_input_hashes": raw_input_hashes,
+        "model_path": str(model_path),
+        "model_hashes": _model_hashes(model_path),
+        "parser_identity": parser_identity,
+        "graph_cache_identity": graph_cache_identity,
+        "git_commit": git_identity["commit"],
+        "git_branch": git_identity["branch"],
+        "target_test_accessed": False,
+        "target_test_gold": False,
+        "augmentation_started": False,
+        "phase_b_started": False,
+    }
+
+
+def build_result_record(
+    *,
+    root: Path,
+    model: Path,
+    variant: dict,
+    frozen_config: dict,
+    identity_sha256: str,
+) -> dict:
+    return {
+        "task": TASK_ID,
+        "phase": "A",
+        "treatment_only": True,
+        "variant": variant["name"],
+        "training": frozen_config,
+        "dann": 0,
+        "identity_sha256": identity_sha256,
+        "target_test_accessed": False,
+        "target_test_gold": False,
+        "augmentation_started": False,
+        "phase_b_started": False,
+        "output_dir": str(root),
+        "model_path": str(model),
+    }
+
+
 def main():
     p=argparse.ArgumentParser()
     p.add_argument("--output_dir", required=True)
@@ -175,6 +300,18 @@ def main():
     write_jsonl(root/"source_dev.jsonl", rows["source_dev"])
     write_jsonl(root/"target_unlabeled.jsonl", rows["target_unlabeled"])
     train_args, frozen_config = build_train_args(a, root, variant)
+    identity_path = root / "component_ablation_identity.json"
+    identity = build_run_identity(
+        args=a,
+        root=root,
+        project_root=project_root,
+        variant=variant,
+        frozen_config=frozen_config,
+        train_args=train_args,
+        input_rows=rows,
+        external_inputs=external,
+    )
+    ensure_run_identity(identity_path, identity)
     train_mod.run_phase_a_training(train_args)
     model=root/"models"/"extractor"/"best"
     common=[sys.executable,"t5_aste_pipeline.py"]
@@ -189,11 +326,14 @@ def main():
       "--no_task_prefix","--no_constrained_decoding","--use_syntactic_graph_adapter",
       "--syntactic_graph_cache_dir",a.graph_cache_dir,"--syntactic_graph_parser_dir",a.parser_dir,
       "--syntactic_graph_cache_tokenizer_path",a.model_path],check=True)
-    result={"task":TASK_ID,"phase":"A",
-      "treatment_only":True,"dann":0,"target_test_accessed":False,"phase_b_started":False,
-      "variant":variant["name"],"training":frozen_config,
-      "output_dir":str(root),"model_path":str(model)}
-    (root/"treatment_only_entry.json").write_text(json.dumps(result,indent=2),encoding="utf-8")
+    result = build_result_record(
+        root=root,
+        model=model,
+        variant=variant,
+        frozen_config=frozen_config,
+        identity_sha256=sha256_file(identity_path),
+    )
+    write_json_atomic(root/"treatment_only_entry.json", result)
     print(json.dumps(result))
 if __name__=="__main__":
     main()
