@@ -1,6 +1,6 @@
 # 项目代理规则
 
-> 更新时间：2026-08-26 13:28（北京时间）
+> 更新时间：2026-08-30 23:04（北京时间）
 
 新对话首次接手必须按以下顺序读取并完成只读核验：
 
@@ -11,6 +11,8 @@
 5. `docs/skills/c3da-experiment-workflow/SKILL.md`
 
 实验记录与模型索引、`03` 和 `07` 按当前任务需要读取；详细改进设计统一维护在 `03`，服务器路径与运行约束统一维护在 `服务器迁移与实验运行交接_CN.md`。不再创建账号交接或正式 Skill（技能）的重复镜像文档。
+
+若任务涉及服务器运行，必须在上述五项之后继续读取 `服务器迁移与实验运行交接_CN.md`；若任务涉及论文撰写，继续读取 `docs/skills/c3da-paper-writing/SKILL.md` 和其中按任务路由的 `references/` 文件。完成读取后还必须核验正式仓库、当前开发工作树、服务器提交身份和当前运行目录，文档陈述不能替代 Git（版本管理）与产物身份检查。
 
 适用范围包括代码修改、模型训练、实验复现、断点恢复、命令生成、结果分析、文档更新、Git（版本管理）操作和文件清理。项目 Skill（技能）与本文件冲突时，以本文件和用户当前明确要求为准。
 
@@ -73,6 +75,17 @@ Chat Sol 不能直接读取 J 盘，只能读取已经推送到 GitHub（远程�
 为方便用户向 Chat Sol 上传本地文件，根目录保留 `CHAT_SOL_PROJECT_STATE_CN.md`、`CHAT_SOL_CURRENT_TASK_CN.md` 和 `CHAT_SOL_DECISION_LOG_CN.md` 三份上传镜像。它们不是事实源，内容分别镜像 `.ai/PROJECT_STATE.md`、`.ai/CURRENT_TASK.md` 和 `.ai/DECISION_LOG.md`；任一源文件变化时，必须在正式仓库和当前开发工作树同步刷新对应镜像并检查规范化文本一致性。
 
 `CURRENT_TASK.md` 只能存在一个当前任务，状态只能是 `DRAFT`（草案）、`APPROVED`（已批准）、`RUNNING`（执行中）、`BLOCKED`（阻塞）或 `COMPLETE`（完成）。ChatGPT建议不等于用户批准。
+
+## 项目 Skill 与环境 Skill
+
+本仓库只有两项正式项目 Skill（技能）：
+
+- `docs/skills/c3da-experiment-workflow/SKILL.md`：代码、实验、复用、命令、结果分析、文档和清理任务的强制工作流；
+- `docs/skills/c3da-paper-writing/SKILL.md`：论文、表格、引文、主张证据和投稿材料的写作工作流，只在论文任务中启用。
+
+个人或系统级 Skill 会随 Codex（代码智能体）环境变化，不是项目事实源，不把其完整名称复制进项目状态。接手时可从 `C:\Users\wwh\.codex\skills`、`C:\Users\wwh\.agents\skills` 和当前会话的 Available Skills（可用技能）清单发现；只有上述两项仓库内 Skill 决定本项目的长期规则。
+
+本地 CPU（中央处理器）测试使用 `J:\conda\envs\c3da\python.exe -m pytest -p no:cacheprovider`。当前核验版本为 `pytest 8.3.4`，并固定在 `requirements-rtx3070.txt`；禁止使用来源不明的系统 `pytest.exe` 代替项目环境解释器。
 
 ## 实验与审批边界
 
