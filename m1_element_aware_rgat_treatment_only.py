@@ -42,7 +42,7 @@ def main():
       "--use_syntactic_graph_adapter","--syntactic_graph_cache_dir",a.graph_cache_dir,
       "--syntactic_graph_parser_dir",a.parser_dir,"--element_aware_attention",
       "--element_focus_loss","--multi_element_coverage_loss","--element_focus_weight","0.05",
-      "--element_coverage_weight","0.05","--initialization_audit_path",str(root/"phase_a_initialization_audit.json")
+      "--element_coverage_weight","0.05","--target_unlabeled_file",str(root/"target_unlabeled.jsonl"),"--initialization_audit_path",str(root/"phase_a_initialization_audit.json")
     ]
     train_mod._PHASE_A_GRAPH_TRAINING_AUTHORIZED=True
     train_mod._PHASE_A_LIFECYCLE_CLEANUP_REQUESTED=True
