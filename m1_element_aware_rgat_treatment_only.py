@@ -36,6 +36,13 @@ def resolve_variant(args: argparse.Namespace) -> dict:
     }
 
 
+def validate_component_attribution_variant(args: argparse.Namespace) -> None:
+    if bool(args.focus_only) == bool(args.coverage_only):
+        raise ValueError(
+            "component attribution requires --focus_only or --coverage_only"
+        )
+
+
 def validate_frozen_training_recipe(args: argparse.Namespace) -> None:
     if args.train_batch_size != FROZEN_TRAIN_BATCH_SIZE:
         raise ValueError("formal component ablations require V9e train_batch_size=1")
@@ -172,6 +179,21 @@ def ensure_run_identity(path: Path, identity: dict) -> None:
     write_json_atomic(path, identity)
 
 
+def build_serialized_input_hashes(
+    root: Path,
+    input_rows: dict[str, list[dict]],
+) -> dict:
+    identities = {}
+    for name in ("source_train", "source_dev", "target_unlabeled"):
+        serialized = _serialize_rows(input_rows[name])
+        identities[name] = {
+            "path": str((root / f"{name}.jsonl").resolve()),
+            "sha256": hashlib.sha256(serialized).hexdigest().upper(),
+            "rows": len(input_rows[name]),
+        }
+    return identities
+
+
 def _resolve_project_path(project_root: Path, value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
@@ -205,14 +227,7 @@ def build_run_identity(
         input_rows,
         parser_identity,
     )
-    input_hashes = {
-        name: {
-            "path": str((root / f"{name}.jsonl").resolve()),
-            "sha256": sha256_file(root / f"{name}.jsonl"),
-            "rows": len(input_rows[name]),
-        }
-        for name in ("source_train", "source_dev", "target_unlabeled")
-    }
+    input_hashes = build_serialized_input_hashes(root, input_rows)
     raw_input_hashes = {
         name: {
             "path": str(Path(item["path"]).resolve()),
@@ -290,15 +305,13 @@ def main():
     g.add_argument("--coverage_only", action="store_true")
     a=p.parse_args()
     variant = resolve_variant(a)
+    validate_component_attribution_variant(a)
     validate_frozen_training_recipe(a)
     root=Path(a.output_dir); root.mkdir(parents=True, exist_ok=True)
     project_root=Path(__file__).resolve().parent
     data_root=project_root / "data" / "aste" / "cross_domain"
     external={"source_train":{"path":str(data_root / "laptop14" / "train.txt")},"source_dev":{"path":str(data_root / "laptop14" / "dev.txt")},"target_unlabeled":{"path":str(data_root / "rest15" / "train.txt")}}
     rows=_build_input_rows("laptop14","rest15", external_inputs=external)
-    write_jsonl(root/"source_train.jsonl", rows["source_train"])
-    write_jsonl(root/"source_dev.jsonl", rows["source_dev"])
-    write_jsonl(root/"target_unlabeled.jsonl", rows["target_unlabeled"])
     train_args, frozen_config = build_train_args(a, root, variant)
     identity_path = root / "component_ablation_identity.json"
     identity = build_run_identity(
@@ -312,6 +325,9 @@ def main():
         external_inputs=external,
     )
     ensure_run_identity(identity_path, identity)
+    write_jsonl(root/"source_train.jsonl", rows["source_train"])
+    write_jsonl(root/"source_dev.jsonl", rows["source_dev"])
+    write_jsonl(root/"target_unlabeled.jsonl", rows["target_unlabeled"])
     train_mod.run_phase_a_training(train_args)
     model=root/"models"/"extractor"/"best"
     common=[sys.executable,"t5_aste_pipeline.py"]

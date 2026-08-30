@@ -7,8 +7,10 @@ import pytest
 from m1_element_aware_rgat_treatment_only import (
     build_train_args,
     build_result_record,
+    build_serialized_input_hashes,
     ensure_run_identity,
     resolve_variant,
+    validate_component_attribution_variant,
     validate_frozen_training_recipe,
 )
 from t5_absa_train import validate_element_aware_training_configuration
@@ -146,6 +148,11 @@ def test_focus_plus_coverage_train_args_enable_both_losses():
     assert config["variant"] == "focus_plus_coverage"
 
 
+def test_component_attribution_runner_rejects_implicit_g3():
+    with pytest.raises(ValueError, match="requires --focus_only or --coverage_only"):
+        validate_component_attribution_variant(_runner_args())
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -195,3 +202,16 @@ def test_result_record_preserves_phase_a_data_boundary():
     assert result["target_test_gold"] is False
     assert result["augmentation_started"] is False
     assert result["phase_b_started"] is False
+
+
+def test_input_identity_is_computed_before_run_files_exist(tmp_path):
+    root = tmp_path / "not-created"
+    rows = {
+        "source_train": [{"id": "s1", "input": "a", "target": "b"}],
+        "source_dev": [{"id": "d1", "input": "c", "target": "d"}],
+        "target_unlabeled": [{"id": "t1", "input": "e", "target": ""}],
+    }
+    identities = build_serialized_input_hashes(root, rows)
+    assert not root.exists()
+    assert identities["source_train"]["rows"] == 1
+    assert len(identities["source_train"]["sha256"]) == 64
