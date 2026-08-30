@@ -5,7 +5,7 @@ import transformers
 from transformers import AutoModel, RobertaTokenizer, T5ForConditionalGeneration, T5Tokenizer
 
 
-MODEL_ROOT = r"J:\nlp\models"
+MODEL_ROOT = r"models"
 T5_PATH = os.path.join(MODEL_ROOT, "mrm8488-t5-base-finetuned-common_gen")
 ROBERTA_PATH = os.path.join(MODEL_ROOT, "roberta-base")
 BERT_PATH = os.path.join(MODEL_ROOT, "bert-base-uncased")

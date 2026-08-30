@@ -1502,8 +1502,8 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="reuse one completed pair run's extractor and pseudo labels while writing new outputs to output_root",
     )
-    parser.add_argument("--extractor_model_path", default=r"J:\nlp\models\t5-base-py")
-    parser.add_argument("--generator_model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--extractor_model_path", default=r"models/t5-base-py")
+    parser.add_argument("--generator_model_path", default=r"models/t5-base-py")
     parser.add_argument(
         "--generator_prompt_style",
         choices=["label_to_text", "masked_mutual", "mixed"],
@@ -1516,9 +1516,9 @@ def parse_args() -> argparse.Namespace:
         choices=["coupled_random", "semantic_same_sentiment", "sentiment_vector"],
         default="coupled_random",
     )
-    parser.add_argument("--sentiment_vector_model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--sentiment_vector_model_path", default=r"models/t5-base-py")
     parser.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
-    parser.add_argument("--glove_path", default=r"J:\models\glove.6B.300d.txt")
+    parser.add_argument("--glove_path", default=r"models/glove/glove.6B.300d.txt")
     parser.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
     parser.add_argument("--sentiment_vector_use_polarity_axis", action="store_true")
     parser.add_argument("--sentiment_vector_min_old_similarity", type=float, default=0.35)
@@ -1526,7 +1526,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_filter_opinion_similarity_min", type=float, default=0.0)
     parser.add_argument("--model_filter_require_opinion_polarity", action="store_true")
     parser.add_argument("--augment_select_max_opinion_ratio", type=float, default=1.0)
-    parser.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
+    parser.add_argument("--nli_model_path", default=r"models/nli-deberta-v3-base-mnli-fever-anli")
     parser.add_argument("--extractor_epochs", type=int, default=25)
     parser.add_argument("--generator_epochs", type=int, default=8)
     parser.add_argument("--generator_checkpoint_selection", choices=["last", "best", "aste_f1"], default="best")

@@ -1201,7 +1201,7 @@ def add_task_special_tokens(tokenizer, model, rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--model_path", default=r"models/t5-base-py")
     parser.add_argument("--train_file", required=True)
     parser.add_argument("--dev_file", required=True)
     parser.add_argument("--output_dir", required=True)

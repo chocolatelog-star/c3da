@@ -333,7 +333,7 @@ def main():
     parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight deay if we apply some.")
     parser.add_argument('--pad_id', default=0, type=int)
     parser.add_argument('--cuda', default='0', type=str)
-    parser.add_argument('--model_root', default=r'J:\nlp\models', type=str)
+    parser.add_argument('--model_root', default=r'models', type=str)
     parser.add_argument('--t5_path', default='', type=str)
 
     # * bert

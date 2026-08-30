@@ -13,7 +13,7 @@ MODELS = {
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_root", default=r"J:\nlp\models")
+    parser.add_argument("--model_root", default=r"models")
     parser.add_argument("--models", default="t5,roberta,bert")
     args = parser.parse_args()
 

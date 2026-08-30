@@ -1,0 +1,13 @@
+{
+  "platform": "linux",
+  "project_root": ".",
+  "model_root": "models",
+  "t5_base": "models/t5-base-py",
+  "nli_model": "models/nli-deberta-v3-base-mnli-fever-anli",
+  "generator_model": "models/mrm8488-t5-base-finetuned-common_gen",
+  "glove_path": "models/glove/glove.6B.300d.txt",
+  "stanza_resources": "models/stanza_resources",
+  "data_root": "data/aste/cross_domain",
+  "graph_cache_root": "graph_cache",
+  "run_root": "runs"
+}

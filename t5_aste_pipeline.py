@@ -35,7 +35,7 @@ from t5_aste_data import (
 from t5_aste_postprocess import evaluate_raw_and_fixed, fix_pred_triplets
 
 
-DATA_ROOT = Path(r"J:\nlp\BGCA-master\data\aste\cross_domain")
+DATA_ROOT = Path(r"data/aste/cross_domain")
 DATASETS = {
     "rest14": DATA_ROOT / "rest14",
     "rest15": DATA_ROOT / "rest15",
@@ -3564,8 +3564,8 @@ def main() -> None:
     p.add_argument("--run_dir", required=True)
     p.add_argument("--augmentation_input_run_dir", default="")
     p.add_argument("--model_path", default="")
-    p.add_argument("--generator_model_path", default=r"J:\nlp\models\mrm8488-t5-base-finetuned-common_gen")
-    p.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
+    p.add_argument("--generator_model_path", default=r"models/mrm8488-t5-base-finetuned-common_gen")
+    p.add_argument("--nli_model_path", default=r"models/nli-deberta-v3-base-mnli-fever-anli")
     p.add_argument("--nli_batch_size", type=int, default=8)
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--max_new_tokens", type=int, default=64)
@@ -3598,7 +3598,7 @@ def main() -> None:
     p.add_argument("--compatibility_profile", choices=["", "historical_best_v1"], default="")
     p.add_argument("--sentiment_vector_model_path", default="")
     p.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
-    p.add_argument("--glove_path", default=r"J:\models\glove.6B.300d.txt")
+    p.add_argument("--glove_path", default=r"models/glove/glove.6B.300d.txt")
     p.add_argument("--sentiment_vector_min_margin", type=float, default=0.05)
     p.add_argument("--sentiment_vector_use_polarity_axis", action="store_true")
     p.add_argument("--sentiment_vector_min_old_similarity", type=float, default=0.35)
