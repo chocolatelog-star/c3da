@@ -37,6 +37,7 @@ events.out.tfevents*
 trainer_state.json
 
 # Generated data / large intermediate artifacts
+graph_cache/
 *.jsonl.tmp
 *.tmp
 *_predictions.json
@@ -51,4 +52,5 @@ desktop.ini
 .worktrees/
 
 # Temporary notes
+.planning/
 _tmp_*
