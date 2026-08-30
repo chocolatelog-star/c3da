@@ -1,11 +1,11 @@
 # 当前任务
 
-> 更新时间：2026-08-30 16:46（北京时间）
+> 更新时间：2026-08-30 16:55（北京时间）
 
 - 任务编号：`M1_ELEMENT_AWARE_MULTI_TRIPLET_RGAT_IMPLEMENTATION_V1`
 - 类型：`IMPLEMENTATION + ENGINEERING ENTRY AUDIT`（实现与工程入口审计）
 - 方向：`laptop14 -> rest15`
-- 状态：`BLOCKED_GPU_UNAVAILABLE`（因 GPU 不可用而阻塞）
+- 状态：`READY_FOR_QUICK_ABLATION_RESEARCH_APPROVAL`（工程入口通过，等待快速消融研究审批）
 - 功能分支：`codex/m1-element-aware-multi-triplet-rgat-v1`
 - 服务器项目：`/root/CD-C3DA`
 - 服务器输出：`/root/autodl-tmp/CD-C3DA-runs`
@@ -21,11 +21,13 @@
 - source-train 906行对齐完成：整体元素对齐率97.05%，未匹配0，歧义86；歧义节点只退出辅助损失，不删除 ASTE（方面情感三元组抽取）样本。
 - 已修复 `low_cpu_mem_usage`（低中央处理器内存加载）下基础T5检查点被误判为部分图检查点的问题；现在以检查点原始`config.json`声明区分基础T5、旧图和新图身份，部分图/显著性检查点仍硬拒绝。
 - 对低内存加载产生的缺失图/显著性 `meta tensor`（元张量）仅按既定确定性初始化规则在CPU（中央处理器）实体化；完整图检查点参数保持不变，模型可安全移动到GPU（图形处理器）。
+- 服务器入口审计 `v2` 已通过：元素对齐2826/2912=97.05%，未匹配0、歧义86；零更新、梯度、FP32/FP16（单精度/半精度）有限性、单/多覆盖边界和目标无金标边界全部通过。
+- 审计期间参数更新为0，FP32/FP16参数哈希均未改变，`target_test_accessed=false`。
 
-## 当前阻塞
+## 当前边界
 
-服务器当前 `torch.cuda.is_available()==False` 且 `nvidia-smi` 无设备。容器内存上限为2 GiB，不能用 CPU（中央处理器）替代完成 T5 FP32/FP16（单精度/半精度）数值审计。审计脚本已改为无 GPU 时安全输出 `BLOCKED`，不加载模型、不训练、不访问目标测试。
+工程入口已经通过，但尚未获得快速消融研究审批。不得把入口审计代理指标解释为目标域F1。
 
 ## 唯一下一动作
 
-GPU 恢复后，仅重跑工程入口审计，完成 zero-update equivalence（零更新等价）、source gradient（源域梯度）、FP32/FP16 finite（数值有限性）和参数零更新门控。无论 PASS/FAIL（通过/失败）都返回 Chat Sol（研究负责人）；不得自行启动正式 QUICK_ABLATION（快速消融）、Phase B（阶段B）、增强、最终 ASTE 或目标测试。
+把入口审计结果返回 Chat Sol（研究负责人），审批一次固定配方的 QUICK_ABLATION（快速消融）；审批前不得启动快速消融、Phase B（阶段B）、增强、最终 ASTE 或目标测试。
