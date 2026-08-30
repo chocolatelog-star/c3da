@@ -18,7 +18,10 @@ def main():
     p.add_argument("--cuda", default="0")
     a=p.parse_args()
     root=Path(a.output_dir); root.mkdir(parents=True, exist_ok=True)
-    rows=_build_input_rows("laptop14","rest15")
+    project_root=Path(__file__).resolve().parent
+    data_root=project_root / "data" / "aste" / "cross_domain"
+    external={"source_train":{"path":str(data_root / "laptop14" / "train.txt")},"source_dev":{"path":str(data_root / "laptop14" / "dev.txt")},"target_unlabeled":{"path":str(data_root / "rest15" / "train.txt")}}
+    rows=_build_input_rows("laptop14","rest15", external_inputs=external)
     write_jsonl(root/"source_train.jsonl", rows["source_train"])
     write_jsonl(root/"source_dev.jsonl", rows["source_dev"])
     write_jsonl(root/"target_unlabeled.jsonl", rows["target_unlabeled"])
