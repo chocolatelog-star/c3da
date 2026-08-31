@@ -8,8 +8,11 @@ from pathlib import Path
 
 
 def validate_upstream_files(upstream: Path) -> tuple[Path, Path]:
-    train = upstream / "final_data" / "final_train.jsonl"
-    dev = upstream / "final_data" / "final_dev.jsonl"
+    final_data = upstream / "final_data"
+    train_candidates = sorted(final_data.glob("final_train_*.jsonl"))
+    dev_candidates = sorted(final_data.glob("final_dev_*.jsonl"))
+    train = train_candidates[-1] if train_candidates else final_data / "final_train.jsonl"
+    dev = dev_candidates[-1] if dev_candidates else final_data / "final_dev.jsonl"
     for path in (train, dev):
         if not path.is_file():
             raise FileNotFoundError(f"fixed upstream artifact is missing: {path}")
