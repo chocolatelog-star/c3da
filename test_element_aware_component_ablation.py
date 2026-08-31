@@ -7,11 +7,13 @@ import pytest
 from m1_element_aware_rgat_treatment_only import (
     build_train_args,
     build_result_record,
+    build_pseudo_args,
     build_serialized_input_hashes,
     ensure_run_identity,
     resolve_variant,
     validate_component_attribution_variant,
     validate_frozen_training_recipe,
+    validate_base_model_path,
 )
 from t5_absa_train import validate_element_aware_training_configuration
 
@@ -138,6 +140,12 @@ def test_coverage_only_train_args_are_exact_v9e_component_ablation():
     assert config["variant"] == "coverage_only"
 
 
+def test_pseudo_args_preserve_v9e_base_weight():
+    args = _runner_args(focus_only=True)
+    command = build_pseudo_args(args, Path("run"), Path("run/models/extractor/best"))
+    assert command[command.index("--pseudo_base_weight") + 1] == "0.75"
+
+
 def test_focus_plus_coverage_train_args_enable_both_losses():
     args = _runner_args()
     variant = resolve_variant(args)
@@ -215,7 +223,7 @@ def test_result_record_preserves_phase_a_data_boundary():
 
 def test_result_record_aggregates_phase_a_metrics_without_target_test(tmp_path):
     variant = resolve_variant(_runner_args(focus_only=True))
-    prediction_path = tmp_path / "aste_predictions_raw_fixed_source_dev.jsonl"
+    prediction_path = tmp_path / "aste_predictions_raw_fixed_element_aware_source_dev.jsonl"
     prediction_path.write_text(
         json.dumps({"gold": "<pos> a <opinion> op", "pred_raw": "<pos> a <opinion> op"})
         + "\n"
@@ -266,6 +274,12 @@ def test_result_record_reports_unavailable_phase_a_metrics_without_reading_targe
     assert result["metrics"]["target_unlabeled_pseudo"]["status"] == "missing"
     assert "target_test" not in result["metrics"]
     assert result["mechanism_diagnostics"]["component"] == "coverage_only"
+
+
+def test_base_model_path_rejects_treatment_checkpoints():
+    validate_base_model_path("J:/nlp/models/t5-base-py")
+    with pytest.raises(ValueError, match="T5-base base model"):
+        validate_base_model_path("run/models/extractor/checkpoint-1600")
 
 
 def test_input_identity_is_computed_before_run_files_exist(tmp_path):

@@ -18,6 +18,7 @@ TASK_ID = "M1_ELEMENT_AWARE_COMPONENT_ATTRIBUTION_V1"
 FROZEN_TRAIN_BATCH_SIZE = 1
 FROZEN_GRADIENT_ACCUMULATION_STEPS = 16
 FROZEN_EVAL_BATCH_SIZE = 2
+FROZEN_PSEUDO_BASE_WEIGHT = 0.75
 
 
 def write_jsonl(path, rows):
@@ -51,6 +52,24 @@ def validate_frozen_training_recipe(args: argparse.Namespace) -> None:
         raise ValueError(
             "formal component ablations require V9e gradient_accumulation_steps=16"
         )
+
+
+def validate_base_model_path(model_path: str | Path) -> None:
+    path = Path(model_path)
+    if path.name != "t5-base-py" or any(part.startswith("checkpoint-") for part in path.parts):
+        raise ValueError("component ablations require the T5-base base model, not a treatment checkpoint")
+
+
+def build_pseudo_args(args: argparse.Namespace, root: Path, model: Path) -> list[str]:
+    return [
+        "pseudo", "--run_dir", str(root), "--model_path", str(model),
+        "--batch_size", "1", "--num_beams", "1", "--max_new_tokens", "128",
+        "--cuda", args.cuda, "--no_task_prefix", "--no_constrained_decoding",
+        "--use_syntactic_graph_adapter", "--syntactic_graph_cache_dir", args.graph_cache_dir,
+        "--syntactic_graph_parser_dir", args.parser_dir,
+        "--syntactic_graph_cache_tokenizer_path", args.model_path,
+        "--pseudo_base_weight", str(FROZEN_PSEUDO_BASE_WEIGHT),
+    ]
 
 
 def build_train_args(
@@ -338,7 +357,7 @@ def _pseudo_supply_metrics(path: Path) -> dict:
 
 def aggregate_phase_a_metrics(root: Path) -> dict:
     """Aggregate only Phase A source-dev and target-unlabeled artifacts."""
-    source_path = Path(root) / "aste_predictions_raw_fixed_source_dev.jsonl"
+    source_path = Path(root) / "aste_predictions_raw_fixed_element_aware_source_dev.jsonl"
     pseudo_path = Path(root) / "target_pseudo_selected.jsonl"
     source_metrics = (
         _source_dev_metrics(source_path)
@@ -377,6 +396,7 @@ def main():
     variant = resolve_variant(a)
     validate_component_attribution_variant(a)
     validate_frozen_training_recipe(a)
+    validate_base_model_path(a.model_path)
     root=Path(a.output_dir); root.mkdir(parents=True, exist_ok=True)
     project_root=Path(__file__).resolve().parent
     data_root=project_root / "data" / "aste" / "cross_domain"
@@ -407,11 +427,7 @@ def main():
       "--output_tag","element_aware_source_dev","--use_syntactic_graph_adapter",
       "--syntactic_graph_cache_dir",a.graph_cache_dir,"--syntactic_graph_parser_dir",a.parser_dir,
       "--syntactic_graph_cache_tokenizer_path",a.model_path,"--syntactic_graph_split","source_dev"],check=True)
-    subprocess.run(common+["pseudo","--run_dir",str(root),"--model_path",str(model),
-      "--batch_size","1","--num_beams","1","--max_new_tokens","128","--cuda",a.cuda,
-      "--no_task_prefix","--no_constrained_decoding","--use_syntactic_graph_adapter",
-      "--syntactic_graph_cache_dir",a.graph_cache_dir,"--syntactic_graph_parser_dir",a.parser_dir,
-      "--syntactic_graph_cache_tokenizer_path",a.model_path],check=True)
+    subprocess.run(common + build_pseudo_args(a, root, model), check=True)
     result = build_result_record(
         root=root,
         model=model,
