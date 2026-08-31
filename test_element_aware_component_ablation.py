@@ -202,7 +202,7 @@ def test_result_record_preserves_phase_a_data_boundary():
         root=Path("run"),
         model=Path("run/models/extractor/best"),
         variant=variant,
-        frozen_config={"variant": "focus_only"},
+        frozen_config={"variant": "focus_only", "focus_weight": 0.05, "coverage_weight": 0.0},
         identity_sha256="ABC",
     )
     assert result["task"] == "M1_ELEMENT_AWARE_COMPONENT_ATTRIBUTION_V1"
@@ -211,6 +211,61 @@ def test_result_record_preserves_phase_a_data_boundary():
     assert result["target_test_gold"] is False
     assert result["augmentation_started"] is False
     assert result["phase_b_started"] is False
+
+
+def test_result_record_aggregates_phase_a_metrics_without_target_test(tmp_path):
+    variant = resolve_variant(_runner_args(focus_only=True))
+    prediction_path = tmp_path / "aste_predictions_raw_fixed_source_dev.jsonl"
+    prediction_path.write_text(
+        json.dumps({"gold": "<pos> a <opinion> op", "pred_raw": "<pos> a <opinion> op"})
+        + "\n"
+        + json.dumps({"gold": "<pos> a <opinion> op ; <pos> b <opinion> good", "pred_raw": "<pos> a <opinion> op"})
+        + "\n",
+        encoding="utf-8",
+    )
+    pseudo_path = tmp_path / "target_pseudo_selected.jsonl"
+    pseudo_path.write_text(
+        json.dumps({"label": "<pos> a <opinion> op"})
+        + "\n"
+        + json.dumps({"label": "<pos> a <opinion> op ; <pos> b <opinion> good ; <neg> c <opinion> bad"})
+        + "\n",
+        encoding="utf-8",
+    )
+    result = build_result_record(
+        root=tmp_path,
+        model=tmp_path / "models" / "extractor" / "best",
+        variant=variant,
+        frozen_config={"variant": "focus_only", "focus_weight": 0.05, "coverage_weight": 0.0},
+        identity_sha256="ABC",
+    )
+    assert result["metrics"]["source_dev"]["strict_triplet_f1"] == pytest.approx(0.8)
+    assert result["metrics"]["source_dev"]["multi_triplet_sentence_recall"] == pytest.approx(0.5)
+    assert set(result["metrics"]["source_dev"]["absence_rates"]) == {"overall", "aspect", "opinion"}
+    assert result["metrics"]["target_unlabeled_pseudo"]["qualified_total_rows"] == 2
+    assert result["metrics"]["target_unlabeled_pseudo"]["qualified_multi_rows"] == 1
+    assert result["metrics"]["target_unlabeled_pseudo"]["qualified_3plus_rows"] == 1
+    assert result["mechanism_diagnostics"]["component"] == "focus_only"
+    assert result["mechanism_diagnostics"]["focus_weight"] == 0.05
+    assert result["mechanism_diagnostics"]["coverage_weight"] == 0.0
+    assert result["mechanism_diagnostics"]["observed"]["qualified_3plus_rows"] == 1
+    assert result["target_test_accessed"] is False
+    assert result["target_test_gold"] is False
+
+
+def test_result_record_reports_unavailable_phase_a_metrics_without_reading_target_test(tmp_path):
+    variant = resolve_variant(_runner_args(coverage_only=True))
+    result = build_result_record(
+        root=tmp_path,
+        model=tmp_path / "models" / "extractor" / "best",
+        variant=variant,
+        frozen_config={"variant": "coverage_only", "focus_weight": 0.0, "coverage_weight": 0.05},
+        identity_sha256="ABC",
+    )
+    assert result["metrics"]["status"] == "unavailable"
+    assert result["metrics"]["source_dev"]["status"] == "missing"
+    assert result["metrics"]["target_unlabeled_pseudo"]["status"] == "missing"
+    assert "target_test" not in result["metrics"]
+    assert result["mechanism_diagnostics"]["component"] == "coverage_only"
 
 
 def test_input_identity_is_computed_before_run_files_exist(tmp_path):

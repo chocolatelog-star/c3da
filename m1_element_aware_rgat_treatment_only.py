@@ -6,6 +6,7 @@ from m1_syntactic_rgat_pseudo_quick_ablation import (
     _git_identity,
     _model_hashes,
     _serialize_rows,
+    _source_dev_metrics,
     validate_phase_a_graph_cache,
 )
 from reproducibility import sha256_file, write_json_atomic
@@ -281,6 +282,7 @@ def build_result_record(
     frozen_config: dict,
     identity_sha256: str,
 ) -> dict:
+    metrics = aggregate_phase_a_metrics(root)
     return {
         "task": TASK_ID,
         "phase": "A",
@@ -295,6 +297,67 @@ def build_result_record(
         "phase_b_started": False,
         "output_dir": str(root),
         "model_path": str(model),
+        "metrics": metrics,
+        "mechanism_diagnostics": {
+            "component": variant["name"],
+            "focus_enabled": variant["focus_enabled"],
+            "coverage_enabled": variant["coverage_enabled"],
+            "focus_weight": frozen_config.get("focus_weight"),
+            "coverage_weight": frozen_config.get("coverage_weight"),
+            "interpretation": "observational_phase_a_component_attribution",
+            "target_test_used": False,
+            "observed": {
+                "source_dev_strict_triplet_f1": metrics["source_dev"].get("strict_triplet_f1"),
+                "source_dev_multi_triplet_sentence_recall": metrics["source_dev"].get("multi_triplet_sentence_recall"),
+                "source_dev_absence_rates": metrics["source_dev"].get("absence_rates"),
+                "qualified_total_rows": metrics["target_unlabeled_pseudo"].get("qualified_total_rows"),
+                "qualified_multi_rows": metrics["target_unlabeled_pseudo"].get("qualified_multi_rows"),
+                "qualified_3plus_rows": metrics["target_unlabeled_pseudo"].get("qualified_3plus_rows"),
+            },
+        },
+    }
+
+
+def _pseudo_supply_metrics(path: Path) -> dict:
+    rows = read_jsonl(path)
+    qualified_multi = 0
+    qualified_3plus = 0
+    for row in rows:
+        triplet_count = len(parse_triplet_text_list(row.get("label", "")))
+        qualified_multi += int(triplet_count >= 2)
+        qualified_3plus += int(triplet_count >= 3)
+    return {
+        "selector": "strict_high_confidence",
+        "path": str(path),
+        "qualified_total_rows": len(rows),
+        "qualified_multi_rows": qualified_multi,
+        "qualified_3plus_rows": qualified_3plus,
+        "target_test_access": False,
+    }
+
+
+def aggregate_phase_a_metrics(root: Path) -> dict:
+    """Aggregate only Phase A source-dev and target-unlabeled artifacts."""
+    source_path = Path(root) / "aste_predictions_raw_fixed_source_dev.jsonl"
+    pseudo_path = Path(root) / "target_pseudo_selected.jsonl"
+    source_metrics = (
+        _source_dev_metrics(source_path)
+        if source_path.is_file()
+        else {"status": "missing", "path": str(source_path)}
+    )
+    pseudo_metrics = (
+        _pseudo_supply_metrics(pseudo_path)
+        if pseudo_path.is_file()
+        else {"status": "missing", "path": str(pseudo_path), "target_test_access": False}
+    )
+    available = source_path.is_file() and pseudo_path.is_file()
+    return {
+        "schema_version": 1,
+        "status": "available" if available else "unavailable",
+        "source_dev": source_metrics,
+        "target_unlabeled_pseudo": pseudo_metrics,
+        "target_test_accessed": False,
+        "target_test_gold": False,
     }
 
 
