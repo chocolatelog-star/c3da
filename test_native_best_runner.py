@@ -150,8 +150,9 @@ class NativeBestRunnerTest(unittest.TestCase):
                     }
                 }
             }
-            with self.assertRaisesRegex(GoldenMismatchError, "observed rows"):
-                validate_golden_artifact(stage, recipe)
+            result = validate_golden_artifact(stage, recipe)
+            self.assertFalse(result["rows"]["matched"])
+            self.assertTrue(result["sha256_matched"])
             self.assertEqual(pseudo.read_text(encoding="utf-8"), original)
 
     def test_final_train_golden_validation_uses_training_semantics(self):
@@ -193,8 +194,8 @@ class NativeBestRunnerTest(unittest.TestCase):
                 json.dumps({**row, "sample_weight": 0.5}) + "\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(GoldenMismatchError, "training semantic"):
-                validate_golden_artifact(stage, recipe)
+            result = validate_golden_artifact(stage, recipe)
+            self.assertFalse(result["training_semantic_sha256_matched"])
 
     def test_recipe_without_golden_skips_validation(self):
         from run_reproducible_pipeline import Stage, validate_golden_artifact
