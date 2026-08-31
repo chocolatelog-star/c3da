@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -17,6 +19,14 @@ def validate_upstream_files(upstream: Path) -> tuple[Path, Path]:
         if not path.is_file():
             raise FileNotFoundError(f"fixed upstream artifact is missing: {path}")
     return train, dev
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_final_only_command(*, python: Path, project_root: Path, upstream: Path,
@@ -46,8 +56,18 @@ def main() -> None:
     parser.add_argument("--train_batch_size", type=int, required=True)
     parser.add_argument("--gradient_accumulation_steps", type=int, required=True)
     parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--min_free_gb", type=float, default=8.0)
     args = parser.parse_args()
+    usage = shutil.disk_usage(args.output.parent)
+    if usage.free / (1024**3) < args.min_free_gb:
+        raise RuntimeError(f"insufficient free disk space: {usage.free / (1024**3):.2f} GiB")
     args.output.mkdir(parents=True, exist_ok=True)
+    train, dev = validate_upstream_files(args.upstream)
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "upstream_identity.json").write_text(
+        json.dumps({"upstream": str(args.upstream.resolve()), "train": sha256_file(train), "dev": sha256_file(dev)}, indent=2),
+        encoding="utf-8",
+    )
     command = build_final_only_command(python=Path(sys.executable), project_root=Path(__file__).resolve().parent,
                                        upstream=args.upstream, output=args.output, model=args.model,
                                        train_batch_size=args.train_batch_size,
