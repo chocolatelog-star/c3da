@@ -1267,7 +1267,16 @@ def main() -> None:
     reproducibility_config = configure_reproducibility(args.seed, reproducibility_mode)
     print("reproducibility:", reproducibility_config)
     output_dir = Path(args.output_dir)
-    checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
+    checkpoint_dirs = (
+        [
+            path
+            for path in output_dir.glob("checkpoint-*")
+            if (path / "trainer_state.json").is_file()
+            and ((path / "model.safetensors").is_file() or (path / "pytorch_model.bin").is_file())
+        ]
+        if output_dir.exists()
+        else []
+    )
     resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
