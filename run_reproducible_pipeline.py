@@ -257,6 +257,7 @@ def build_best_v1_stages(
     recipe: dict,
     python_executable: Path,
     cuda: str,
+    save_total_limit: int = 1,
 ) -> list[Stage]:
     project_root = Path(project_root).resolve()
     run_root = Path(run_root).resolve()
@@ -302,6 +303,8 @@ def build_best_v1_stages(
         str(training["learning_rate"]),
         "--fp16",
         "--gradient_checkpointing",
+        "--save_total_limit",
+        str(save_total_limit),
         "--cuda",
         str(cuda),
         "--seed",
@@ -713,6 +716,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_batch_size", type=int, default=None)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
     parser.add_argument("--skip_golden_validation", action="store_true")
+    parser.add_argument("--save_total_limit", type=int, default=1)
     return parser.parse_args()
 
 
@@ -770,7 +774,7 @@ def main() -> None:
         ]
         context.capture_environment(sys.executable, model_paths)
     stages = build_best_v1_stages(
-        PROJECT_ROOT, run_root, recipe, Path(sys.executable), args.cuda
+        PROJECT_ROOT, run_root, recipe, Path(sys.executable), args.cuda, args.save_total_limit
     )
     execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run, args.skip_golden_validation)
     context.render_run_record_cn()
