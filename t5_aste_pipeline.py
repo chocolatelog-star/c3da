@@ -35,7 +35,13 @@ from t5_aste_data import (
 from t5_aste_postprocess import evaluate_raw_and_fixed, fix_pred_triplets
 
 
-DATA_ROOT = Path(r"J:\nlp\BGCA-master\data\aste\cross_domain")
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_ROOT = Path(
+    os.environ.get(
+        "C3DA_DATA_ROOT",
+        str(PROJECT_ROOT / "data" / "aste" / "cross_domain"),
+    )
+).expanduser()
 DATASETS = {
     "rest14": DATA_ROOT / "rest14",
     "rest15": DATA_ROOT / "rest15",
@@ -3564,8 +3570,14 @@ def main() -> None:
     p.add_argument("--run_dir", required=True)
     p.add_argument("--augmentation_input_run_dir", default="")
     p.add_argument("--model_path", default="")
-    p.add_argument("--generator_model_path", default=r"J:\nlp\models\mrm8488-t5-base-finetuned-common_gen")
-    p.add_argument("--nli_model_path", default=r"J:\nlp\models\nli-deberta-v3-base-mnli-fever-anli")
+    p.add_argument(
+        "--generator_model_path",
+        default=str(PROJECT_ROOT / "models" / "mrm8488-t5-base-finetuned-common_gen"),
+    )
+    p.add_argument(
+        "--nli_model_path",
+        default=str(PROJECT_ROOT / "models" / "nli-deberta-v3-base-mnli-fever-anli"),
+    )
     p.add_argument("--nli_batch_size", type=int, default=8)
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--max_new_tokens", type=int, default=64)

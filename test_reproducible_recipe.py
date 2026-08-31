@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from run_reproducible_pipeline import resolve_recipe_path, validate_external_inputs
+import t5_aste_pipeline
 
 
 ROOT = Path(__file__).resolve().parent
@@ -42,6 +43,10 @@ class ReproducibleRecipeTest(unittest.TestCase):
         with self.assertRaises(Exception) as raised:
             validate_external_inputs(recipe, ROOT)
         self.assertIn("sample.txt", str(raised.exception))
+
+    def test_pipeline_dataset_root_is_project_relative(self):
+        self.assertTrue(t5_aste_pipeline.DATA_ROOT.is_absolute())
+        self.assertNotIn("BGCA-master", str(t5_aste_pipeline.DATA_ROOT))
 
     def test_golden_hashes_are_complete(self):
         required = {
