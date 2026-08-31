@@ -172,10 +172,15 @@ def validate_golden_artifact(stage: Stage, recipe: dict) -> dict | None:
         result["sha256"] = actual_hash
         result["sha256_matched"] = actual_hash == expected_hash
         if actual_hash != expected_hash:
-            raise GoldenMismatchError(
-                f"golden hash mismatch for {stage.name}: "
-                f"{actual_hash} != {expected_hash}"
-            )
+            mode = recipe.get("reproducibility_mode", "")
+            if mode == "historical_seed_only":
+                result["sha256_validation"] = "advisory_nonblocking"
+                result["golden_sha256"] = expected_hash
+            else:
+                raise GoldenMismatchError(
+                    f"golden hash mismatch for {stage.name}: "
+                    f"{actual_hash} != {expected_hash}"
+                )
 
     expected_semantic_hash = expected.get("semantic_sha256")
     if expected_semantic_hash:

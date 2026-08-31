@@ -202,6 +202,19 @@ class NativeBestRunnerTest(unittest.TestCase):
         stage = Stage("pseudo", ("python",), (Path("missing.jsonl"),), "base_pseudo")
         self.assertIsNone(validate_golden_artifact(stage, {"recipe_id": "other-pair"}))
 
+    def test_historical_seed_only_model_hash_mismatch_is_advisory(self):
+        from run_reproducible_pipeline import Stage, validate_golden_artifact
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp) / "model.bin"
+            artifact.write_bytes(b"actual")
+            stage = Stage("extractor", ("python",), (artifact,), "extractor")
+            result = validate_golden_artifact(
+                stage,
+                {"reproducibility_mode": "historical_seed_only", "golden": {"extractor": {"sha256": "0" * 64}}},
+            )
+            self.assertFalse(result["sha256_matched"])
+            self.assertEqual(result["sha256_validation"], "advisory_nonblocking")
+
     def test_external_input_hash_mismatch_stops_before_training(self):
         from reproducibility import ReproducibilityError
         from run_reproducible_pipeline import validate_external_inputs
