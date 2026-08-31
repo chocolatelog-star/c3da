@@ -1,4 +1,5 @@
 import json
+import re
 from argparse import Namespace
 from pathlib import Path
 
@@ -280,6 +281,18 @@ def test_base_model_path_rejects_treatment_checkpoints():
     validate_base_model_path("J:/nlp/models/t5-base-py")
     with pytest.raises(ValueError, match="T5-base base model"):
         validate_base_model_path("run/models/extractor/checkpoint-1600")
+
+
+def test_active_recipe_has_no_windows_absolute_paths():
+    recipe = Path("configs/recipes/laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann0_v1.json").read_text(encoding="utf-8")
+    assert not re.search(r"[A-Za-z]:[\\/]", recipe)
+    assert "BGCA-master" not in recipe
+
+
+def test_shared_phase_a_defaults_are_platform_neutral():
+    source = Path("m1_syntactic_rgat_pseudo_quick_ablation.py").read_text(encoding="utf-8")
+    assert 'Path(r"J:\\nlp\\models\\t5-base-py")' not in source
+    assert 'default=r"J:\\nlp\\models\\t5-base-py"' not in source
 
 
 def test_input_identity_is_computed_before_run_files_exist(tmp_path):

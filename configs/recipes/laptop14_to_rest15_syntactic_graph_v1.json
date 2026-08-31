@@ -8,19 +8,19 @@
   "research_status": "APPROVED_FOR_IMPLEMENTATION_ENTRY",
   "training_status": "NOT_APPROVED",
   "models": {
-    "t5_base": "J:\\nlp\\models\\t5-base-py"
+    "t5_base": "models/t5-base-py"
   },
   "external_inputs": {
     "laptop14_train": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\train.txt",
+      "path": "data/aste/cross_domain/laptop14/train.txt",
       "sha256": "512EA143794332967B346D76791BBA10E0C10C5D20D8E1FA8F6534C2069F9B7C"
     },
     "laptop14_dev": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\dev.txt",
+      "path": "data/aste/cross_domain/laptop14/dev.txt",
       "sha256": "0ADBF20FC75284D5D49523F56EC368D94A9DA305E87411E0C627D12CD4510BC0"
     },
     "rest15_train_unlabeled_input": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\rest15\\train.txt",
+      "path": "data/aste/cross_domain/rest15/train.txt",
       "sha256": "11C5ABE1DE8AD284A8D06596A8BE45674E0EC153BEB161B8378F88F61BF2B5DB"
     },
     "t5_config": {
@@ -82,7 +82,7 @@
           "lemma": "combined_nocharlm",
           "depparse": "ewt_charlm"
         },
-        "resource_dir": "J:\\nlp\\models\\stanza_resources",
+        "resource_dir": "models/stanza_resources",
         "stanza_version": "1.14.0",
         "sha256": {
           "resources.json": "4e41c1df152146fa26ed0c006a08feea7a60bb3414bb6d57dbda24ad2e3cb99c",

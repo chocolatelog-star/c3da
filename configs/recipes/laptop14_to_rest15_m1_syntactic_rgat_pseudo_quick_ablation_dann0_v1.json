@@ -8,17 +8,17 @@
   "research_status": "APPROVED_FOR_PHASE_A_IMPLEMENTATION",
   "training_status": "PHASE_A_ONLY_NOT_RUN",
   "models": {
-    "t5_base": "J:\\nlp\\models\\t5-base-py"
+    "t5_base": "models/t5-base-py"
   },
   "external_inputs": {
     "source_train": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\train.txt"
+      "path": "data/aste/cross_domain/laptop14/train.txt"
     },
     "source_dev": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\dev.txt"
+      "path": "data/aste/cross_domain/laptop14/dev.txt"
     },
     "target_unlabeled": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\rest15\\train.txt"
+      "path": "data/aste/cross_domain/rest15/train.txt"
     },
     "target_test_access": false
   },

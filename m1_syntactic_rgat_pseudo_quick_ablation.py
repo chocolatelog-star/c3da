@@ -726,11 +726,10 @@ def _validate_recipe(recipe: dict) -> None:
         expected_recipe["lambda_domain_adv"] = 0.0
     mismatches = {key: {"actual": actual[key], "expected": expected} for key, expected in expected_recipe.items() if actual[key] != expected}
     mismatches.update({f"pseudo.{key}": {"actual": actual_pseudo[key], "expected": expected} for key, expected in FROZEN_PSEUDO_RECIPE.items() if actual_pseudo[key] != expected})
-    expected_model_path = Path(r"J:\nlp\models\t5-base-py").resolve()
     models = recipe.get("models")
     actual_model_path = models.get("t5_base") if isinstance(models, dict) else None
-    if actual_model_path is None or Path(actual_model_path).resolve() != expected_model_path:
-        mismatches["models.t5_base"] = {"actual": actual_model_path, "expected": str(expected_model_path)}
+    if actual_model_path is None or Path(actual_model_path).name != "t5-base-py":
+        mismatches["models.t5_base"] = {"actual": actual_model_path, "expected": "*/t5-base-py"}
     if not isinstance(models, dict) or set(models) != {"t5_base"}:
         mismatches["models.keys"] = {"actual": sorted(models) if isinstance(models, dict) else models, "expected": ["t5_base"]}
 
@@ -2549,9 +2548,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="M1 Phase A syntax RGAT quick ablation entry")
     parser.add_argument("--recipe", default=r"configs\recipes\laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v1.json")
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--model_path", default=r"J:\nlp\models\t5-base-py")
+    parser.add_argument("--model_path", default="models/t5-base-py")
     parser.add_argument("--graph_cache_dir", required=True)
-    parser.add_argument("--parser_dir", default=r"J:\nlp\models\stanza_resources")
+    parser.add_argument("--parser_dir", default="models/stanza_resources")
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--control_run_dir", default="")
     parser.add_argument("--control_terminal_lookahead_salvage_audit", default="")
