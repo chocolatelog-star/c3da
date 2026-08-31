@@ -6,52 +6,52 @@
   "seed": 1000,
   "reproducibility_mode": "historical_seed_only",
   "models": {
-    "t5_base": "J:\\nlp\\models\\t5-base-py",
-    "nli": "J:\\nlp\\models\\nli-deberta-v3-base-mnli-fever-anli"
+    "t5_base": "models/t5-base-py",
+    "nli": "models/nli-deberta-v3-base-mnli-fever-anli"
   },
   "external_inputs": {
     "rest16_train": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\rest16\\train.txt",
+      "path": "data/aste/cross_domain/rest16/train.txt",
       "sha256": "6CBBD94268889E751422776F3558212650E633E3C39366CC33B5A5785FD310A4"
     },
     "rest16_dev": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\rest16\\dev.txt",
+      "path": "data/aste/cross_domain/rest16/dev.txt",
       "sha256": "C3A6BF12A879C947842964725A4E387BA85619BFC8E5ED8A889EBE87E9784594"
     },
     "rest16_test": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\rest16\\test.txt",
+      "path": "data/aste/cross_domain/rest16/test.txt",
       "sha256": "DE842428DC8BC11A4EEE87B0BA382B0A59EF37B973A92829759CAA8664208630"
     },
     "laptop14_train": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\train.txt",
+      "path": "data/aste/cross_domain/laptop14/train.txt",
       "sha256": "512EA143794332967B346D76791BBA10E0C10C5D20D8E1FA8F6534C2069F9B7C"
     },
     "laptop14_dev": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\dev.txt",
+      "path": "data/aste/cross_domain/laptop14/dev.txt",
       "sha256": "0ADBF20FC75284D5D49523F56EC368D94A9DA305E87411E0C627D12CD4510BC0"
     },
     "laptop14_test": {
-      "path": "J:\\nlp\\BGCA-master\\data\\aste\\cross_domain\\laptop14\\test.txt",
+      "path": "data/aste/cross_domain/laptop14/test.txt",
       "sha256": "413A3F655409AF25BCB03A9499709925349FFF3EDBC3A7CA95FC6CDF788EEB92"
     },
     "t5_config": {
-      "path": "J:\\nlp\\models\\t5-base-py\\config.json",
+      "path": "models/t5-base-py/config.json",
       "sha256": "46DD7CB62D29C81FB551E0EF1EA274C24A46BA441EEB948897706252933DF033"
     },
     "t5_weights": {
-      "path": "J:\\nlp\\models\\t5-base-py\\pytorch_model.bin",
+      "path": "models/t5-base-py/pytorch_model.bin",
       "sha256": "AB97165968EDC4AACD30554D18D7BECA7F18B3A83E1A47ABBAD29792D984651F"
     },
     "t5_tokenizer": {
-      "path": "J:\\nlp\\models\\t5-base-py\\spiece.model",
+      "path": "models/t5-base-py/spiece.model",
       "sha256": "D60ACB128CF7B7F2536E8F38A5B18A05535C9E14C7A355904270E15B0945EA86"
     },
     "nli_config": {
-      "path": "J:\\nlp\\models\\nli-deberta-v3-base-mnli-fever-anli\\config.json",
+      "path": "models/nli-deberta-v3-base-mnli-fever-anli/config.json",
       "sha256": "A6C616D6DABEACF90FD0E776C741D3F0F30A05533CCF0BD3B5B62E94CFAA8D57"
     },
     "nli_weights": {
-      "path": "J:\\nlp\\models\\nli-deberta-v3-base-mnli-fever-anli\\model.safetensors",
+      "path": "models/nli-deberta-v3-base-mnli-fever-anli/model.safetensors",
       "sha256": "06D6FD89EDD4F97816831626DAAFBDB0B029CF63BAE8EDC0BCCAB1D64E2E7707"
     }
   },

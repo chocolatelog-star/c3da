@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -27,6 +28,11 @@ class ReproducibleRecipeTest(unittest.TestCase):
         self.assertNotIn("runs\\\\", text)
         self.assertEqual(self.recipe["source_dataset"], "rest16")
         self.assertEqual(self.recipe["target_dataset"], "laptop14")
+
+    def test_historical_best_recipe_paths_are_portable(self):
+        text = RECIPE.read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"[A-Za-z]:[\\/]", text))
+        self.assertNotIn("BGCA-master", text)
 
     def test_golden_hashes_are_complete(self):
         required = {
