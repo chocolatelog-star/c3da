@@ -207,6 +207,7 @@ def execute_stages(
     recipe: dict,
     project_root: Path,
     dry_run: bool,
+    skip_golden_validation: bool = False,
 ) -> None:
     total = len(stages)
     for index, stage in enumerate(stages, start=1):
@@ -218,7 +219,8 @@ def execute_stages(
 
         if stage.name in context.manifest.get("stages", {}):
             if context.validate_completed_stage(stage.name, stage.outputs, input_hashes):
-                validate_golden_artifact(stage, recipe)
+                if not skip_golden_validation:
+                    validate_golden_artifact(stage, recipe)
                 print(
                     f"[native-repro] SKIP {index}/{total} {stage.name} "
                     "(validated checkpoint)",
@@ -247,7 +249,7 @@ def execute_stages(
 
         context.mark_stage_complete(stage.name, stage.outputs, input_hashes)
         try:
-            golden_result = validate_golden_artifact(stage, recipe)
+            golden_result = None if skip_golden_validation else validate_golden_artifact(stage, recipe)
         except GoldenMismatchError as error:
             context.manifest.setdefault("golden_comparisons", {})[stage.name] = {
                 "matched": False,
@@ -728,12 +730,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--allow_dirty", action="store_true")
     parser.add_argument("--user_command", default="")
+    parser.add_argument("--train_batch_size", type=int, default=None)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
+    parser.add_argument("--skip_golden_validation", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     recipe = load_recipe(Path(args.recipe))
+    if args.train_batch_size is not None or args.gradient_accumulation_steps is not None:
+        recipe["training"] = dict(recipe["training"])
+        if args.train_batch_size is not None:
+            recipe["training"]["train_batch_size"] = args.train_batch_size
+        if args.gradient_accumulation_steps is not None:
+            recipe["training"]["gradient_accumulation_steps"] = args.gradient_accumulation_steps
     commit, branch = validate_git_state(PROJECT_ROOT, args.allow_dirty)
     run_root = (
         Path(args.output_root).resolve()
@@ -781,7 +792,7 @@ def main() -> None:
     stages = build_best_v1_stages(
         PROJECT_ROOT, run_root, recipe, Path(sys.executable), args.cuda
     )
-    execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run)
+    execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run, args.skip_golden_validation)
     context.render_run_record_cn()
 
 
