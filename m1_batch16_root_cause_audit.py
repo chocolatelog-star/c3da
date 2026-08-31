@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from transformers import Trainer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from element_aware_rgat import balanced_element_focus_loss, multi_element_coverage_loss
 
@@ -30,6 +31,40 @@ def load_source_audit_rows(path: str | Path, *, start: int = 0) -> list[dict]:
     if len(selected) != 16:
         raise ValueError(f"source audit sample must contain 16 rows, found {len(selected)}")
     return selected
+
+
+def load_prepared_rows(path: str | Path, *, start: int = 0) -> list[dict]:
+    rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    selected = rows[start : start + 16]
+    if len(selected) != 16:
+        raise ValueError(f"prepared audit sample must contain 16 rows, found {len(selected)}")
+    return selected
+
+
+def audit_real_t5_generation(*, model_path: str | Path, prepared_file: str | Path, start: int = 0, seed: int = 1000) -> dict:
+    torch.manual_seed(seed)
+    rows = load_prepared_rows(prepared_file, start=start)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to("cpu").float()
+    model.eval()
+    encoded = tokenizer([row["input"] for row in rows], text_target=[row["target"] for row in rows], padding=True, truncation=True, max_length=128, return_tensors="pt")
+    labels = encoded.pop("labels")
+    with torch.no_grad():
+        reference = model(**encoded, labels=labels).loss
+    per_example = []
+    for index in range(16):
+        with torch.no_grad():
+            per_example.append(float(model(**{key: value[index:index + 1] for key, value in encoded.items()}, labels=labels[index:index + 1]).loss))
+    result = {"schema_version": 1, "seed": seed, "sample_ids": [row.get("id", index) for index, row in enumerate(rows)], "reference_batch16_loss": float(reference), "loss_per_example": per_example, "splits": []}
+    for micro_batch, accumulation in SPLITS:
+        chunks = [slice(index, index + micro_batch) for index in range(0, 16, micro_batch)]
+        losses = []
+        for item in chunks:
+            with torch.no_grad():
+                losses.append(float(model(**{key: value[item] for key, value in encoded.items()}, labels=labels[item]).loss))
+        result["splits"].append({"micro_batch": micro_batch, "accumulation": accumulation, "loss": sum(losses) / len(losses), "effective_batch_size": micro_batch * accumulation})
+    result["conclusion"] = {"generation_loss_batch_dependent": max(item["loss"] for item in result["splits"]) - min(item["loss"] for item in result["splits"]) > 1e-7, "target_test_accessed": False, "target_test_gold": False}
+    return result
 
 
 def generation_per_example_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -110,10 +145,14 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--source_train", required=True)
+    parser.add_argument("--prepared_file")
+    parser.add_argument("--model_path")
     parser.add_argument("--start", type=int, default=0)
     args = parser.parse_args()
     sample = load_source_audit_rows(args.source_train, start=args.start)
     report = audit_loss_reductions(seed=args.seed, sample_ids=[row["id"] for row in sample], triplet_counts=[row["triplet_count"] for row in sample])
+    if args.prepared_file and args.model_path:
+        report["real_t5_generation"] = audit_real_t5_generation(model_path=args.model_path, prepared_file=args.prepared_file, seed=args.seed)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False))
