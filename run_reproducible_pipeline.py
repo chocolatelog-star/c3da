@@ -68,10 +68,16 @@ def validate_git_state(project_root: Path, allow_dirty: bool) -> tuple[str, str]
     return commit, branch
 
 
-def validate_external_inputs(recipe: dict) -> dict[str, str]:
+def resolve_recipe_path(project_root: Path, value: str | Path) -> Path:
+    """Resolve recipe paths relative to the checkout, preserving absolute paths."""
+    path = Path(value)
+    return path if path.is_absolute() else (Path(project_root) / path).resolve()
+
+
+def validate_external_inputs(recipe: dict, project_root: Path = PROJECT_ROOT) -> dict[str, str]:
     validated = {}
     for name, declaration in recipe.get("external_inputs", {}).items():
-        path = Path(declaration["path"])
+        path = resolve_recipe_path(project_root, declaration["path"])
         if not path.is_file():
             raise ReproducibilityError(f"external input is missing for {name}: {path}")
         actual_hash = sha256_file(path)
@@ -275,8 +281,8 @@ def build_best_v1_stages(
     final_data = run_root / "final_data"
     pipeline = project_root / "t5_aste_pipeline.py"
     trainer = project_root / "t5_absa_train.py"
-    model = recipe["models"]["t5_base"]
-    nli_model = recipe["models"]["nli"]
+    model = str(resolve_recipe_path(project_root, recipe["models"]["t5_base"]))
+    nli_model = str(resolve_recipe_path(project_root, recipe["models"]["nli"]))
     seed = str(recipe["seed"])
     training = recipe["training"]
     pseudo = recipe["pseudo"]
@@ -752,7 +758,7 @@ def main() -> None:
     context.write_user_command(user_command)
     if not args.dry_run:
         try:
-            external_hashes = validate_external_inputs(recipe)
+            external_hashes = validate_external_inputs(recipe, PROJECT_ROOT)
         except ReproducibilityError as error:
             context.manifest["external_inputs"] = {
                 "matched": False,
@@ -767,7 +773,7 @@ def main() -> None:
         }
         write_json_atomic(context.manifest_path, context.manifest)
         model_paths = [
-            Path(recipe["external_inputs"][name]["path"])
+            resolve_recipe_path(PROJECT_ROOT, recipe["external_inputs"][name]["path"])
             for name in ("t5_weights", "nli_weights")
             if name in recipe.get("external_inputs", {})
         ]

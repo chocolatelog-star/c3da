@@ -2,6 +2,8 @@ import json
 import unittest
 from pathlib import Path
 
+from run_reproducible_pipeline import resolve_recipe_path, validate_external_inputs
+
 
 ROOT = Path(__file__).resolve().parent
 RECIPE = ROOT / "configs" / "recipes" / "rest16_to_laptop14_best_v1.json"
@@ -27,6 +29,19 @@ class ReproducibleRecipeTest(unittest.TestCase):
         self.assertNotIn("runs\\\\", text)
         self.assertEqual(self.recipe["source_dataset"], "rest16")
         self.assertEqual(self.recipe["target_dataset"], "laptop14")
+
+    def test_recipe_paths_are_checkout_relative_and_resolve(self):
+        paths = [self.recipe["models"]["t5_base"], self.recipe["models"]["nli"]]
+        paths.extend(item["path"] for item in self.recipe["external_inputs"].values())
+        self.assertTrue(all(not Path(path).is_absolute() for path in paths))
+        self.assertTrue(all(not str(path).startswith("J:\\") for path in paths))
+        self.assertTrue(all(resolve_recipe_path(ROOT, path).is_absolute() for path in paths))
+
+    def test_external_input_validation_uses_project_root(self):
+        recipe = {"external_inputs": {"sample": {"path": "sample.txt", "sha256": ""}}}
+        with self.assertRaises(Exception) as raised:
+            validate_external_inputs(recipe, ROOT)
+        self.assertIn("sample.txt", str(raised.exception))
 
     def test_golden_hashes_are_complete(self):
         required = {
