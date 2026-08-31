@@ -24,6 +24,7 @@ from reproducibility import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_MIN_FREE_GB = 8.0
 FINAL_TAG = "strict_aug150_w020_label_to_text_gen_complete_multi2_w025_pw065"
 RESULT_TAG = f"{FINAL_TAG}_sentiment_contrastive_l001_source_balanced"
 
@@ -72,6 +73,15 @@ def resolve_recipe_path(project_root: Path, value: str | Path) -> Path:
     """Resolve recipe paths relative to the checkout, preserving absolute paths."""
     path = Path(value)
     return path if path.is_absolute() else (Path(project_root) / path).resolve()
+
+
+def require_free_space(path: Path, minimum_gb: float) -> None:
+    usage = shutil.disk_usage(path)
+    free_gb = usage.free / (1024**3)
+    if free_gb < minimum_gb:
+        raise ReproducibilityError(
+            f"insufficient free disk space at {path}: {free_gb:.2f} GiB < {minimum_gb:.2f} GiB"
+        )
 
 
 def validate_external_inputs(recipe: dict, project_root: Path = PROJECT_ROOT) -> dict[str, str]:
@@ -717,6 +727,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
     parser.add_argument("--skip_golden_validation", action="store_true")
     parser.add_argument("--save_total_limit", type=int, default=1)
+    parser.add_argument("--min_free_gb", type=float, default=DEFAULT_MIN_FREE_GB)
     return parser.parse_args()
 
 
@@ -776,6 +787,7 @@ def main() -> None:
     stages = build_best_v1_stages(
         PROJECT_ROOT, run_root, recipe, Path(sys.executable), args.cuda, args.save_total_limit
     )
+    require_free_space(run_root.parent, args.min_free_gb)
     execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run, args.skip_golden_validation)
     context.render_run_record_cn()
 
