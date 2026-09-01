@@ -20,14 +20,17 @@ def _one(root: Path, pattern: str) -> Path:
 
 def discover_shared_artifacts(shared_run: Path) -> dict[str, Path]:
     root = Path(shared_run)
+    final_data_root = root / "final_data"
+    if not final_data_root.is_dir():
+        raise FileNotFoundError(f"missing shared upstream artifacts: {final_data_root}")
     return {
         "extractor_config": _one(root, "models/extractor_ep25_plain_last/best/config.json"),
         "pseudo": _one(root, "target_pseudo_high_precision.jsonl"),
         "generator_config": _one(root, "models/generator*/best/config.json"),
         "selected_augment": _one(root, "c3da_two_channel_augmented_selected*.jsonl"),
-        "final_train": _one(root, "final_train_*.jsonl"),
-        "final_dev": _one(root, "final_dev_*.jsonl"),
-        "target_test": _one(root, "target_test.jsonl"),
+        "final_train": _one(final_data_root, "final_train_*.jsonl"),
+        "final_dev": _one(final_data_root, "final_dev_*.jsonl"),
+        "target_test": _one(final_data_root, "target_test.jsonl"),
     }
 
 
@@ -56,7 +59,9 @@ def run_unit(args, root: Path, paths: dict[str, Path], manifest: dict, batch: in
     rc = run_command(train, unit / "train.log", env)
     eval_rc = run_command(build_evaluate_command(Path(args.project_root), unit, model_dir, paths["target_test"], "0"), unit / "evaluate.log", env) if rc == 0 else None
     result = {"status": "complete" if rc == 0 and eval_rc == 0 else "failed", "batch": batch, "accumulation": accumulation, "effective_batch_size": batch * accumulation, "gpu": gpu, "train_returncode": rc, "evaluate_returncode": eval_rc, "shared_manifest_sha256": sha256_file(root / "shared_upstream_manifest.json"), "fixed_metrics": read_json(unit / "aste_metrics_fixed_fixed_upstream.json", {})}
-    atomic_write_json(unit / "result.json", result); write_status(status_path, result["status"], **result)
+    atomic_write_json(unit / "result.json", result)
+    status_fields = {key: value for key, value in result.items() if key != "status"}
+    write_status(status_path, result["status"], **status_fields)
     return result
 
 
