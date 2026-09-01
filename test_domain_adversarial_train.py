@@ -81,6 +81,7 @@ def test_dataset_builds_clean_sentiment_contrastive_features():
 
 
 def test_sentiment_prototype_loss_works_with_one_triplet():
+    torch.manual_seed(0)
     hidden = torch.tensor([[[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]]], requires_grad=True)
     spans = torch.tensor([[[0, 2]]])
     labels = torch.tensor([[0]])
