@@ -8,7 +8,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from experiment_runner_common import assign_gpus, atomic_write_json, matrix_unit_dir, read_json, run_command, sha256_file, write_status
+from experiment_runner_common import atomic_write_json, group_units_by_gpu, matrix_unit_dir, read_json, run_command, sha256_file, write_status
 
 
 def _one(root: Path, pattern: str) -> Path:
@@ -60,6 +60,10 @@ def run_unit(args, root: Path, paths: dict[str, Path], manifest: dict, batch: in
     return result
 
 
+def run_gpu_queue(args, root: Path, paths: dict[str, Path], manifest: dict, gpu: str, groups: list[tuple[int, int]]) -> list[dict]:
+    return [run_unit(args, root, paths, manifest, batch, accumulation, gpu) for batch, accumulation in groups]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run final-train batch matrix with identical frozen inputs")
     parser.add_argument("--shared_run", required=True)
@@ -75,11 +79,11 @@ def main() -> int:
     paths = {name: Path(value["path"]) for name, value in manifest["artifacts"].items()}
     gpus = [x.strip() for x in args.gpus.split(",") if x.strip()]
     groups = [tuple(map(int, item.split("x", 1))) for item in args.groups.split(",")]
-    assignments = assign_gpus(groups, gpus); rows = []
+    queues = group_units_by_gpu(groups, gpus); rows = []
     with ThreadPoolExecutor(max_workers=len(gpus)) as executor:
-        futures = [executor.submit(run_unit, args, root, paths, manifest, batch, accumulation, gpu) for (batch, accumulation), gpu in assignments]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="downstream-batch"):
-            rows.append(future.result())
+        futures = [executor.submit(run_gpu_queue, args, root, paths, manifest, gpu, queue) for gpu, queue in queues.items() if queue]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="downstream-gpu-queues"):
+            rows.extend(future.result())
     rows.sort(key=lambda row: (row["effective_batch_size"], row["batch"]))
     atomic_write_json(root / "fixed_upstream_downstream_batch_matrix.json", rows)
     (root / "fixed_upstream_downstream_batch_matrix.md").write_text("# 固定上游下游 Batch 矩阵\n\n" + "\n".join(f"- batch={r['batch']}, accumulation={r['accumulation']}, status={r['status']}, fixed={r.get('fixed_metrics', {})}" for r in rows) + "\n", encoding="utf-8")

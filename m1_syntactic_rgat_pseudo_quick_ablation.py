@@ -70,9 +70,9 @@ def apply_training_overrides(
         training["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
     return resolved
 FORMAL_PHASE_A_CALLPOINTS = {
-    "source_extractor_training": "t5_absa_train.WeightedSeq2SeqTrainer.compute_loss",
+    "source_extractor_training": "t5_absa_train_graph.WeightedSeq2SeqTrainer.compute_loss",
     "source_dev_evaluation": "t5_aste_pipeline.evaluate -> generate_texts",
-    "target_unlabeled_dann": "t5_absa_train.WeightedSeq2SeqTrainer.compute_loss",
+    "target_unlabeled_dann": "t5_absa_train_graph.WeightedSeq2SeqTrainer.compute_loss",
     "target_pseudo_inference": "t5_aste_pipeline.pseudo -> generate_texts",
 }
 CONTROL_IDENTITY_FIELDS = (
@@ -2605,12 +2605,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps({"status": "BLOCKED", "formal_evidence": False, "report": str(report_path)}, ensure_ascii=False))
         return 2
+    recipe_data = _read_json(Path(args.recipe))
+    _validate_recipe(recipe_data)
     args.recipe_data = apply_training_overrides(
-        _read_json(Path(args.recipe)),
+        recipe_data,
         extractor_train_batch_size=args.extractor_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
-    _validate_recipe(args.recipe_data)
     if args.dry_run:
         print(json.dumps({"task_id": TASK_ID, "scope": build_phase_a_scope(), "recipe": args.recipe}, ensure_ascii=False, indent=2))
         return 0

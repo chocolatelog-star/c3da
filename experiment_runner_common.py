@@ -18,6 +18,13 @@ def assign_gpus(units: Sequence[str], gpus: Sequence[str]) -> list[tuple[str, st
     return [(unit, gpus[index % len(gpus)]) for index, unit in enumerate(units)]
 
 
+def group_units_by_gpu(units: Sequence[Any], gpus: Sequence[str]) -> dict[str, list[Any]]:
+    queues = {gpu: [] for gpu in gpus}
+    for unit, gpu in assign_gpus(units, gpus):
+        queues[gpu].append(unit)
+    return queues
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

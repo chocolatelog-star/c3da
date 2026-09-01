@@ -9,7 +9,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from experiment_runner_common import assign_gpus, atomic_write_json, completed_file, matrix_unit_dir, read_json, run_command, sha256_file, write_status
+from experiment_runner_common import atomic_write_json, completed_file, group_units_by_gpu, matrix_unit_dir, read_json, run_command, sha256_file, write_status
 
 
 DEFAULT_GROUPS = [(1, 16), (8, 2), (16, 1), (16, 2), (32, 1)]
@@ -61,6 +61,10 @@ def run_unit(args, root: Path, recipe_id: str, batch: int, accumulation: int, gp
     return result
 
 
+def run_gpu_queue(args, root: Path, recipe_id: str, gpu: str, groups: list[tuple[int, int]]) -> list[dict]:
+    return [run_unit(args, root, recipe_id, batch, accumulation, gpu) for batch, accumulation in groups]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run upstream-only batch matrix")
     parser.add_argument("--recipe", required=True)
@@ -75,12 +79,12 @@ def main() -> int:
     recipe_id = recipe_data["recipe_id"]
     gpus = [x.strip() for x in args.gpus.split(",") if x.strip()]
     groups = parse_groups(args.groups)
-    assignments = assign_gpus(groups, gpus)
+    queues = group_units_by_gpu(groups, gpus)
     rows = []
     with ThreadPoolExecutor(max_workers=len(gpus)) as executor:
-        futures = [executor.submit(run_unit, args, root, recipe_id, batch, accumulation, gpu) for (batch, accumulation), gpu in assignments]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="upstream-batch"):
-            rows.append(future.result())
+        futures = [executor.submit(run_gpu_queue, args, root, recipe_id, gpu, queue) for gpu, queue in queues.items() if queue]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="upstream-gpu-queues"):
+            rows.extend(future.result())
     rows.sort(key=lambda row: (row["effective_batch_size"], row["batch"]))
     atomic_write_json(root / "upstream_batch_matrix.json", rows)
     (root / "upstream_batch_matrix.md").write_text("# 上游 Batch 矩阵\n\n" + "\n".join(f"- batch={r['batch']}, accumulation={r['accumulation']}, status={r['status']}, source-dev={r.get('source_dev_metrics', {})}" for r in rows) + "\n", encoding="utf-8")
