@@ -57,7 +57,9 @@ def run_unit(args, root: Path, recipe_id: str, batch: int, accumulation: int, gp
         result["extractor_sha256"] = sha256_file(model) if completed_file(model) else ""
         if result["source_dev_returncode"] != 0:
             result["status"] = "failed"
-    atomic_write_json(unit / "result.json", result); write_status(status_path, result["status"], **result)
+    atomic_write_json(unit / "result.json", result)
+    status_fields = {key: value for key, value in result.items() if key != "status"}
+    write_status(status_path, result["status"], **status_fields)
     return result
 
 
