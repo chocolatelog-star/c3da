@@ -81,7 +81,10 @@ def build_adapter_manifest(treatment_dir: Path, adapter_dir: Path, *, source: st
 
 
 def build_full_command(*, project_root: Path, adapter: Path, output_root: Path, model_path: str, train_batch_size: int, accumulation: int, cuda: str, seed: int) -> list[str]:
-    return [sys.executable, str(Path(project_root) / "run_bgca_aste_stage1_pairs.py"), "--pairs", "laptop14:rest15", "--output_root", str(output_root), "--reuse_upstream_run_dir", str(adapter), "--extractor_model_path", model_path, "--generator_model_path", model_path, "--generator_prompt_style", "label_to_text", "--augment_prompt_style", "masked_mutual", "--complete_multi_extra_weight", "0.25", "--final_pseudo_weight", "0.75", "--final_augment_weight", "0.2", "--lambda_sentiment_contrastive", "0.01", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--train_batch_size", str(train_batch_size), "--gradient_accumulation_steps", str(accumulation), "--eval_batch_size", "2", "--learning_rate", "0.0003", "--cuda", str(cuda), "--seed", str(seed)]
+    model_root = Path(model_path).resolve().parent
+    nli_model_path = model_root / "nli-deberta-v3-base-mnli-fever-anli"
+    glove_path = model_root / "glove" / "glove.6B.300d.txt"
+    return [sys.executable, str(Path(project_root) / "run_bgca_aste_stage1_pairs.py"), "--pairs", "laptop14:rest15", "--output_root", str(output_root), "--reuse_upstream_run_dir", str(adapter), "--extractor_model_path", model_path, "--generator_model_path", model_path, "--generator_prompt_style", "label_to_text", "--augment_prompt_style", "masked_mutual", "--nli_model_path", str(nli_model_path), "--sentiment_vector_model_path", model_path, "--glove_path", str(glove_path), "--complete_multi_extra_weight", "0.25", "--final_pseudo_weight", "0.75", "--final_augment_weight", "0.2", "--lambda_sentiment_contrastive", "0.01", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--train_batch_size", str(train_batch_size), "--gradient_accumulation_steps", str(accumulation), "--eval_batch_size", "2", "--learning_rate", "0.0003", "--cuda", str(cuda), "--seed", str(seed)]
 
 
 def main() -> int:

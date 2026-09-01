@@ -60,6 +60,8 @@ def test_full_command_uses_supported_stage1_arguments(tmp_path: Path):
         seed=1000,
     )
     assert "--lambda_domain_adv" not in command
+    assert command[command.index("--nli_model_path") + 1].endswith("nli-deberta-v3-base-mnli-fever-anli")
+    assert command[command.index("--glove_path") + 1].endswith("glove.6B.300d.txt")
 
 
 def test_phase_a_allows_explicit_batch_override_only():
