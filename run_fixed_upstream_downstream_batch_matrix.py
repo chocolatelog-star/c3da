@@ -18,12 +18,17 @@ def _one(root: Path, pattern: str) -> Path:
     return matches[-1]
 
 
+def _optional(root: Path, pattern: str) -> Path | None:
+    matches = sorted(path for path in Path(root).rglob(pattern) if path.is_file())
+    return matches[-1] if matches else None
+
+
 def discover_shared_artifacts(shared_run: Path) -> dict[str, Path]:
     root = Path(shared_run)
     final_data_root = root / "final_data"
     if not final_data_root.is_dir():
         raise FileNotFoundError(f"missing shared upstream artifacts: {final_data_root}")
-    return {
+    artifacts = {
         "extractor_config": _one(root, "models/extractor_ep25_plain_last/best/config.json"),
         "pseudo": _one(root, "target_pseudo_high_precision.jsonl"),
         "generator_config": _one(root, "models/generator*/best/config.json"),
@@ -32,6 +37,20 @@ def discover_shared_artifacts(shared_run: Path) -> dict[str, Path]:
         "final_dev": _one(final_data_root, "final_dev_*.jsonl"),
         "target_test": _one(final_data_root, "target_test.jsonl"),
     }
+    pseudo_analysis = _optional(root, "target_pseudo_high_precision_analysis.json")
+    if pseudo_analysis is not None:
+        artifacts["pseudo_analysis"] = pseudo_analysis
+    return artifacts
+
+
+def _pseudo_raw_f1(path: Path | None) -> float | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        value = read_json(path, {})
+        return value.get("hidden_gold_eval", {}).get("raw_scores", {}).get("micro_f1")
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def build_shared_manifest(shared_upstream: Path) -> dict:
@@ -60,7 +79,7 @@ def run_unit(args, root: Path, paths: dict[str, Path], manifest: dict, batch: in
     train = build_downstream_command(project_root=Path(args.project_root), shared_final_train=paths["final_train"], shared_final_dev=paths["final_dev"], output_dir=model_dir, train_batch_size=batch, accumulation=accumulation, cuda="0", model_path=Path(configured_model) if configured_model else None)
     rc = run_command(train, unit / "train.log", env)
     eval_rc = run_command(build_evaluate_command(Path(args.project_root), unit, model_dir, paths["target_test"], "0"), unit / "evaluate.log", env) if rc == 0 else None
-    result = {"status": "complete" if rc == 0 and eval_rc == 0 else "failed", "batch": batch, "accumulation": accumulation, "effective_batch_size": batch * accumulation, "gpu": gpu, "train_returncode": rc, "evaluate_returncode": eval_rc, "shared_manifest_sha256": sha256_file(root / "shared_upstream_manifest.json"), "raw_metrics": read_json(unit / "aste_metrics_raw_fixed_upstream.json", {}), "fixed_metrics": read_json(unit / "aste_metrics_fixed_fixed_upstream.json", {})}
+    result = {"status": "complete" if rc == 0 and eval_rc == 0 else "failed", "batch": batch, "accumulation": accumulation, "effective_batch_size": batch * accumulation, "gpu": gpu, "train_returncode": rc, "evaluate_returncode": eval_rc, "shared_manifest_sha256": sha256_file(root / "shared_upstream_manifest.json"), "pseudo_raw_f1": _pseudo_raw_f1(paths.get("pseudo_analysis")), "raw_metrics": read_json(unit / "aste_metrics_raw_fixed_upstream.json", {}), "fixed_metrics": read_json(unit / "aste_metrics_fixed_fixed_upstream.json", {})}
     atomic_write_json(unit / "result.json", result)
     status_fields = {key: value for key, value in result.items() if key != "status"}
     write_status(status_path, result["status"], **status_fields)
