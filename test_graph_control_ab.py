@@ -44,3 +44,19 @@ def test_complete_phase_a_artifacts_allow_downstream_after_gate_stop(tmp_path: P
         (model / "config.json").write_text("{}", encoding="utf-8")
         (tmp_path / variant / "target_pseudo_selected.jsonl").write_text("{}\n", encoding="utf-8")
     assert phase_a_artifacts_complete(tmp_path) is True
+
+
+def test_full_command_uses_supported_stage1_arguments(tmp_path: Path):
+    from run_plan_a_graph_best import build_full_command
+
+    command = build_full_command(
+        project_root=tmp_path,
+        adapter=tmp_path / "adapter",
+        output_root=tmp_path / "output",
+        model_path="model",
+        train_batch_size=16,
+        accumulation=1,
+        cuda="0",
+        seed=1000,
+    )
+    assert "--lambda_domain_adv" not in command
