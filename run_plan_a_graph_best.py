@@ -44,6 +44,21 @@ def build_adapter_manifest(treatment_dir: Path, adapter_dir: Path, *, source: st
     _link_or_copy(model, adapter_dir / "models" / "extractor_ep25_plain_last" / "best")
     _link_or_copy(pseudo, adapter_dir / "target_pseudo.jsonl")
     _link_or_copy(pseudo, adapter_dir / "target_pseudo_high_precision.jsonl")
+    # Reused upstream runs must expose the same shared inputs expected by the
+    # downstream pipeline.  The previous adapter only linked model/pseudo
+    # artifacts, causing augmentation to fail on source_train.jsonl.
+    for name in (
+        "source_train.jsonl",
+        "source_dev.jsonl",
+        "target_unlabeled.jsonl",
+        "target_train_gold_analysis.jsonl",
+        "target_test.jsonl",
+        "extract_train.jsonl",
+        "extract_dev.jsonl",
+    ):
+        source_path = treatment_dir / name
+        if source_path.is_file():
+            _link_or_copy(source_path, adapter_dir / name)
     analysis = {
         "schema_version": 1,
         "status": "complete",
