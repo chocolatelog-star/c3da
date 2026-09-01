@@ -19,7 +19,7 @@ from typing import Any
 
 import torch
 
-from t5_absa_train import classify_terminal_lookahead, read_dann_audit_journal
+from t5_absa_train_graph import classify_terminal_lookahead, read_dann_audit_journal
 
 
 PRODUCER_TRAINING_SEMANTICS_COMMIT = "9caba1c508d096a4d360d7940d8c9d9eb4be8333"

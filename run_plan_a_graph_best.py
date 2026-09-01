@@ -34,7 +34,7 @@ def _link_or_copy(source: Path, destination: Path) -> None:
             shutil.copy2(source, destination)
 
 
-def build_adapter_manifest(treatment_dir: Path, adapter_dir: Path, *, source: str, target: str, seed: int) -> dict:
+def build_adapter_manifest(treatment_dir: Path, adapter_dir: Path, *, source: str, target: str, seed: int, variant: str = "treatment") -> dict:
     treatment_dir = Path(treatment_dir).resolve()
     adapter_dir = Path(adapter_dir).resolve()
     model = treatment_dir / "models" / "extractor" / "best"
@@ -59,8 +59,14 @@ def build_adapter_manifest(treatment_dir: Path, adapter_dir: Path, *, source: st
     state["resolved_model_path"] = analysis["model_path"]
     (adapter_dir / "target_pseudo_generation_state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest = {"schema_version": 1, "source": str(treatment_dir), "adapter": str(adapter_dir), "source_dataset": source, "target_dataset": target, "seed": seed, "target_test_access": False, "pseudo_file": str(pseudo)}
-    (adapter_dir / "graph_treatment_adapter.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest["variant"] = variant
+    manifest["graph_enabled"] = variant == "treatment"
+    (adapter_dir / f"graph_{variant}_adapter.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
+
+
+def build_full_command(*, project_root: Path, adapter: Path, output_root: Path, model_path: str, train_batch_size: int, accumulation: int, cuda: str, seed: int) -> list[str]:
+    return [sys.executable, str(Path(project_root) / "run_bgca_aste_stage1_pairs.py"), "--pairs", "laptop14:rest15", "--output_root", str(output_root), "--reuse_upstream_run_dir", str(adapter), "--extractor_model_path", model_path, "--generator_model_path", model_path, "--generator_prompt_style", "label_to_text", "--augment_prompt_style", "masked_mutual", "--complete_multi_extra_weight", "0.25", "--final_pseudo_weight", "0.75", "--final_augment_weight", "0.2", "--lambda_sentiment_contrastive", "0.01", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--lambda_domain_adv", "0.03", "--train_batch_size", str(train_batch_size), "--gradient_accumulation_steps", str(accumulation), "--eval_batch_size", "2", "--learning_rate", "0.0003", "--cuda", str(cuda), "--seed", str(seed)]
 
 
 def main() -> int:
@@ -86,7 +92,7 @@ def main() -> int:
         return 0
     subprocess.run(phase_cmd, cwd=root, check=True)
     manifest = build_adapter_manifest(phase_a / "treatment", adapter, source="laptop14", target="rest15", seed=args.seed)
-    full_cmd = [sys.executable, "run_bgca_aste_stage1_pairs.py", "--pairs", "laptop14:rest15", "--output_root", args.full_output_root, "--reuse_upstream_run_dir", str(adapter), "--extractor_model_path", args.model_path, "--generator_model_path", args.model_path, "--generator_prompt_style", "label_to_text", "--augment_prompt_style", "masked_mutual", "--complete_multi_extra_weight", "0.25", "--final_pseudo_weight", "0.75", "--final_augment_weight", "0.2", "--lambda_sentiment_contrastive", "0.01", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--lambda_domain_adv", "0.03", "--train_batch_size", str(args.train_batch_size), "--gradient_accumulation_steps", str(args.gradient_accumulation_steps), "--eval_batch_size", "2", "--learning_rate", "0.0003", "--cuda", args.cuda, "--seed", str(args.seed)]
+    full_cmd = build_full_command(project_root=root, adapter=adapter, output_root=Path(args.full_output_root), model_path=args.model_path, train_batch_size=args.train_batch_size, accumulation=args.gradient_accumulation_steps, cuda=args.cuda, seed=args.seed)
     (phase_a / "plan_a_full_command.json").write_text(json.dumps({"adapter": manifest, "command": full_cmd, "target_test_access": True}, ensure_ascii=False, indent=2), encoding="utf-8")
     subprocess.run(full_cmd, cwd=root, check=True)
     return 0
