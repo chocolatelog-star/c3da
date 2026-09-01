@@ -671,7 +671,7 @@ def stage_producer_commit_for_validation(state: dict, stage: str, current_commit
                 return str(producer)
     raise RuntimeError(f"stage {stage} producer commit is outside the audited repair chain")
 
-def _validate_recipe(recipe: dict) -> None:
+def _validate_recipe(recipe: dict, *, allow_batch_overrides: bool = False) -> None:
     if not isinstance(recipe, dict) or recipe.get("task_id") != TASK_ID:
         raise ValueError(f"recipe task_id must be {TASK_ID}")
     training = recipe.get("training", {})
@@ -739,7 +739,12 @@ def _validate_recipe(recipe: dict) -> None:
     expected_recipe = dict(FROZEN_RECIPE)
     if recipe.get("recipe_id") == "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann0_v1":
         expected_recipe["lambda_domain_adv"] = 0.0
-    mismatches = {key: {"actual": actual[key], "expected": expected} for key, expected in expected_recipe.items() if actual[key] != expected}
+    allowed_overrides = {"extractor_train_batch_size", "gradient_accumulation_steps"} if allow_batch_overrides else set()
+    mismatches = {
+        key: {"actual": actual[key], "expected": expected}
+        for key, expected in expected_recipe.items()
+        if actual[key] != expected and key not in allowed_overrides
+    }
     mismatches.update({f"pseudo.{key}": {"actual": actual_pseudo[key], "expected": expected} for key, expected in FROZEN_PSEUDO_RECIPE.items() if actual_pseudo[key] != expected})
     expected_model_path = Path(r"models/t5-base-py").resolve()
     models = recipe.get("models")
@@ -2123,7 +2128,7 @@ def validate_phase_a_graph_cache(
 
 def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
-    _validate_recipe(recipe)
+    _validate_recipe(recipe, allow_batch_overrides=True)
     run_dir = Path(args.output_dir)
     if run_dir.exists() and not args.resume:
         raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")

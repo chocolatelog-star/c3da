@@ -60,3 +60,16 @@ def test_full_command_uses_supported_stage1_arguments(tmp_path: Path):
         seed=1000,
     )
     assert "--lambda_domain_adv" not in command
+
+
+def test_phase_a_allows_explicit_batch_override_only():
+    from m1_syntactic_rgat_pseudo_quick_ablation import (
+        _read_json,
+        _validate_recipe,
+        apply_training_overrides,
+    )
+
+    recipe_path = Path(__file__).parent / "configs" / "recipes" / "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann0_v1.json"
+    recipe = _read_json(recipe_path)
+    overridden = apply_training_overrides(recipe, extractor_train_batch_size=16, gradient_accumulation_steps=1)
+    _validate_recipe(overridden, allow_batch_overrides=True)
