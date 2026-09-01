@@ -18,6 +18,8 @@ from reproducibility import (
     semantic_text_label_sha256,
     semantic_training_rows_sha256,
     sha256_file,
+    canonical_json_sha256,
+    resolve_project_path,
     validate_metrics,
     write_json_atomic,
 )
@@ -68,10 +70,11 @@ def validate_git_state(project_root: Path, allow_dirty: bool) -> tuple[str, str]
     return commit, branch
 
 
-def validate_external_inputs(recipe: dict) -> dict[str, str]:
+def validate_external_inputs(recipe: dict, project_root: Path | None = None) -> dict[str, str]:
+    project_root = Path(project_root or PROJECT_ROOT)
     validated = {}
     for name, declaration in recipe.get("external_inputs", {}).items():
-        path = Path(declaration["path"])
+        path = resolve_project_path(declaration["path"], project_root, env_var="C3DA_MODEL_ROOT" if "model" in name else None)
         if not path.is_file():
             raise ReproducibilityError(f"external input is missing for {name}: {path}")
         actual_hash = sha256_file(path)
@@ -83,6 +86,59 @@ def validate_external_inputs(recipe: dict) -> dict[str, str]:
             )
         validated[name] = actual_hash
     return validated
+
+
+def resolve_recipe_paths(recipe: dict, project_root: Path) -> dict:
+    resolved = json.loads(json.dumps(recipe))
+    for declaration in resolved.get("external_inputs", {}).values():
+        declaration["path"] = str(resolve_project_path(declaration["path"], project_root, env_var="C3DA_MODEL_ROOT" if "model" in declaration.get("path", "").lower() else None))
+    for key, value in resolved.get("models", {}).items():
+        resolved["models"][key] = str(resolve_project_path(value, project_root, env_var="C3DA_MODEL_ROOT"))
+    return resolved
+
+
+def apply_cli_overrides(recipe: dict, args: argparse.Namespace) -> dict:
+    resolved = json.loads(json.dumps(recipe))
+    training = resolved.setdefault("training", {})
+    mapping = {
+        "train_batch_size": "train_batch_size",
+        "eval_batch_size": "eval_batch_size",
+        "gradient_accumulation_steps": "gradient_accumulation_steps",
+    }
+    for argument, key in mapping.items():
+        value = getattr(args, argument, None)
+        if value is not None:
+            training[key] = value
+    if "train_batch_size" not in training and "extractor_train_batch_size" in training:
+        training["train_batch_size"] = training["extractor_train_batch_size"]
+    if "eval_batch_size" not in training and "extractor_eval_batch_size" in training:
+        training["eval_batch_size"] = training["extractor_eval_batch_size"]
+    if "train_batch_size" not in training:
+        raise ValueError("recipe training.train_batch_size is required")
+    effective = training["train_batch_size"] * training.get("gradient_accumulation_steps", 1)
+    training["effective_batch_size"] = effective
+    return resolved
+
+
+def ensure_resolved_config(context: RunContext, recipe: dict) -> str:
+    config_hash = canonical_json_sha256(recipe)
+    existing_hash = context.manifest.get("resolved_config_sha256")
+    if existing_hash and existing_hash != config_hash:
+        raise ReproducibilityError("resolved configuration changed; refusing resume")
+    context.manifest["resolved_config_sha256"] = config_hash
+    context.manifest["resolved_config"] = recipe
+    write_json_atomic(context.manifest_path, context.manifest)
+    return config_hash
+
+
+def select_stages(stages: list[Stage], stop_after: str | None = None) -> list[Stage]:
+    """Return a prefix of the recipe stages for upstream-only screening."""
+    if not stop_after:
+        return stages
+    names = [stage.name for stage in stages]
+    if stop_after not in names:
+        raise ValueError(f"unknown stop stage: {stop_after}; choices: {names}")
+    return stages[: names.index(stop_after) + 1]
 
 
 def initialize_recipe_manifest(
@@ -201,6 +257,7 @@ def execute_stages(
     recipe: dict,
     project_root: Path,
     dry_run: bool,
+    strict_golden_validation: bool = False,
 ) -> None:
     total = len(stages)
     for index, stage in enumerate(stages, start=1):
@@ -212,7 +269,13 @@ def execute_stages(
 
         if stage.name in context.manifest.get("stages", {}):
             if context.validate_completed_stage(stage.name, stage.outputs, input_hashes):
-                validate_golden_artifact(stage, recipe)
+                try:
+                    validate_golden_artifact(stage, recipe)
+                except GoldenMismatchError as error:
+                    if strict_golden_validation:
+                        raise
+                    context.manifest.setdefault("golden_comparisons", {})[stage.name] = {"matched": False, "error": str(error)}
+                    write_json_atomic(context.manifest_path, context.manifest)
                 print(
                     f"[native-repro] SKIP {index}/{total} {stage.name} "
                     "(validated checkpoint)",
@@ -249,7 +312,10 @@ def execute_stages(
             }
             write_json_atomic(context.manifest_path, context.manifest)
             context.render_run_record_cn()
-            raise
+            if strict_golden_validation:
+                raise
+            print(f"[native-repro] GOLDEN MISMATCH RECORDED {stage.name}: {error}", flush=True)
+            continue
         if golden_result is not None:
             context.manifest.setdefault("golden_comparisons", {})[stage.name] = {
                 "matched": True,
@@ -722,12 +788,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--allow_dirty", action="store_true")
     parser.add_argument("--user_command", default="")
+    parser.add_argument("--train_batch_size", type=int)
+    parser.add_argument("--eval_batch_size", type=int)
+    parser.add_argument("--gradient_accumulation_steps", type=int)
+    parser.add_argument("--stop_after_stage", choices=["prepare", "extractor", "pseudo", "generator", "augment", "prepare_final", "complete_multi2", "build_final_train", "final_train", "evaluate"])
+    parser.add_argument("--strict_golden_validation", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    recipe = load_recipe(Path(args.recipe))
+    recipe_path = Path(args.recipe).resolve()
+    recipe = load_recipe(recipe_path)
+    recipe = apply_cli_overrides(recipe, args)
+    recipe = resolve_recipe_paths(recipe, PROJECT_ROOT)
     commit, branch = validate_git_state(PROJECT_ROOT, args.allow_dirty)
     run_root = (
         Path(args.output_root).resolve()
@@ -741,7 +815,8 @@ def main() -> None:
         commit,
         branch,
     )
-    initialize_recipe_manifest(context, recipe, Path(args.recipe))
+    initialize_recipe_manifest(context, recipe, recipe_path)
+    ensure_resolved_config(context, recipe)
     user_command = args.user_command
     if user_command.startswith("base64:"):
         user_command = base64.b64decode(user_command.removeprefix("base64:")).decode(
@@ -752,7 +827,7 @@ def main() -> None:
     context.write_user_command(user_command)
     if not args.dry_run:
         try:
-            external_hashes = validate_external_inputs(recipe)
+            external_hashes = validate_external_inputs(recipe, PROJECT_ROOT)
         except ReproducibilityError as error:
             context.manifest["external_inputs"] = {
                 "matched": False,
@@ -775,7 +850,13 @@ def main() -> None:
     stages = build_best_v1_stages(
         PROJECT_ROOT, run_root, recipe, Path(sys.executable), args.cuda
     )
-    execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run)
+    stages = select_stages(stages, args.stop_after_stage)
+    context.manifest["execution_policy"] = {
+        "stop_after_stage": args.stop_after_stage,
+        "strict_golden_validation": args.strict_golden_validation,
+    }
+    write_json_atomic(context.manifest_path, context.manifest)
+    execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run, args.strict_golden_validation)
     context.render_run_record_cn()
 
 

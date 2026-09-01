@@ -1213,7 +1213,7 @@ def main() -> None:
     parser.add_argument("--max_source_length", type=int, default=128)
     parser.add_argument("--max_target_length", type=int, default=96)
     parser.add_argument("--logging_steps", type=int, default=50)
-    parser.add_argument("--save_total_limit", type=int, default=2)
+    parser.add_argument("--save_total_limit", type=int, default=1)
     parser.add_argument("--resume_from_checkpoint", choices=["none", "auto"], default="none")
     parser.add_argument("--seed", type=int, default=1000)
     reproducibility_group = parser.add_mutually_exclusive_group()
@@ -1267,7 +1267,16 @@ def main() -> None:
     reproducibility_config = configure_reproducibility(args.seed, reproducibility_mode)
     print("reproducibility:", reproducibility_config)
     output_dir = Path(args.output_dir)
-    checkpoint_dirs = list(output_dir.glob("checkpoint-*")) if output_dir.exists() else []
+    checkpoint_dirs = (
+        [
+            path
+            for path in output_dir.glob("checkpoint-*")
+            if (path / "trainer_state.json").is_file()
+            and ((path / "model.safetensors").is_file() or (path / "pytorch_model.bin").is_file())
+        ]
+        if output_dir.exists()
+        else []
+    )
     resume_from_checkpoint = args.resume_from_checkpoint == "auto" and bool(checkpoint_dirs)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)

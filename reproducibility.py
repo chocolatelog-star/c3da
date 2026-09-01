@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,35 @@ class ReproducibilityError(RuntimeError):
 
 class GoldenMismatchError(ReproducibilityError):
     pass
+
+
+def canonical_json_sha256(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest().upper()
+
+
+def resolve_project_path(value: str | Path, project_root: Path, *, env_var: str | None = None) -> Path:
+    """Resolve portable recipe paths without interpreting a foreign drive as local."""
+    raw = str(value).strip()
+    if not raw:
+        raise ReproducibilityError("path value must not be empty")
+    candidate = Path(raw)
+    normalized = raw.replace("\\", "/")
+    drive_match = re.match(r"^([A-Za-z]):/(?:nlp/)?(.*)$", normalized, re.IGNORECASE)
+    project_drive = getattr(Path(project_root), "drive", "")
+    same_drive = drive_match and project_drive and drive_match.group(1).upper() == project_drive.upper()
+    if candidate.is_absolute() and candidate.exists() and (not drive_match or same_drive):
+        return candidate.resolve()
+    if env_var:
+        configured_root = os.environ.get(env_var)
+        if configured_root:
+            env_candidate = Path(configured_root) / Path(raw.replace("\\", "/")).name
+            if env_candidate.exists():
+                return env_candidate.resolve()
+    # A Windows path copied into a Linux recipe is mapped by its logical suffix.
+    if drive_match:
+        normalized = drive_match.group(2)
+    return (Path(project_root) / normalized).resolve()
 
 
 RowType = TypeVar("RowType")
@@ -306,6 +336,7 @@ class RunContext:
             f"- 配方编号：`{self.manifest['recipe_id']}`",
             f"- Git 提交：`{self.manifest['git_commit']}`",
             f"- Git 分支：`{self.manifest['git_branch']}`",
+            f"- 解析配置哈希：`{self.manifest.get('resolved_config_sha256', '未记录')}`",
             f"- 恢复次数：`{self.manifest['resume_count']}`",
             "",
             "## 完整运行命令",

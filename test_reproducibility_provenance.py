@@ -16,10 +16,45 @@ from reproducibility import (
     sha256_file,
     console_safe_text,
     validate_metrics,
+    canonical_json_sha256,
+    resolve_project_path,
 )
+from run_reproducible_pipeline import apply_cli_overrides, ensure_resolved_config, select_stages
 
 
 class ProvenanceTest(unittest.TestCase):
+    def test_cli_overrides_update_effective_batch_size(self):
+        recipe = {"training": {"train_batch_size": 1, "eval_batch_size": 2, "gradient_accumulation_steps": 16}}
+        args = type("Args", (), {"train_batch_size": 2, "eval_batch_size": 3, "gradient_accumulation_steps": 4})()
+        resolved = apply_cli_overrides(recipe, args)
+        self.assertEqual(resolved["training"]["train_batch_size"], 2)
+        self.assertEqual(resolved["training"]["eval_batch_size"], 3)
+        self.assertEqual(resolved["training"]["effective_batch_size"], 8)
+        self.assertEqual(recipe["training"]["train_batch_size"], 1)
+
+    def test_cli_override_config_hash_is_stable(self):
+        value = {"b": 2, "a": 1}
+        self.assertEqual(canonical_json_sha256(value), canonical_json_sha256({"a": 1, "b": 2}))
+
+    def test_resume_rejects_resolved_config_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            context = RunContext.open_or_create(Path(temp) / "run", "r", "recipe", "c", "b")
+            ensure_resolved_config(context, {"training": {"train_batch_size": 1}})
+            with self.assertRaisesRegex(reproducibility.ReproducibilityError, "resolved configuration"):
+                ensure_resolved_config(context, {"training": {"train_batch_size": 2}})
+
+    def test_windows_recipe_path_resolves_from_project_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "models" / "t5-base-py"
+            target.mkdir(parents=True)
+            resolved = resolve_project_path(r"J:\nlp\models\t5-base-py", root)
+            self.assertEqual(resolved, root / "models" / "t5-base-py")
+
+    def test_select_stages_supports_upstream_only(self):
+        stages = [type("S", (), {"name": n})() for n in ("prepare", "extractor", "evaluate_extractor", "pseudo", "generator")]
+        self.assertEqual([s.name for s in select_stages(stages, "pseudo")], ["prepare", "extractor", "evaluate_extractor", "pseudo"])
+
     def test_console_text_replaces_characters_unsupported_by_windows_encoding(self):
         self.assertEqual(console_safe_text("progress \ufffd", "gbk"), "progress ?")
 
