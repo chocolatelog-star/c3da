@@ -201,6 +201,17 @@ def build_checkpoint_selection_config(checkpoint_selection: str) -> dict:
     }
 
 
+def cleanup_training_checkpoints(output_dir: Path) -> list[str]:
+    """Remove resumable checkpoints after the final model is materialized."""
+    removed: list[str] = []
+    for checkpoint_dir in sorted(output_dir.glob("checkpoint-*")):
+        if not checkpoint_dir.is_dir():
+            continue
+        removed.append(checkpoint_dir.name)
+        shutil.rmtree(checkpoint_dir)
+    return removed
+
+
 class JsonlSeq2SeqDataset(Dataset):
     def __init__(
         self,
@@ -1453,6 +1464,9 @@ def main() -> None:
         shutil.rmtree(best_dir)
     trainer.save_model(str(best_dir))
     tokenizer.save_pretrained(str(best_dir))
+    removed_checkpoints = cleanup_training_checkpoints(output_dir)
+    if removed_checkpoints:
+        print(f"removed resumable checkpoints after final save: {removed_checkpoints}")
     print(f"saved {args.checkpoint_selection} model to {best_dir}")
 
 
