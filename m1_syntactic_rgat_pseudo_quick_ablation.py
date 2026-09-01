@@ -33,7 +33,7 @@ from t5_aste_data import (
     to_extract_rows,
 )
 from t5_aste_pipeline import DATASETS
-from t5_absa_train import (
+from t5_absa_train_graph import (
     classify_terminal_lookahead,
     compute_dann_expected_max_steps,
     compute_dann_planned_batches,
@@ -54,6 +54,21 @@ PHASE_A_CALLPOINTS = (
     "target_unlabeled_dann",
     "target_pseudo_inference",
 )
+
+
+def apply_training_overrides(
+    recipe: dict,
+    *,
+    extractor_train_batch_size: int | None = None,
+    gradient_accumulation_steps: int | None = None,
+) -> dict:
+    resolved = copy.deepcopy(recipe)
+    training = resolved.setdefault("training", {})
+    if extractor_train_batch_size is not None:
+        training["extractor_train_batch_size"] = int(extractor_train_batch_size)
+    if gradient_accumulation_steps is not None:
+        training["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
+    return resolved
 FORMAL_PHASE_A_CALLPOINTS = {
     "source_extractor_training": "t5_absa_train.WeightedSeq2SeqTrainer.compute_loss",
     "source_dev_evaluation": "t5_aste_pipeline.evaluate -> generate_texts",
@@ -1115,7 +1130,7 @@ def _run_training(
 
 
 def _run_phase_a_training_worker(spec_path: Path) -> int:
-    from t5_absa_train import run_phase_a_training
+    from t5_absa_train_graph import run_phase_a_training
 
     spec = _read_json(spec_path)
     variant = spec.get("variant")
@@ -2552,6 +2567,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_path", default=r"models/t5-base-py")
     parser.add_argument("--graph_cache_dir", required=True)
     parser.add_argument("--parser_dir", default=r"models/stanza_resources")
+    parser.add_argument("--extractor_train_batch_size", type=int)
+    parser.add_argument("--gradient_accumulation_steps", type=int)
     parser.add_argument("--cuda", default="0")
     parser.add_argument("--control_run_dir", default="")
     parser.add_argument("--control_terminal_lookahead_salvage_audit", default="")
@@ -2588,7 +2605,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps({"status": "BLOCKED", "formal_evidence": False, "report": str(report_path)}, ensure_ascii=False))
         return 2
-    args.recipe_data = _read_json(Path(args.recipe))
+    args.recipe_data = apply_training_overrides(
+        _read_json(Path(args.recipe)),
+        extractor_train_batch_size=args.extractor_train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+    )
     _validate_recipe(args.recipe_data)
     if args.dry_run:
         print(json.dumps({"task_id": TASK_ID, "scope": build_phase_a_scope(), "recipe": args.recipe}, ensure_ascii=False, indent=2))

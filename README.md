@@ -1,5 +1,14 @@
 # C3DA
 
+## 可控实验入口
+
+- `run_upstream_batch_matrix.py`：只比较上游 batch，并汇总 source-dev F1 与伪标签产物。
+- `run_fixed_upstream_downstream_batch_matrix.py`：冻结同一训练数据和全部上游身份，只比较最终训练 batch。
+- `batch_gradient_parameter_audit.py`：比较 `1x16/4x4/8x2/16x1` 的单步梯度、参数更新和真实有效样本归一化。
+- `run_graph_control_ab.py`：在同一配置下完成 Graph OFF/ON 公平 A/B 并输出最终 F1 差值。
+
+历史最佳训练继续使用 `t5_absa_train.py`；图实验使用隔离的 `t5_absa_train_graph.py`。
+
 Code and datasets of our paper “A Contrastive Cross-Channel Data Augmentation Framework for Aspect-based Sentiment Analysis”
 
 
