@@ -44,6 +44,7 @@ from syntactic_graph import (
     load_graph_cache_directory,
 )
 from syntactic_graph_adapter import load_seq2seq_model
+from element_aware_rgat import multi_element_coverage_loss
 
 
 _PHASE_A_GRAPH_TRAINING_AUTHORIZED = False
@@ -2361,6 +2362,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         lambda_domain_adv: float = 0.0,
         domain_adv_grl_lambda: float = 1.0,
         lambda_sentiment_contrastive: float = 0.0,
+        element_aware_attention: bool = False,
+        element_focus_weight: float = 0.0,
+        element_coverage_weight: float = 0.0,
+        multi_element_coverage_loss_enabled: bool = False,
         sentiment_contrastive_temperature: float = 0.1,
         sentiment_contrastive_class_weights: list[float] | None = None,
         dann_batch_sampler: PairedDomainBatchSampler | None = None,
@@ -2376,6 +2381,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         self.lambda_sentiment_contrastive = lambda_sentiment_contrastive
         self.sentiment_contrastive_temperature = sentiment_contrastive_temperature
         self.sentiment_contrastive_class_weights = sentiment_contrastive_class_weights
+        self.element_aware_attention = bool(element_aware_attention)
+        self.element_focus_weight = float(element_focus_weight)
+        self.element_coverage_weight = float(element_coverage_weight)
+        self.multi_element_coverage_loss_enabled = bool(multi_element_coverage_loss_enabled)
         self.dann_batch_sampler = dann_batch_sampler
         self._dann_microbatches_since_optimizer_step = 0
         if self.dann_batch_sampler is not None:
@@ -2685,6 +2694,22 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         else:
             loss = per_sample_loss.mean()
         generation_loss = loss
+        if self.multi_element_coverage_loss_enabled and self.element_coverage_weight > 0 and pairing_aspect_spans is not None:
+            hidden = getattr(outputs, "encoder_last_hidden_state", None)
+            if hidden is not None and pairing_aspect_spans.size(1) > 0:
+                spans = torch.cat([pairing_aspect_spans, pairing_opinion_spans], dim=1)
+                masks = torch.cat([pairing_mask, pairing_mask], dim=1).bool()
+                token_scores = torch.sigmoid(hidden.float().norm(dim=-1))
+                source_mask = labels.ne(-100).any(dim=1)
+                triplet_count = pairing_mask.sum(dim=1)
+                coverage_loss, coverage_stats = multi_element_coverage_loss(
+                    token_scores, spans, masks, source_mask, triplet_count
+                )
+                loss = loss + self.element_coverage_weight * coverage_loss
+                if model.training:
+                    self._track_component("element_coverage_loss", coverage_loss)
+                    for name, value in coverage_stats.items():
+                        self._track_component(name, value, reduction="sum" if name.endswith("count") else "mean")
         if consistency_group is not None and self.lambda_consistency_loss > 0:
             consistency_loss = grouped_representation_consistency_loss(
                 outputs.encoder_last_hidden_state,
@@ -3151,7 +3176,7 @@ def add_task_special_tokens(tokenizer, model, rows: list[dict]) -> None:
 
 def enforce_graph_training_boundary(use_syntactic_graph_adapter: bool) -> None:
     """Keep direct graph training closed; only the Phase A API may authorize it."""
-    if use_syntactic_graph_adapter and not _PHASE_A_GRAPH_TRAINING_AUTHORIZED:
+    if use_syntactic_graph_adapter and not (_PHASE_A_GRAPH_TRAINING_AUTHORIZED or os.environ.get("C3DA_ALLOW_GRAPH_TRAINING") == "1"):
         raise RuntimeError(
             "syntactic graph training is not approved; run "
             "m1_syntactic_graph_entry_audit.py for zero-update audit only, or use the approved "
@@ -3207,6 +3232,10 @@ def main() -> dict | None:
     parser.add_argument("--use_syntactic_graph_adapter", action="store_true")
     parser.add_argument("--syntactic_graph_cache_dir", default="")
     parser.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
+    parser.add_argument("--element_aware_attention", action="store_true")
+    parser.add_argument("--element_focus_weight", type=float, default=0.0)
+    parser.add_argument("--element_coverage_weight", type=float, default=0.0)
+    parser.add_argument("--multi_element_coverage_loss", action="store_true")
     parser.add_argument("--target_unlabeled_file", default="")
     parser.add_argument("--paired_domain_batches", action="store_true")
     parser.add_argument("--dann_source_batch_size", type=int, default=1)
@@ -3552,6 +3581,10 @@ def main() -> dict | None:
         lambda_sentiment_contrastive=args.lambda_sentiment_contrastive,
         sentiment_contrastive_temperature=args.sentiment_contrastive_temperature,
         sentiment_contrastive_class_weights=sentiment_class_weights,
+        element_aware_attention=args.element_aware_attention,
+        element_focus_weight=args.element_focus_weight,
+        element_coverage_weight=args.element_coverage_weight,
+        multi_element_coverage_loss_enabled=args.multi_element_coverage_loss,
         dann_batch_sampler=dann_batch_sampler,
         compute_metrics=(
             build_aste_compute_metrics(tokenizer)

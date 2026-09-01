@@ -1124,7 +1124,9 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             else 1.0
         )
         result_tag += f"_{neutral_weight_tag(args.neutral_generation_loss_gain, neutral_max_weight)}"
-    final_dir = run_dir / "models" / f"final_dann_l0.03_{result_tag}_ep{args.final_epochs}"
+    dann_lambda = 0.03 if args.final_lambda_domain_adv is None else args.final_lambda_domain_adv
+    dann_tag = str(dann_lambda).replace(".", "")
+    final_dir = run_dir / "models" / f"final_dann_l{dann_tag}_{result_tag}_ep{args.final_epochs}"
     if not stage_done(
         status,
         f"train_final_{result_tag}",
@@ -1157,7 +1159,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--resume_from_checkpoint",
                 "auto",
                 "--lambda_domain_adv",
-                "0.03",
+                str(0.03 if args.final_lambda_domain_adv is None else args.final_lambda_domain_adv),
                 "--domain_adv_grl_lambda",
                 "1.0",
                 "--domain_adv_hidden_size",
@@ -1572,6 +1574,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--rerun", action="store_true")
     parser.add_argument("--rerun_pseudo_variants", action="store_true")
+    parser.add_argument(
+        "--minimal_outputs",
+        action="store_true",
+        help="after a successful pair, remove bulky intermediate outputs and retain metrics/status summaries",
+    )
+    parser.add_argument(
+        "--final_lambda_domain_adv",
+        type=float,
+        default=None,
+        help="override final DANN lambda; omit to keep the historical default 0.03",
+    )
     return parser.parse_args()
 
 
@@ -1583,6 +1596,22 @@ def selected_pairs(pairs_text: str) -> list[tuple[str, str]]:
         source, target = item.split(":")
         pairs.append((source.strip(), target.strip()))
     return pairs
+
+
+def _prune_minimal_pair_outputs(pair_root: Path) -> None:
+    """Retain only final raw metrics, status, manifest, and compact summaries."""
+    keep_names = {
+        "stage_status.json",
+        "manifest.json",
+        "results_bgca_aste_stage1.csv",
+        "results_bgca_aste_stage1_CN.md",
+    }
+    keep_prefixes = ("aste_metrics_raw_", "aste_metrics_fixed_")
+    for path in sorted(pair_root.rglob("*"), reverse=True):
+        if path.is_file() and path.name not in keep_names and not path.name.startswith(keep_prefixes):
+            path.unlink()
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
 
 
 def main() -> None:
@@ -1644,6 +1673,8 @@ def main() -> None:
         rows.append(run_pair(args, source, target))
         if not args.dry_run:
             write_summary(Path(args.output_root), rows, summary_tag)
+            if args.minimal_outputs:
+                _prune_minimal_pair_outputs(pair_run_dir(Path(args.output_root), source, target))
     if not args.dry_run:
         write_summary(Path(args.output_root), rows, summary_tag)
 

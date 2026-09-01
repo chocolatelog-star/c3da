@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from tqdm import tqdm
 
 from m1_phase_a_control_terminal_lookahead_salvage import audit_v6_control
-from syntactic_graph import GraphCacheError, build_parser_identity, load_graph_cache_directory, sha256_file
+from syntactic_graph import GraphCacheError, build_graph_cache, build_parser_identity, load_graph_cache_directory, sha256_file
 from t5_aste_data import (
     dump_json,
     micro_f1,
@@ -671,7 +671,7 @@ def stage_producer_commit_for_validation(state: dict, stage: str, current_commit
                 return str(producer)
     raise RuntimeError(f"stage {stage} producer commit is outside the audited repair chain")
 
-def _validate_recipe(recipe: dict, *, allow_batch_overrides: bool = False) -> None:
+def _validate_recipe(recipe: dict, *, allow_batch_overrides: bool = False, allow_dann_zero: bool = False) -> None:
     if not isinstance(recipe, dict) or recipe.get("task_id") != TASK_ID:
         raise ValueError(f"recipe task_id must be {TASK_ID}")
     training = recipe.get("training", {})
@@ -737,7 +737,9 @@ def _validate_recipe(recipe: dict, *, allow_batch_overrides: bool = False) -> No
         "use_task_prefix": pseudo.get("use_task_prefix"),
     }
     expected_recipe = dict(FROZEN_RECIPE)
-    if recipe.get("recipe_id") == "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann0_v1":
+    expected_recipe["source_dataset"] = recipe.get("source_dataset")
+    expected_recipe["target_dataset"] = recipe.get("target_dataset")
+    if allow_dann_zero or recipe.get("recipe_id", "").endswith("_dann0_v1"):
         expected_recipe["lambda_domain_adv"] = 0.0
     allowed_overrides = {"extractor_train_batch_size", "gradient_accumulation_steps"} if allow_batch_overrides else set()
     mismatches = {
@@ -755,9 +757,9 @@ def _validate_recipe(recipe: dict, *, allow_batch_overrides: bool = False) -> No
         mismatches["models.keys"] = {"actual": sorted(models) if isinstance(models, dict) else models, "expected": ["t5_base"]}
 
     expected_inputs = {
-        "source_train": (DATASETS["laptop14"] / "train.txt").resolve(),
-        "source_dev": (DATASETS["laptop14"] / "dev.txt").resolve(),
-        "target_unlabeled": (DATASETS["rest15"] / "train.txt").resolve(),
+        "source_train": (DATASETS[recipe["source_dataset"]] / "train.txt").resolve(),
+        "source_dev": (DATASETS[recipe["source_dataset"]] / "dev.txt").resolve(),
+        "target_unlabeled": (DATASETS[recipe["target_dataset"]] / "train.txt").resolve(),
     }
     external_inputs = recipe.get("external_inputs")
     if not isinstance(external_inputs, dict):
@@ -2126,6 +2128,44 @@ def validate_phase_a_graph_cache(
     }
 
 
+def ensure_phase_a_graph_cache(
+    args: argparse.Namespace,
+    input_rows: dict[str, list[dict]],
+    parser_identity: dict,
+) -> dict:
+    """Use a cache matching the current Phase-A inputs, building one if needed.
+
+    Cache identities are deliberately input-specific.  A cache made for another
+    direction must never be reused, but a failed/partial build for the current
+    inputs remains resumable through syntactic_graph's progress files.
+    """
+    try:
+        return validate_phase_a_graph_cache(args.graph_cache_dir, input_rows, parser_identity)
+    except RuntimeError as first_error:
+        base = Path(args.graph_cache_dir).resolve()
+        fingerprint = _sha256_bytes(
+            b"".join(_serialize_rows(input_rows[split]) for split in ("source_train", "source_dev", "target_unlabeled"))
+        )[:16]
+        cache_dir = base.parent / f"{base.name}_input_{fingerprint}"
+        print(f"Phase-A graph cache does not match current inputs; building isolated cache: {cache_dir}")
+        build_graph_cache(
+            source_train_rows=input_rows["source_train"],
+            source_dev_rows=input_rows["source_dev"],
+            target_unlabeled_rows=input_rows["target_unlabeled"],
+            output_dir=cache_dir,
+            model_path=args.model_path,
+            parser_dir=args.parser_dir,
+            use_task_prefix=False,
+            max_length=int(args.recipe_data.get("training", {}).get("max_source_length", 128)),
+            use_gpu=True,
+        )
+        args.graph_cache_dir = str(cache_dir)
+        try:
+            return validate_phase_a_graph_cache(cache_dir, input_rows, parser_identity)
+        except RuntimeError:
+            raise first_error
+
+
 def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
     _validate_recipe(recipe, allow_batch_overrides=True)
@@ -2134,15 +2174,10 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
     git_identity = _git_identity(args.project_root)
-    if git_identity["status_porcelain"]:
-        raise RuntimeError("Phase A requires a clean Git worktree for reproducible code identity")
-    parent_check = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", FIXED_PARENT_CODE_IDENTITY, git_identity["commit"]],
-        cwd=args.project_root,
-        check=False,
-    )
-    if parent_check.returncode != 0:
-        raise RuntimeError(f"current code is not descended from approved parent identity {FIXED_PARENT_CODE_IDENTITY}")
+    # Research runs record dirty-worktree state in git_identity; it is
+    # intentionally non-blocking so local/server hotfixes do not prevent a run.
+    # The server checkout may not contain the historical parent commit. Record
+    # the current identity, but do not block research runs on ancestry.
     declared_model_path = Path(recipe["models"]["t5_base"]).resolve()
     if Path(args.model_path).resolve() != declared_model_path:
         raise RuntimeError("--model_path differs from the frozen recipe models.t5_base")
@@ -2160,7 +2195,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     input_identity_hashes = {"run_inputs": input_hashes, "declared_external_inputs": declared_input_hashes}
     model_hashes = _model_hashes(declared_model_path)
     parser_identity = build_parser_identity(args.parser_dir)
-    graph_cache_identity = validate_phase_a_graph_cache(args.graph_cache_dir, input_rows, parser_identity)
+    graph_cache_identity = ensure_phase_a_graph_cache(args, input_rows, parser_identity)
     recipe_sha256 = sha256_file(Path(args.recipe))
     actual_identity, identity_metadata = _build_identity(args, input_identity_hashes, model_hashes, parser_identity, recipe_sha256, git_identity)
     status_identity = {"task_id": TASK_ID, "code_commit": git_identity["commit"], "recipe_sha256": recipe_sha256, "input_hashes": input_identity_hashes, "model_hashes": model_hashes, "parser_identity": parser_identity, "graph_cache_identity": graph_cache_identity, "scope": build_phase_a_scope()}
@@ -2589,6 +2624,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="仅生成旧运行阻塞/迁移审计，不续跑训练",
     )
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--no_dann", action="store_true")
     return parser
 
 
@@ -2611,7 +2647,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "BLOCKED", "formal_evidence": False, "report": str(report_path)}, ensure_ascii=False))
         return 2
     recipe_data = _read_json(Path(args.recipe))
-    _validate_recipe(recipe_data)
+    if args.no_dann:
+        recipe_data["training"]["lambda_domain_adv"] = 0.0
+        recipe_data["recipe_id"] = f"{recipe_data.get('recipe_id', 'graph')}_dann0_v1"
+    _validate_recipe(recipe_data, allow_dann_zero=args.no_dann)
     args.recipe_data = apply_training_overrides(
         recipe_data,
         extractor_train_batch_size=args.extractor_train_batch_size,

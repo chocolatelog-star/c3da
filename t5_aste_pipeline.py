@@ -3488,13 +3488,12 @@ def evaluate(args: argparse.Namespace) -> None:
     )
     print(
         {
+            "raw_f1": raw_metrics.get("micro_f1"),
+            "precision": raw_metrics.get("precision"),
+            "recall": raw_metrics.get("recall"),
             "eval_file": str(eval_file),
-            "raw_scores": raw_metrics,
-            "fixed_scores": fixed_metrics,
-            "sentiment_scores": sentiment_metrics,
-            "structure_scores": structure_metrics,
-            "error_analysis": error_analysis,
-        }
+        },
+        flush=True,
     )
 
 

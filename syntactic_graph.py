@@ -20,6 +20,7 @@ PARSER_PACKAGES = {
     "lemma": "combined_nocharlm",
     "depparse": "ewt_charlm",
 }
+UNK_RELATION_KEY = "__UNK_REL__"
 EXPECTED_PARSER_SHA256 = {
     "resources.json": "4e41c1df152146fa26ed0c006a08feea7a60bb3414bb6d57dbda24ad2e3cb99c",
     "en/tokenize/ewt.pt": "fc2fed0cd74dbaef1620bd3e776141ae76c4e28eb5aeff369b2715c31cc73cba",
@@ -85,13 +86,21 @@ def _relation_key(edge: dict) -> str:
 
 
 def _assign_edge_ids(edges: list[dict], relation_vocab: list[str] | None = None) -> list[dict]:
-    relation_values = relation_vocab or [_relation_key(edge) for edge in edges]
+    relation_values = relation_vocab or sorted(set([_relation_key(edge) for edge in edges] + [UNK_RELATION_KEY]))
+    relation_ids = {value: index for index, value in enumerate(relation_values)}
+    unknown_id = relation_ids.get(UNK_RELATION_KEY)
     dependency_values = [_dependency_key(edge) for edge in edges]
     pos_values = [_pos_key(edge) for edge in edges]
     assigned = []
     for edge in edges:
         current = dict(edge)
-        current["relation_id"] = _stable_index(_relation_key(current), relation_values)
+        relation_key = _relation_key(current)
+        if relation_key not in relation_ids:
+            if unknown_id is None:
+                raise GraphCacheError(f"unknown graph vocabulary item: {relation_key}")
+            current["relation_id"] = unknown_id
+        else:
+            current["relation_id"] = relation_ids[relation_key]
         current["dependency_relation_id"] = _stable_index(_dependency_key(current), dependency_values)
         current["pos_pair_id"] = _stable_index(_pos_key(current), pos_values)
         assigned.append(current)
@@ -594,14 +603,16 @@ def build_graph_record(
     }
 
 
-def apply_relation_vocab(records: list[dict]) -> list[str]:
-    relation_vocab = sorted(
+def apply_relation_vocab(records: list[dict], relation_vocab: list[str] | None = None) -> list[str]:
+    relation_vocab = relation_vocab or sorted(
         {
             edge["relation_key"]
             for record in records
             for edge in record["edges"]
         }
     )
+    if UNK_RELATION_KEY not in relation_vocab:
+        relation_vocab = [*relation_vocab, UNK_RELATION_KEY]
     dependency_vocab = sorted(
         {
             edge.get("dependency_key", "self")
@@ -1043,6 +1054,7 @@ def build_graph_cache_records(
     use_task_prefix: bool = True,
     max_length: int = 128,
     stop_after_rows: int | None = None,
+    relation_vocab: list[str] | None = None,
 ) -> dict:
     required_splits = {"source_train", "source_dev", "target_unlabeled"}
     if set(split_rows) != required_splits:
@@ -1067,7 +1079,7 @@ def build_graph_cache_records(
         )
         records_by_split[split] = records
     all_records = [record for records in records_by_split.values() for record in records]
-    relation_vocab = apply_relation_vocab(all_records)
+    relation_vocab = apply_relation_vocab(all_records, relation_vocab=relation_vocab)
     (output_dir / "relation_vocab.json").write_text(
         json.dumps(relation_vocab, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -1114,6 +1126,7 @@ def build_graph_cache(
     use_task_prefix: bool = True,
     max_length: int = 128,
     use_gpu: bool = True,
+    relation_vocab: list[str] | None = None,
 ) -> dict:
     from transformers import AutoTokenizer
 
@@ -1137,6 +1150,7 @@ def build_graph_cache(
         parser_identity,
         use_task_prefix=use_task_prefix,
         max_length=max_length,
+        relation_vocab=relation_vocab,
     )
 
 
@@ -1152,6 +1166,7 @@ def main() -> None:
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--no_task_prefix", action="store_true")
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--relation_vocab_file", default="")
     args = parser.parse_args()
     build_graph_cache(
         source_train_rows=_read_jsonl(args.source_train_file),
@@ -1163,6 +1178,7 @@ def main() -> None:
         use_task_prefix=not args.no_task_prefix,
         max_length=args.max_length,
         use_gpu=not args.cpu,
+        relation_vocab=json.loads(Path(args.relation_vocab_file).read_text(encoding="utf-8")) if args.relation_vocab_file else None,
     )
 
 

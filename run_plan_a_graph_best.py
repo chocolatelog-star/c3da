@@ -80,18 +80,18 @@ def build_adapter_manifest(treatment_dir: Path, adapter_dir: Path, *, source: st
     return manifest
 
 
-def build_full_command(*, project_root: Path, adapter: Path, output_root: Path, model_path: str, train_batch_size: int, accumulation: int, cuda: str, seed: int) -> list[str]:
+def build_full_command(*, project_root: Path, adapter: Path, output_root: Path, model_path: str, train_batch_size: int, accumulation: int, cuda: str, seed: int, source_dataset: str = "rest16", target_dataset: str = "laptop14", final_lambda_domain_adv: float = 0.03) -> list[str]:
     model_root = Path(model_path).resolve().parent
     nli_model_path = model_root / "nli-deberta-v3-base-mnli-fever-anli"
     glove_path = model_root / "glove" / "glove.6B.300d.txt"
-    return [sys.executable, str(Path(project_root) / "run_bgca_aste_stage1_pairs.py"), "--pairs", "laptop14:rest15", "--output_root", str(output_root), "--reuse_upstream_run_dir", str(adapter), "--extractor_model_path", model_path, "--generator_model_path", model_path, "--generator_prompt_style", "label_to_text", "--augment_prompt_style", "masked_mutual", "--nli_model_path", str(nli_model_path), "--sentiment_vector_model_path", model_path, "--glove_path", str(glove_path), "--complete_multi_extra_weight", "0.25", "--final_pseudo_weight", "0.75", "--final_augment_weight", "0.2", "--lambda_sentiment_contrastive", "0.01", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--train_batch_size", str(train_batch_size), "--gradient_accumulation_steps", str(accumulation), "--eval_batch_size", "2", "--learning_rate", "0.0003", "--cuda", str(cuda), "--seed", str(seed)]
+    return [sys.executable, str(Path(project_root) / "run_bgca_aste_stage1_pairs.py"), "--pairs", f"{source_dataset}:{target_dataset}", "--output_root", str(output_root), "--reuse_upstream_run_dir", str(adapter), "--extractor_model_path", model_path, "--generator_model_path", model_path, "--generator_prompt_style", "label_to_text", "--augment_prompt_style", "masked_mutual", "--nli_model_path", str(nli_model_path), "--sentiment_vector_model_path", model_path, "--glove_path", str(glove_path), "--complete_multi_extra_weight", "0.25", "--final_pseudo_weight", "0.75", "--final_augment_weight", "0.2", "--lambda_sentiment_contrastive", "0.01", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--train_batch_size", str(train_batch_size), "--gradient_accumulation_steps", str(accumulation), "--eval_batch_size", "16", "--learning_rate", "0.0003", "--minimal_outputs", "--final_lambda_domain_adv", str(final_lambda_domain_adv), "--cuda", str(cuda), "--seed", str(seed)]
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Run Plan A graph treatment followed by historical-best tail")
     p.add_argument("--phase_a_output", required=True)
     p.add_argument("--full_output_root", required=True)
-    p.add_argument("--recipe", default="configs/recipes/laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_v1.json")
+    p.add_argument("--recipe", default="configs/recipes/rest16_to_laptop14_m1_syntactic_rgat_pseudo_quick_ablation_v1.json")
     p.add_argument("--graph_cache_dir", required=True)
     p.add_argument("--parser_dir", default="models/stanza_resources")
     p.add_argument("--model_path", default="models/t5-base-py")
@@ -99,18 +99,23 @@ def main() -> int:
     p.add_argument("--gradient_accumulation_steps", type=int, default=2)
     p.add_argument("--cuda", default="0")
     p.add_argument("--seed", type=int, default=1000)
+    p.add_argument("--source_dataset", default="rest16")
+    p.add_argument("--target_dataset", default="laptop14")
+    p.add_argument("--no_dann", action="store_true")
     p.add_argument("--dry_run", action="store_true")
     args = p.parse_args()
     root = Path(__file__).resolve().parent
     phase_a = Path(args.phase_a_output).resolve()
     adapter = phase_a.parent / (phase_a.name + "_upstream_adapter")
-    phase_cmd = [sys.executable, "m1_syntactic_rgat_pseudo_quick_ablation.py", "--recipe", args.recipe, "--output_dir", str(phase_a), "--model_path", args.model_path, "--graph_cache_dir", args.graph_cache_dir, "--parser_dir", args.parser_dir, "--cuda", args.cuda]
+    phase_cmd = [sys.executable, "m1_syntactic_rgat_pseudo_quick_ablation.py", "--recipe", args.recipe, "--output_dir", str(phase_a), "--model_path", args.model_path, "--graph_cache_dir", args.graph_cache_dir, "--parser_dir", args.parser_dir, "--extractor_train_batch_size", str(args.train_batch_size), "--gradient_accumulation_steps", str(args.gradient_accumulation_steps), "--cuda", args.cuda]
+    if args.no_dann:
+        phase_cmd.append("--no_dann")
     if args.dry_run:
         print(" ".join(phase_cmd))
         return 0
     subprocess.run(phase_cmd, cwd=root, check=True)
-    manifest = build_adapter_manifest(phase_a / "treatment", adapter, source="laptop14", target="rest15", seed=args.seed)
-    full_cmd = build_full_command(project_root=root, adapter=adapter, output_root=Path(args.full_output_root), model_path=args.model_path, train_batch_size=args.train_batch_size, accumulation=args.gradient_accumulation_steps, cuda=args.cuda, seed=args.seed)
+    manifest = build_adapter_manifest(phase_a / "treatment", adapter, source=args.source_dataset, target=args.target_dataset, seed=args.seed)
+    full_cmd = build_full_command(project_root=root, adapter=adapter, output_root=Path(args.full_output_root), model_path=args.model_path, train_batch_size=args.train_batch_size, accumulation=args.gradient_accumulation_steps, cuda=args.cuda, seed=args.seed, source_dataset=args.source_dataset, target_dataset=args.target_dataset, final_lambda_domain_adv=0.0 if args.no_dann else 0.03)
     (phase_a / "plan_a_full_command.json").write_text(json.dumps({"adapter": manifest, "command": full_cmd, "target_test_access": True}, ensure_ascii=False, indent=2), encoding="utf-8")
     subprocess.run(full_cmd, cwd=root, check=True)
     return 0

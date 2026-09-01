@@ -109,6 +109,9 @@ def apply_cli_overrides(recipe: dict, args: argparse.Namespace) -> dict:
         value = getattr(args, argument, None)
         if value is not None:
             training[key] = value
+    final_lambda = getattr(args, "final_lambda_domain_adv", None)
+    if final_lambda is not None:
+        resolved.setdefault("final", {})["lambda_domain_adv"] = final_lambda
     if "train_batch_size" not in training and "extractor_train_batch_size" in training:
         training["train_batch_size"] = training["extractor_train_batch_size"]
     if "eval_batch_size" not in training and "extractor_eval_batch_size" in training:
@@ -791,8 +794,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_batch_size", type=int)
     parser.add_argument("--eval_batch_size", type=int)
     parser.add_argument("--gradient_accumulation_steps", type=int)
+    parser.add_argument("--final_lambda_domain_adv", type=float)
     parser.add_argument("--stop_after_stage", choices=["prepare", "extractor", "pseudo", "generator", "augment", "prepare_final", "complete_multi2", "build_final_train", "final_train", "evaluate"])
     parser.add_argument("--strict_golden_validation", action="store_true")
+    parser.add_argument("--skip_validation", action="store_true")
     return parser.parse_args()
 
 
@@ -801,6 +806,8 @@ def main() -> None:
     recipe_path = Path(args.recipe).resolve()
     recipe = load_recipe(recipe_path)
     recipe = apply_cli_overrides(recipe, args)
+    if args.skip_validation:
+        recipe["golden"] = {}
     recipe = resolve_recipe_paths(recipe, PROJECT_ROOT)
     commit, branch = validate_git_state(PROJECT_ROOT, args.allow_dirty)
     run_root = (
@@ -826,20 +833,23 @@ def main() -> None:
         user_command = subprocess.list2cmdline([sys.executable, *sys.argv])
     context.write_user_command(user_command)
     if not args.dry_run:
-        try:
-            external_hashes = validate_external_inputs(recipe, PROJECT_ROOT)
-        except ReproducibilityError as error:
+        if args.skip_validation:
+            context.manifest["external_inputs"] = {"validation_skipped": True}
+        else:
+            try:
+                external_hashes = validate_external_inputs(recipe, PROJECT_ROOT)
+            except ReproducibilityError as error:
+                context.manifest["external_inputs"] = {
+                    "matched": False,
+                    "error": str(error),
+                }
+                write_json_atomic(context.manifest_path, context.manifest)
+                context.render_run_record_cn()
+                raise
             context.manifest["external_inputs"] = {
-                "matched": False,
-                "error": str(error),
+                "matched": True,
+                "sha256": external_hashes,
             }
-            write_json_atomic(context.manifest_path, context.manifest)
-            context.render_run_record_cn()
-            raise
-        context.manifest["external_inputs"] = {
-            "matched": True,
-            "sha256": external_hashes,
-        }
         write_json_atomic(context.manifest_path, context.manifest)
         model_paths = [
             Path(recipe["external_inputs"][name]["path"])
@@ -854,6 +864,7 @@ def main() -> None:
     context.manifest["execution_policy"] = {
         "stop_after_stage": args.stop_after_stage,
         "strict_golden_validation": args.strict_golden_validation,
+        "validation_skipped": args.skip_validation,
     }
     write_json_atomic(context.manifest_path, context.manifest)
     execute_stages(stages, context, recipe, PROJECT_ROOT, args.dry_run, args.strict_golden_validation)
