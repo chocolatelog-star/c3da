@@ -39,8 +39,9 @@ def build_shared_manifest(shared_upstream: Path) -> dict:
     return {"root": str(Path(shared_upstream).resolve()), "artifacts": {name: {"path": str(path.resolve()), "sha256": sha256_file(path)} for name, path in artifacts.items()}}
 
 
-def build_downstream_command(*, project_root: Path, shared_final_train: Path, shared_final_dev: Path, output_dir: Path, train_batch_size: int, accumulation: int, cuda: str) -> list[str]:
-    return [sys.executable, str(Path(project_root) / "t5_absa_train.py"), "--model_path", str(Path(project_root) / "models" / "t5-base-py"), "--train_file", str(shared_final_train), "--dev_file", str(shared_final_dev), "--output_dir", str(output_dir), "--num_train_epochs", "5", "--source_weight", "1.0", "--pseudo_weight", "0.65", "--augment_weight", "0.2", "--checkpoint_selection", "best", "--resume_from_checkpoint", "auto", "--save_total_limit", "1", "--lambda_domain_adv", "0.03", "--domain_adv_grl_lambda", "1.0", "--domain_adv_hidden_size", "256", "--domain_adv_exclude_augment", "--lambda_sentiment_contrastive", "0.01", "--lambda_pairing_loss", "0.0", "--pairing_temperature", "0.1", "--sentiment_contrastive_temperature", "0.1", "--sentiment_contrastive_min_weight", "0.65", "--neutral_generation_loss_gain", "0.0", "--neutral_generation_max_effective_weight", "0.0", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--per_device_train_batch_size", str(train_batch_size), "--per_device_eval_batch_size", "2", "--gradient_accumulation_steps", str(accumulation), "--learning_rate", "0.0003", "--fp16", "--gradient_checkpointing", "--cuda", str(cuda), "--seed", "1000"]
+def build_downstream_command(*, project_root: Path, shared_final_train: Path, shared_final_dev: Path, output_dir: Path, train_batch_size: int, accumulation: int, cuda: str, model_path: Path | None = None) -> list[str]:
+    model = Path(model_path) if model_path else Path(project_root) / "models" / "t5-base-py"
+    return [sys.executable, str(Path(project_root) / "t5_absa_train.py"), "--model_path", str(model), "--train_file", str(shared_final_train), "--dev_file", str(shared_final_dev), "--output_dir", str(output_dir), "--num_train_epochs", "5", "--source_weight", "1.0", "--pseudo_weight", "0.65", "--augment_weight", "0.2", "--checkpoint_selection", "best", "--resume_from_checkpoint", "auto", "--save_total_limit", "1", "--lambda_domain_adv", "0.03", "--domain_adv_grl_lambda", "1.0", "--domain_adv_hidden_size", "256", "--domain_adv_exclude_augment", "--lambda_sentiment_contrastive", "0.01", "--lambda_pairing_loss", "0.0", "--pairing_temperature", "0.1", "--sentiment_contrastive_temperature", "0.1", "--sentiment_contrastive_min_weight", "0.65", "--neutral_generation_loss_gain", "0.0", "--neutral_generation_max_effective_weight", "0.0", "--sentiment_contrastive_source_only", "--sentiment_contrastive_class_balanced", "--per_device_train_batch_size", str(train_batch_size), "--per_device_eval_batch_size", "2", "--gradient_accumulation_steps", str(accumulation), "--learning_rate", "0.0003", "--fp16", "--gradient_checkpointing", "--cuda", str(cuda), "--seed", "1000"]
 
 
 def build_evaluate_command(project_root: Path, run_dir: Path, model_dir: Path, target_test: Path, cuda: str) -> list[str]:
@@ -55,10 +56,11 @@ def run_unit(args, root: Path, paths: dict[str, Path], manifest: dict, batch: in
     env = os.environ.copy(); env["CUDA_VISIBLE_DEVICES"] = gpu
     model_dir = unit / "model"
     write_status(status_path, "running", batch=batch, accumulation=accumulation, gpu=gpu)
-    train = build_downstream_command(project_root=Path(args.project_root), shared_final_train=paths["final_train"], shared_final_dev=paths["final_dev"], output_dir=model_dir, train_batch_size=batch, accumulation=accumulation, cuda="0")
+    configured_model = getattr(args, "model_path", "")
+    train = build_downstream_command(project_root=Path(args.project_root), shared_final_train=paths["final_train"], shared_final_dev=paths["final_dev"], output_dir=model_dir, train_batch_size=batch, accumulation=accumulation, cuda="0", model_path=Path(configured_model) if configured_model else None)
     rc = run_command(train, unit / "train.log", env)
     eval_rc = run_command(build_evaluate_command(Path(args.project_root), unit, model_dir, paths["target_test"], "0"), unit / "evaluate.log", env) if rc == 0 else None
-    result = {"status": "complete" if rc == 0 and eval_rc == 0 else "failed", "batch": batch, "accumulation": accumulation, "effective_batch_size": batch * accumulation, "gpu": gpu, "train_returncode": rc, "evaluate_returncode": eval_rc, "shared_manifest_sha256": sha256_file(root / "shared_upstream_manifest.json"), "fixed_metrics": read_json(unit / "aste_metrics_fixed_fixed_upstream.json", {})}
+    result = {"status": "complete" if rc == 0 and eval_rc == 0 else "failed", "batch": batch, "accumulation": accumulation, "effective_batch_size": batch * accumulation, "gpu": gpu, "train_returncode": rc, "evaluate_returncode": eval_rc, "shared_manifest_sha256": sha256_file(root / "shared_upstream_manifest.json"), "raw_metrics": read_json(unit / "aste_metrics_raw_fixed_upstream.json", {}), "fixed_metrics": read_json(unit / "aste_metrics_fixed_fixed_upstream.json", {})}
     atomic_write_json(unit / "result.json", result)
     status_fields = {key: value for key, value in result.items() if key != "status"}
     write_status(status_path, result["status"], **status_fields)
@@ -74,7 +76,8 @@ def main() -> int:
     parser.add_argument("--shared_run", required=True)
     parser.add_argument("--output_root", required=True)
     parser.add_argument("--project_root", default=".")
-    parser.add_argument("--groups", default="8x2,16x1,16x2,32x1")
+    parser.add_argument("--model_path", default="", help="T5 模型目录；服务器上通常位于外置模型目录")
+    parser.add_argument("--groups", default="4x4,8x2,16x1,16x2,32x1")
     parser.add_argument("--gpus", default="0")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
