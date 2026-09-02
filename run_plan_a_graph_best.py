@@ -109,7 +109,7 @@ def main() -> int:
     root = Path(__file__).resolve().parent
     phase_a = Path(args.phase_a_output).resolve()
     adapter = phase_a.parent / (phase_a.name + "_upstream_adapter")
-    phase_cmd = [sys.executable, "m1_syntactic_rgat_pseudo_quick_ablation.py", "--recipe", args.recipe, "--output_dir", str(phase_a), "--model_path", args.model_path, "--graph_cache_dir", args.graph_cache_dir, "--parser_dir", args.parser_dir, "--extractor_train_batch_size", str(args.train_batch_size), "--gradient_accumulation_steps", str(args.gradient_accumulation_steps), "--cuda", args.cuda]
+    phase_cmd = [sys.executable, "m1_syntactic_rgat_pseudo_quick_ablation.py", "--recipe", args.recipe, "--output_dir", str(phase_a), "--model_path", args.model_path, "--graph_cache_dir", args.graph_cache_dir, "--parser_dir", args.parser_dir, "--extractor_train_batch_size", str(args.train_batch_size), "--gradient_accumulation_steps", str(args.gradient_accumulation_steps), "--cuda", args.cuda, "--treatment_only"]
     if args.no_dann:
         phase_cmd.append("--no_dann")
     if args.dry_run:

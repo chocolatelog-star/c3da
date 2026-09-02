@@ -2169,6 +2169,47 @@ def ensure_phase_a_graph_cache(
             raise first_error
 
 
+def run_treatment_only(args: argparse.Namespace) -> dict:
+    """Run only the graph Treatment path for final-F1 experiments."""
+    recipe = args.recipe_data
+    _validate_recipe(recipe, allow_batch_overrides=True)
+    run_dir = Path(args.output_dir)
+    if run_dir.exists() and not args.resume:
+        raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    input_rows = _build_input_rows(recipe["source_dataset"], recipe["target_dataset"], recipe["external_inputs"])
+    if args.resume:
+        _preflight_resume_inputs(input_rows, run_dir)
+    parser_identity = build_parser_identity(args.parser_dir)
+    graph_cache_identity = ensure_phase_a_graph_cache(args, input_rows, parser_identity)
+    treatment_dir = run_dir / "treatment"
+    _write_inputs(input_rows, run_dir, resume=args.resume)
+    _write_variant_inputs(treatment_dir, run_dir, resume=args.resume)
+    _atomic_write_json(run_dir / "graph_cache_identity.json", graph_cache_identity)
+    _run_training(args, treatment_dir, True, stage="treatment_training")
+    model_path = treatment_dir / "models" / "extractor" / "best"
+    _run_pipeline_command(args, treatment_dir, "evaluate", True, model_path, "source_dev")
+    _run_pipeline_command(args, treatment_dir, "pseudo", True, model_path)
+    required = (model_path / "config.json", treatment_dir / "target_pseudo_selected.jsonl")
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"Treatment-only run missing required artifacts: {missing}")
+    entry = {
+        "schema_version": 1,
+        "status": "complete",
+        "source_dataset": recipe["source_dataset"],
+        "target_dataset": recipe["target_dataset"],
+        "seed": recipe["seed"],
+        "graph_enabled": True,
+        "model_path": str(model_path.resolve()),
+        "pseudo_path": str((treatment_dir / "target_pseudo_selected.jsonl").resolve()),
+        "target_test_access": False,
+        "graph_cache_identity": graph_cache_identity,
+    }
+    _atomic_write_json(run_dir / "treatment_only_entry.json", entry)
+    return entry
+
+
 def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
     _validate_recipe(recipe, allow_batch_overrides=True)
@@ -2628,6 +2669,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--no_dann", action="store_true")
+    parser.add_argument("--treatment_only", action="store_true")
     return parser
 
 
@@ -2661,6 +2703,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.dry_run:
         print(json.dumps({"task_id": TASK_ID, "scope": build_phase_a_scope(), "recipe": args.recipe}, ensure_ascii=False, indent=2))
+        return 0
+    if args.treatment_only:
+        summary = run_treatment_only(args)
+        print(json.dumps({"task_id": TASK_ID, "status": summary["status"], "output_dir": args.output_dir}, ensure_ascii=False))
         return 0
     summary = run_phase_a(args)
     print(json.dumps({"task_id": TASK_ID, "status": summary["status"], "next_action": summary["decision"]["next_action"], "output_dir": args.output_dir}, ensure_ascii=False))
