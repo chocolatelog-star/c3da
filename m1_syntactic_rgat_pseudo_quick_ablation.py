@@ -1036,15 +1036,18 @@ def _training_argv(
         "--max_pairing_triplets", str(training["max_pairing_triplets"]),
         "--min_pairing_triplets", str(training["min_pairing_triplets"]),
         "--min_pairing_sample_weight", str(training["min_pairing_sample_weight"]),
-        "--target_unlabeled_file", str(variant_dir / "target_unlabeled.jsonl"),
-        "--paired_domain_batches",
-        "--dann_source_batch_size", str(training["target_unlabeled_dann"]["source_batch_size"]),
-        "--dann_target_batch_size", str(training["target_unlabeled_dann"]["target_batch_size"]),
         "--fp16",
         "--gradient_checkpointing",
         "--cuda", str(args.cuda),
         "--seed", str(recipe["seed"]),
     ]
+    if float(training["lambda_domain_adv"]) > 0:
+        argv.extend([
+            "--target_unlabeled_file", str(variant_dir / "target_unlabeled.jsonl"),
+            "--paired_domain_batches",
+            "--dann_source_batch_size", str(training["target_unlabeled_dann"]["source_batch_size"]),
+            "--dann_target_batch_size", str(training["target_unlabeled_dann"]["target_batch_size"]),
+        ])
     if graph_enabled:
         argv.extend([
             "--use_syntactic_graph_adapter",
