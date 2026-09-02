@@ -97,6 +97,8 @@ def main() -> int:
     p.add_argument("--model_path", default="models/t5-base-py")
     p.add_argument("--train_batch_size", type=int, default=8)
     p.add_argument("--gradient_accumulation_steps", type=int, default=2)
+    p.add_argument("--eval_batch_size", type=int, default=16,
+                   help="下游评估批次；当前历史最佳尾部固定为16，保留此参数用于命令兼容性")
     p.add_argument("--cuda", default="0")
     p.add_argument("--seed", type=int, default=1000)
     p.add_argument("--source_dataset", default="rest16")
