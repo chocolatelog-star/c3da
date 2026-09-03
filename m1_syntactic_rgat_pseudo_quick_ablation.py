@@ -84,7 +84,14 @@ def apply_graph_variant(recipe: dict, variant: str) -> dict:
     if variant not in specs:
         raise ValueError(f"unknown graph variant: {variant}")
     resolved = copy.deepcopy(recipe)
-    resolved.setdefault("training", {}).update(specs[variant])
+    spec = specs[variant]
+    training = resolved.setdefault("training", {})
+    training.update(spec)
+    training["element_focus_weight"] = float(spec["focus_weight"])
+    training["element_coverage_weight"] = float(spec["coverage_weight"])
+    training["multi_element_coverage_loss"] = bool(spec["coverage_enabled"])
+    if spec["focus_enabled"]:
+        training["element_aware_attention"] = True
     resolved["graph_variant"] = variant
     return resolved
 FORMAL_PHASE_A_CALLPOINTS = {
@@ -1054,6 +1061,7 @@ def _training_argv(
         "--neutral_loss_gain", str(training["neutral_loss_gain"]),
         "--checkpoint_selection", training["checkpoint_selection"],
         "--save_total_limit", "1",
+        "--save_only_model",
         "--resume_from_checkpoint", "auto",
         "--per_device_train_batch_size", str(training["extractor_train_batch_size"]),
         "--per_device_eval_batch_size", str(training["extractor_eval_batch_size"]),

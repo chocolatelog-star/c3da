@@ -3250,6 +3250,7 @@ def main() -> dict | None:
     parser.add_argument("--max_target_length", type=int, default=96)
     parser.add_argument("--logging_steps", type=int, default=50)
     parser.add_argument("--save_total_limit", type=int, default=2)
+    parser.add_argument("--save_only_model", action="store_true")
     parser.add_argument("--resume_from_checkpoint", choices=["none", "auto"], default="none")
     parser.add_argument("--seed", type=int, default=1000)
     reproducibility_group = parser.add_mutually_exclusive_group()
@@ -3592,6 +3593,7 @@ def main() -> dict | None:
         evaluation_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=args.save_total_limit,
+        save_only_model=bool(args.save_only_model),
         fp16=bool(args.fp16 and torch.cuda.is_available()),
         report_to=[],
         **reproducibility_training_args(args.seed, reproducibility_mode),
