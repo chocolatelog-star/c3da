@@ -1314,7 +1314,8 @@ class DataCollatorForSeq2SeqWithPairing:
             "compositional_dst_pos_id",
             "edge_mask",
         )
-        graph_present = [key in feature for feature in features for key in graph_keys]
+        core_graph_keys = tuple(key for key in graph_keys if not key.startswith("compositional_"))
+        graph_present = [key in feature for feature in features for key in core_graph_keys]
         if any(graph_present) and not all(graph_present):
             raise ValueError("graph fields must be present for every feature or for none of them")
         graph_values = {key: [feature.pop(key, None) for feature in features] for key in graph_keys}
