@@ -127,6 +127,119 @@ def generate_texts(
     return outputs
 
 
+def generate_graph_texts(
+    *,
+    model_path: str | Path,
+    rows: list[dict],
+    batch_size: int,
+    max_new_tokens: int,
+    num_beams: int,
+    cuda: str,
+    constrained: bool,
+    length_penalty: float,
+    graph_cache_dir: str,
+    graph_parser_dir: str,
+    graph_cache_tokenizer_path: str,
+    use_task_prefix: bool,
+    graph_split: str,
+) -> list[str]:
+    """Generate with the same graph cache and adapter contract used in Phase A."""
+    import torch
+    from torch.utils.data import DataLoader
+    from tqdm import tqdm
+    from transformers import AutoTokenizer, DataCollatorForSeq2Seq
+
+    from syntactic_graph import build_parser_identity, build_tokenizer_identity, load_graph_cache_directory
+    from syntactic_graph_adapter import load_seq2seq_model
+    from t5_absa_train_graph import DataCollatorForSeq2SeqWithPairing, JsonlSeq2SeqDataset
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tokenizer_path = Path(graph_cache_tokenizer_path or model_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+    inference_rows = [
+        {**row, "input": input_text, "target": row.get("target", "")}
+        for row, input_text in zip(rows, build_extract_inputs(rows, use_task_prefix=use_task_prefix))
+    ]
+    graph_cache = load_graph_cache_directory(
+        graph_cache_dir,
+        graph_split,
+        inference_rows,
+        tokenizer_identity=build_tokenizer_identity(tokenizer_path, tokenizer),
+        parser_identity=build_parser_identity(graph_parser_dir),
+    )
+    model = load_seq2seq_model(
+        model_path,
+        use_syntactic_graph_adapter=True,
+        relation_vocab_size=graph_cache.relation_vocab_size,
+    ).to(device)
+    model.eval()
+    dataset = JsonlSeq2SeqDataset(
+        inference_rows, tokenizer, 128, max_new_tokens, 1.0, 1.0, 1.0, graph_cache=graph_cache
+    )
+    collator = DataCollatorForSeq2SeqWithPairing(DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model))
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator)
+    outputs: list[str] = []
+    with torch.inference_mode():
+        for batch in tqdm(loader, desc=f"generate-graph:{Path(model_path).name}"):
+            graph_inputs = {
+                key: value.to(device)
+                for key, value in batch.items()
+                if key.startswith("graph_")
+            }
+            encoded = {
+                key: value.to(device)
+                for key, value in batch.items()
+                if key in {"input_ids", "attention_mask"}
+            }
+            generate_kwargs = {}
+            if constrained:
+                generate_kwargs["prefix_allowed_tokens_fn"] = PrefixAllowedTokens(tokenizer, encoded["input_ids"], TASK_TOKENS)
+            generated = model.generate(
+                **encoded,
+                **graph_inputs,
+                max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+                length_penalty=length_penalty,
+                **generate_kwargs,
+            )
+            outputs.extend(decode_keep_task_tokens(tokenizer, ids) for ids in generated)
+    return outputs
+
+
+def generate_for_run(
+    args: argparse.Namespace, model_path: str | Path, rows: list[dict], *, graph_split: str = "target_unlabeled"
+) -> list[str]:
+    """Select plain or graph-aware inference without changing decoding settings."""
+    if not getattr(args, "use_syntactic_graph_adapter", False):
+        return generate_texts(
+            model_path=model_path,
+            inputs=build_extract_inputs(rows, use_task_prefix=not args.no_task_prefix),
+            batch_size=args.batch_size,
+            max_new_tokens=args.max_new_tokens,
+            num_beams=args.num_beams,
+            cuda=args.cuda,
+            constrained=not args.no_constrained_decoding,
+            length_penalty=args.length_penalty,
+        )
+    configured_graph_split = getattr(args, "syntactic_graph_split", "") or graph_split
+    return generate_graph_texts(
+        model_path=model_path,
+        rows=rows,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+        num_beams=args.num_beams,
+        cuda=args.cuda,
+        constrained=not args.no_constrained_decoding,
+        length_penalty=args.length_penalty,
+        graph_cache_dir=args.syntactic_graph_cache_dir,
+        graph_parser_dir=args.syntactic_graph_parser_dir,
+        graph_cache_tokenizer_path=args.syntactic_graph_cache_tokenizer_path,
+        use_task_prefix=not args.no_task_prefix,
+        graph_split=configured_graph_split,
+    )
+
+
 def encode_text_embeddings(
     model_path: str | Path,
     texts: list[str],
@@ -2530,16 +2643,7 @@ def pseudo(args: argparse.Namespace) -> None:
             "pseudo_source_tag": pseudo_provenance["pseudo_source_tag"],
         },
     )
-    preds = generate_texts(
-        model_path=model_path,
-        inputs=build_extract_inputs(target_rows, use_task_prefix=not args.no_task_prefix),
-        batch_size=args.batch_size,
-        max_new_tokens=args.max_new_tokens,
-        num_beams=args.num_beams,
-        cuda=args.cuda,
-        constrained=not args.no_constrained_decoding,
-        length_penalty=args.length_penalty,
-    )
+    preds = generate_for_run(args, model_path, target_rows)
     pseudo_rows = []
     for row, pred in zip(target_rows, preds):
         label = canonicalize_triplet_text(pred)
@@ -3395,16 +3499,7 @@ def evaluate(args: argparse.Namespace) -> None:
     eval_file_arg = getattr(args, "eval_file", "")
     eval_file = Path(eval_file_arg) if eval_file_arg else run_dir / "target_test.jsonl"
     rows = read_jsonl(eval_file)
-    preds = generate_texts(
-        model_path=model_path,
-        inputs=build_extract_inputs(rows, use_task_prefix=not args.no_task_prefix),
-        batch_size=args.batch_size,
-        max_new_tokens=args.max_new_tokens,
-        num_beams=args.num_beams,
-        cuda=args.cuda,
-        constrained=not args.no_constrained_decoding,
-        length_penalty=args.length_penalty,
-    )
+    preds = generate_for_run(args, model_path, rows, graph_split="source_dev" if eval_file.name == "source_dev.jsonl" else "target_test")
     preds = [canonicalize_triplet_text(pred) for pred in preds]
     golds = [canonicalize_triplet_text(row["label"]) for row in rows]
     eval_rows = [{"text": r["text"], "gold": g, "pred": p} for r, g, p in zip(rows, golds, preds)]
@@ -3551,6 +3646,11 @@ def main() -> None:
     p.add_argument("--fixed_changed_min_score", type=float, default=0.65)
     p.add_argument("--fixed_changed_weight", type=float, default=0.35)
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    p.add_argument("--syntactic_graph_cache_dir", default="")
+    p.add_argument("--syntactic_graph_parser_dir", default="")
+    p.add_argument("--syntactic_graph_cache_tokenizer_path", default="")
+    p.add_argument("--syntactic_graph_split", choices=["source_train", "source_dev", "target_unlabeled", "target_test"], default="target_unlabeled")
     p.set_defaults(func=pseudo)
 
     p = sub.add_parser("memory")
@@ -3660,6 +3760,11 @@ def main() -> None:
     p.add_argument("--cuda", default="0")
     p.add_argument("--no_constrained_decoding", action="store_true")
     p.add_argument("--no_task_prefix", action="store_true")
+    p.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    p.add_argument("--syntactic_graph_cache_dir", default="")
+    p.add_argument("--syntactic_graph_parser_dir", default="")
+    p.add_argument("--syntactic_graph_cache_tokenizer_path", default="")
+    p.add_argument("--syntactic_graph_split", choices=["source_train", "source_dev", "target_unlabeled", "target_test"], default="")
     p.add_argument("--output_tag", default="")
     p.add_argument("--eval_file", default="")
     p.set_defaults(func=evaluate)

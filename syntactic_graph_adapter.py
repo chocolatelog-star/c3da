@@ -642,7 +642,7 @@ def load_seq2seq_model(
     model_path: str,
     use_syntactic_graph_adapter: bool = False,
     relation_vocab_size: int = 1,
-    focus_enabled: bool = False,
+    focus_enabled: bool | None = None,
     compositional_relation: bool = True,
 ):
     if not use_syntactic_graph_adapter:
@@ -654,7 +654,8 @@ def load_seq2seq_model(
         compositional_relation = checkpoint_relation_mode
     config = AutoConfig.from_pretrained(model_path, local_files_only=True)
     graph_model_config(config, relation_vocab_size)
-    config.graph_focus_enabled = bool(focus_enabled)
+    if focus_enabled is not None:
+        config.graph_focus_enabled = bool(focus_enabled)
     config.graph_compositional_relation = bool(compositional_relation)
     return SyntacticGraphT5ForConditionalGeneration.from_pretrained(
         model_path,

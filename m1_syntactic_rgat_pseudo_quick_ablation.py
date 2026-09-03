@@ -1375,9 +1375,14 @@ def _pipeline_argv(
             "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
             "--output_tag", output_tag,
         ]
-        # t5_aste_pipeline evaluate does not accept graph-adapter CLI flags;
-        # graph-aware training artifacts are evaluated through the standard
-        # serialized model interface.
+        if graph_enabled:
+            argv.extend([
+                "--use_syntactic_graph_adapter",
+                "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
+                "--syntactic_graph_parser_dir", str(args.parser_dir),
+                "--syntactic_graph_cache_tokenizer_path", str(args.model_path),
+                "--syntactic_graph_split", "source_dev",
+            ])
     elif command == "pseudo":
         argv = [
             str(Path(sys.executable)), "t5_aste_pipeline.py", "pseudo",
@@ -1396,8 +1401,14 @@ def _pipeline_argv(
             "--fixed_changed_weight", str(args.recipe_data["pseudo"]["fixed_changed_weight"]),
             "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
         ]
-        # t5_aste_pipeline pseudo does not accept graph-adapter CLI flags.
-        # The graph-aware extractor checkpoint remains the model used here.
+        if graph_enabled:
+            argv.extend([
+                "--use_syntactic_graph_adapter",
+                "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
+                "--syntactic_graph_parser_dir", str(args.parser_dir),
+                "--syntactic_graph_cache_tokenizer_path", str(args.model_path),
+                "--syntactic_graph_split", "target_unlabeled",
+            ])
     else:
         raise ValueError(command)
     return argv
@@ -2772,7 +2783,9 @@ def main(argv: list[str] | None = None) -> int:
     recipe_data = apply_graph_variant(recipe_data, args.variant)
     if args.no_dann:
         recipe_data["training"]["lambda_domain_adv"] = 0.0
-        recipe_data["recipe_id"] = f"{recipe_data.get('recipe_id', 'graph')}_dann0_v1"
+        recipe_id = str(recipe_data.get("recipe_id", "graph"))
+        if not recipe_id.endswith(("_dann0_v1", "_dann0_16x2_coverage_v1")):
+            recipe_data["recipe_id"] = f"{recipe_id}_dann0_v1"
     _validate_recipe(recipe_data, allow_dann_zero=args.no_dann)
     args.recipe_data = apply_training_overrides(
         recipe_data,
