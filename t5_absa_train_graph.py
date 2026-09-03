@@ -3259,6 +3259,7 @@ def main() -> dict | None:
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--use_syntactic_graph_adapter", action="store_true")
+    parser.add_argument("--graph_focus_enabled", action="store_true")
     parser.add_argument("--syntactic_graph_cache_dir", default="")
     parser.add_argument("--syntactic_graph_parser_dir", default=r"J:\nlp\models\stanza_resources")
     parser.add_argument("--element_aware_attention", action="store_true")
@@ -3428,6 +3429,7 @@ def main() -> dict | None:
         args.model_path,
         use_syntactic_graph_adapter=args.use_syntactic_graph_adapter,
         relation_vocab_size=graph_relation_vocab_size,
+        focus_enabled=args.graph_focus_enabled,
     )
     # Graph-only construction is deliberately outside the shared training RNG
     # stream.  Restore the stream before common token initialization so

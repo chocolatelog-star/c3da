@@ -1073,6 +1073,8 @@ def _training_argv(
             "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
             "--syntactic_graph_parser_dir", str(args.parser_dir),
         ])
+        if bool(training.get("focus_enabled", False)):
+            argv.append("--graph_focus_enabled")
         if bool(training.get("multi_element_coverage_loss", False)):
             argv.append("--multi_element_coverage_loss")
     if training["force_domain_weights"]:

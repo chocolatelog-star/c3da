@@ -37,6 +37,7 @@ class SyntacticGraphAdapter(nn.Module):
         compositional_dependency_vocab_size: int = 40,
         compositional_direction_vocab_size: int = 3,
         compositional_pos_vocab_size: int = 18,
+        focus_enabled: bool = False,
     ):
         super().__init__()
         if graph_hidden_size != attention_heads * head_size:
@@ -46,6 +47,7 @@ class SyntacticGraphAdapter(nn.Module):
         self.attention_heads = int(attention_heads)
         self.head_size = int(head_size)
         self.num_relations = max(1, int(num_relations))
+        self.focus_enabled = bool(focus_enabled)
         self.node_projection = nn.Linear(hidden_size, graph_hidden_size)
         self.query_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
         self.key_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
@@ -299,8 +301,15 @@ class SyntacticGraphAdapter(nn.Module):
         _record_trace(trace, "output_projection_output", residual, ("batch", "node", "feature"))
         _record_trace(trace, "residual", residual, ("batch", "node", "feature"))
         gate = torch.sigmoid(self.gate_projection(torch.cat([word_hidden, residual], dim=-1)))
+        if self.focus_enabled:
+            # Focus is deliberately residual-only: it scales graph write-back
+            # and never participates in RGAT attention logits.
+            salience = torch.sigmoid(graph_hidden.float().norm(dim=-1, keepdim=True)).to(residual.dtype)
+            _record_trace(trace, "element_salience", salience, ("batch", "node", "feature"))
+        else:
+            salience = torch.ones_like(gate[..., :1])
         _record_trace(trace, "gate", gate, ("batch", "node", "feature"))
-        word_delta = gate * residual
+        word_delta = gate * salience * residual
         _record_trace(trace, "word_delta", word_delta, ("batch", "node", "feature"))
         fused_hidden = self._broadcast_to_subwords(
             hidden,
@@ -330,6 +339,7 @@ def graph_model_config(config, relation_vocab_size: int) -> None:
     config.graph_compositional_dependency_vocab_size = 40
     config.graph_compositional_direction_vocab_size = 3
     config.graph_compositional_pos_vocab_size = 18
+    config.graph_focus_enabled = bool(getattr(config, "graph_focus_enabled", False))
     config.graph_use_dependency = True
     config.graph_use_reverse_dependency = True
     config.graph_use_pos_neighbor = True
@@ -348,6 +358,7 @@ def _graph_adapter_from_config(config) -> SyntacticGraphAdapter:
         compositional_dependency_vocab_size=int(getattr(config, "graph_compositional_dependency_vocab_size", 40)),
         compositional_direction_vocab_size=int(getattr(config, "graph_compositional_direction_vocab_size", 3)),
         compositional_pos_vocab_size=int(getattr(config, "graph_compositional_pos_vocab_size", 18)),
+        focus_enabled=bool(getattr(config, "graph_focus_enabled", False)),
         dropout=float(getattr(config, "dropout_rate", 0.1)),
     )
 
@@ -589,6 +600,7 @@ def load_seq2seq_model(
     model_path: str,
     use_syntactic_graph_adapter: bool = False,
     relation_vocab_size: int = 1,
+    focus_enabled: bool = False,
 ):
     if not use_syntactic_graph_adapter:
         return AutoModelForSeq2SeqLM.from_pretrained(model_path)
@@ -596,6 +608,7 @@ def load_seq2seq_model(
 
     config = AutoConfig.from_pretrained(model_path, local_files_only=True)
     graph_model_config(config, relation_vocab_size)
+    config.graph_focus_enabled = bool(focus_enabled)
     return SyntacticGraphT5ForConditionalGeneration.from_pretrained(
         model_path,
         config=config,
