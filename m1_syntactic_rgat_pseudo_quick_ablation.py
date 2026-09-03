@@ -70,6 +70,23 @@ def apply_training_overrides(
     if gradient_accumulation_steps is not None:
         training["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
     return resolved
+
+
+def apply_graph_variant(recipe: dict, variant: str) -> dict:
+    """Resolve one Phase-A graph variant without changing frozen training knobs."""
+    variant = str(variant).upper()
+    specs = {
+        "G0": {"relation_encoding": "legacy", "focus_enabled": False, "coverage_enabled": True, "focus_weight": 0.0, "coverage_weight": 0.05},
+        "G1": {"relation_encoding": "compositional", "focus_enabled": False, "coverage_enabled": True, "focus_weight": 0.0, "coverage_weight": 0.05},
+        "G2": {"relation_encoding": "compositional", "focus_enabled": True, "coverage_enabled": False, "focus_weight": 0.05, "coverage_weight": 0.0},
+        "G3": {"relation_encoding": "compositional", "focus_enabled": True, "coverage_enabled": True, "focus_weight": 0.05, "coverage_weight": 0.05},
+    }
+    if variant not in specs:
+        raise ValueError(f"unknown graph variant: {variant}")
+    resolved = copy.deepcopy(recipe)
+    resolved.setdefault("training", {}).update(specs[variant])
+    resolved["graph_variant"] = variant
+    return resolved
 FORMAL_PHASE_A_CALLPOINTS = {
     "source_extractor_training": "t5_absa_train_graph.WeightedSeq2SeqTrainer.compute_loss",
     "source_dev_evaluation": "t5_aste_pipeline.evaluate -> generate_texts",
@@ -1036,6 +1053,7 @@ def _training_argv(
         "--multi_triplet_loss_gain", str(training["multi_triplet_loss_gain"]),
         "--neutral_loss_gain", str(training["neutral_loss_gain"]),
         "--checkpoint_selection", training["checkpoint_selection"],
+        "--save_total_limit", "1",
         "--resume_from_checkpoint", "auto",
         "--per_device_train_batch_size", str(training["extractor_train_batch_size"]),
         "--per_device_eval_batch_size", str(training["extractor_eval_batch_size"]),
@@ -1075,7 +1093,9 @@ def _training_argv(
         ])
         if bool(training.get("focus_enabled", False)):
             argv.append("--graph_focus_enabled")
-        if bool(training.get("multi_element_coverage_loss", False)):
+        if training.get("relation_encoding") == "legacy":
+            argv.append("--graph_legacy_relation")
+        if bool(training.get("coverage_enabled", False)) or bool(training.get("multi_element_coverage_loss", False)):
             argv.append("--multi_element_coverage_loss")
     if training["force_domain_weights"]:
         argv.append("--force_domain_weights")
@@ -2686,6 +2706,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--no_dann", action="store_true")
     parser.add_argument("--treatment_only", action="store_true")
+    parser.add_argument("--variant", choices=("G0", "G1", "G2", "G3"), default="G1")
     return parser
 
 
@@ -2708,6 +2729,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "BLOCKED", "formal_evidence": False, "report": str(report_path)}, ensure_ascii=False))
         return 2
     recipe_data = _read_json(Path(args.recipe))
+    recipe_data = apply_graph_variant(recipe_data, args.variant)
     if args.no_dann:
         recipe_data["training"]["lambda_domain_adv"] = 0.0
         recipe_data["recipe_id"] = f"{recipe_data.get('recipe_id', 'graph')}_dann0_v1"

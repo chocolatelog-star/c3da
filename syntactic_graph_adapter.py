@@ -38,6 +38,7 @@ class SyntacticGraphAdapter(nn.Module):
         compositional_direction_vocab_size: int = 3,
         compositional_pos_vocab_size: int = 18,
         focus_enabled: bool = False,
+        compositional_relation: bool = True,
     ):
         super().__init__()
         if graph_hidden_size != attention_heads * head_size:
@@ -48,6 +49,7 @@ class SyntacticGraphAdapter(nn.Module):
         self.head_size = int(head_size)
         self.num_relations = max(1, int(num_relations))
         self.focus_enabled = bool(focus_enabled)
+        self.compositional_relation = bool(compositional_relation)
         self.node_projection = nn.Linear(hidden_size, graph_hidden_size)
         self.query_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
         self.key_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
@@ -178,7 +180,7 @@ class SyntacticGraphAdapter(nn.Module):
         relation_ids = relation_id.clamp(min=0, max=self.relation_embedding.num_embeddings - 1)
         dependency_ids = dependency_relation_id.clamp(min=0, max=self.dependency_bias.num_embeddings - 1)
         pos_ids = pos_pair_id.clamp(min=0, max=self.pos_pair_bias.num_embeddings - 1)
-        if compositional_dependency_id is not None:
+        if self.compositional_relation and compositional_dependency_id is not None:
             relation = (
                 self.compositional_dependency_embedding(compositional_dependency_id.clamp(0, self.compositional_dependency_embedding.num_embeddings - 1))
                 + self.compositional_direction_embedding(compositional_direction_id.clamp(0, self.compositional_direction_embedding.num_embeddings - 1))
@@ -359,6 +361,7 @@ def _graph_adapter_from_config(config) -> SyntacticGraphAdapter:
         compositional_direction_vocab_size=int(getattr(config, "graph_compositional_direction_vocab_size", 3)),
         compositional_pos_vocab_size=int(getattr(config, "graph_compositional_pos_vocab_size", 18)),
         focus_enabled=bool(getattr(config, "graph_focus_enabled", False)),
+        compositional_relation=bool(getattr(config, "graph_compositional_relation", True)),
         dropout=float(getattr(config, "dropout_rate", 0.1)),
     )
 
@@ -601,6 +604,7 @@ def load_seq2seq_model(
     use_syntactic_graph_adapter: bool = False,
     relation_vocab_size: int = 1,
     focus_enabled: bool = False,
+    compositional_relation: bool = True,
 ):
     if not use_syntactic_graph_adapter:
         return AutoModelForSeq2SeqLM.from_pretrained(model_path)
@@ -609,6 +613,7 @@ def load_seq2seq_model(
     config = AutoConfig.from_pretrained(model_path, local_files_only=True)
     graph_model_config(config, relation_vocab_size)
     config.graph_focus_enabled = bool(focus_enabled)
+    config.graph_compositional_relation = bool(compositional_relation)
     return SyntacticGraphT5ForConditionalGeneration.from_pretrained(
         model_path,
         config=config,
