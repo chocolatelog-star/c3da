@@ -776,13 +776,17 @@ def _validate_recipe(recipe: dict, *, allow_batch_overrides: bool = False, allow
     expected_recipe["source_dataset"] = recipe.get("source_dataset")
     expected_recipe["target_dataset"] = recipe.get("target_dataset")
     recipe_id = recipe.get("recipe_id", "")
-    if allow_dann_zero or recipe_id.endswith("_dann0_v1"):
+    if allow_dann_zero or recipe_id.endswith(("_dann0_v1", "_dann0_16x2_coverage_v1")):
         expected_recipe["lambda_domain_adv"] = 0.0
     elif recipe_id.endswith(("_dann001_v1", "_dann002_v1", "_dann005_v1")):
         # Explicit DANN sweep recipes are test-independent tuning variants;
         # validate that the declared value is internally consistent.
         expected_recipe["lambda_domain_adv"] = actual["lambda_domain_adv"]
     allowed_overrides = {"extractor_train_batch_size", "gradient_accumulation_steps"} if allow_batch_overrides else set()
+    if recipe_id.endswith("_dann003_internal16_v1"):
+        allowed_overrides.update({"extractor_train_batch_size", "gradient_accumulation_steps", "dann_source_batch_size", "dann_target_batch_size"})
+    if recipe_id.endswith("_dann0_16x2_coverage_v1"):
+        allowed_overrides.update({"extractor_train_batch_size", "gradient_accumulation_steps", "dann_source_batch_size", "dann_target_batch_size", "paired_domain_batches"})
     mismatches = {
         key: {"actual": actual[key], "expected": expected}
         for key, expected in expected_recipe.items()
@@ -1551,6 +1555,8 @@ def _read_dann_batch_audit(
     allow_legacy: bool = True,
     require_journal: bool = False,
     require_fresh_replay_free: bool = False,
+    expected_source_batch_size: int = 1,
+    expected_target_batch_size: int = 1,
 ) -> dict:
     path = Path(variant_dir)
     if path.is_dir():
@@ -1575,8 +1581,8 @@ def _read_dann_batch_audit(
         raise RuntimeError(f"DANN batch audit is missing top-level identity fields: {path}")
     if report["seed"] != expected_seed:
         raise RuntimeError(f"DANN batch audit seed identity mismatch: {path}")
-    if report["source_batch_size"] != 1 or report["target_batch_size"] != 1:
-        raise RuntimeError(f"DANN batch audit requires source=1 and target=1: {path}")
+    if report["source_batch_size"] != expected_source_batch_size or report["target_batch_size"] != expected_target_batch_size:
+        raise RuntimeError(f"DANN batch audit batch mismatch (expected source={expected_source_batch_size}, target={expected_target_batch_size}): {path}")
     if expected_source_count is not None and report["source_count"] != expected_source_count:
         raise RuntimeError(f"DANN batch audit source count identity mismatch: {path}")
     if expected_target_count is not None and report["target_count"] != expected_target_count:
@@ -1625,18 +1631,21 @@ def _read_dann_batch_audit(
             raise RuntimeError(f"DANN batch audit marks a full traversal partial: {path}")
         if completion == "complete" and (issued_batches != processed_batches or processed_batches != planned_batches):
             raise RuntimeError(f"DANN batch audit complete state has issued/processed/planned mismatch: {path}")
-        if epoch.get("source_rows") != len(epoch["batches"]) or epoch.get("target_rows") != len(epoch["batches"]):
+        if (
+            epoch.get("source_rows") != sum(batch.get("source_count", 0) for batch in epoch["batches"])
+            or epoch.get("target_rows") != sum(batch.get("target_count", 0) for batch in epoch["batches"])
+        ):
             raise RuntimeError(f"DANN batch audit domain row count mismatch: {path}")
         if epoch.get("source_unique_rows") > report["source_count"] or epoch.get("target_unique_rows") > report["target_count"]:
             raise RuntimeError(f"DANN batch audit coverage mismatch: {path}")
         if completion == "complete" and (epoch.get("source_unique_rows") != report["source_count"] or epoch.get("target_unique_rows") != report["target_count"]):
             raise RuntimeError(f"DANN batch audit complete traversal coverage mismatch: {path}")
         if (
-            epoch.get("source_batch_size") != 1
-            or epoch.get("target_batch_size") != 1
+            epoch.get("source_batch_size") != expected_source_batch_size
+            or epoch.get("target_batch_size") != expected_target_batch_size
             or epoch.get("incomplete_batches") != 0
             or any(
-                batch.get("source_count") != 1 or batch.get("target_count") != 1
+                batch.get("source_count") != expected_source_batch_size or batch.get("target_count") != expected_target_batch_size
                 for batch in epoch.get("batches", [])
             )
             ):
@@ -1650,17 +1659,28 @@ def _read_dann_batch_audit(
             target_indices = batch.get("target_indices")
             source_ids = batch.get("source_row_ids")
             target_ids = batch.get("target_row_ids")
-            if not (isinstance(source_indices, list) and len(source_indices) == 1 and isinstance(source_indices[0], int) and isinstance(target_indices, list) and len(target_indices) == 1 and isinstance(target_indices[0], int)):
-                raise RuntimeError(f"DANN batch audit batch domain indices are not 1/1: {path}")
-            source_index = source_indices[0]
-            target_index = target_indices[0]
-            if not (0 <= source_index < report["source_count"] and isinstance(source_ids, list) and source_ids == [report["source_row_ids"][source_index]] and isinstance(target_ids, list)):
-                raise RuntimeError(f"DANN batch audit source index/ID mapping mismatch: {path}")
-            target_position = target_index - report["source_count"]
-            if not (0 <= target_position < report["target_count"] and target_ids == [report["target_row_ids"][target_position]]):
-                raise RuntimeError(f"DANN batch audit target index/ID mapping mismatch: {path}")
-            seen_source_indices.add(source_index)
-            seen_target_indices.add(target_position)
+            if not (
+                isinstance(source_indices, list)
+                and len(source_indices) == expected_source_batch_size
+                and all(isinstance(i, int) for i in source_indices)
+                and isinstance(target_indices, list)
+                and len(target_indices) == expected_target_batch_size
+                and all(isinstance(i, int) for i in target_indices)
+                and isinstance(source_ids, list)
+                and len(source_ids) == expected_source_batch_size
+                and isinstance(target_ids, list)
+                and len(target_ids) == expected_target_batch_size
+            ):
+                raise RuntimeError(f"DANN batch audit batch domain indices do not match configured batch sizes: {path}")
+            for source_index, source_id in zip(source_indices, source_ids):
+                if not (0 <= source_index < report["source_count"] and source_id == report["source_row_ids"][source_index]):
+                    raise RuntimeError(f"DANN batch audit source index/ID mapping mismatch: {path}")
+                seen_source_indices.add(source_index)
+            for target_index, target_id in zip(target_indices, target_ids):
+                target_position = target_index - report["source_count"]
+                if not (0 <= target_position < report["target_count"] and target_id == report["target_row_ids"][target_position]):
+                    raise RuntimeError(f"DANN batch audit target index/ID mapping mismatch: {path}")
+                seen_target_indices.add(target_position)
         if epoch.get("source_unique_rows") != len(seen_source_indices) or epoch.get("target_unique_rows") != len(seen_target_indices):
             raise RuntimeError(f"DANN batch audit reported coverage count mismatch: {path}")
         if completion == "complete" and (seen_source_indices != set(range(report["source_count"])) or seen_target_indices != set(range(report["target_count"]))):
@@ -1757,6 +1777,8 @@ def validate_external_control_dann_audit(
     allow_legacy: bool = True,
     require_journal: bool = False,
     require_fresh_replay_free: bool = False,
+    expected_source_batch_size: int = 1,
+    expected_target_batch_size: int = 1,
 ) -> dict:
     path = Path(control_reuse_audit.get("dann_batch_audit_path", ""))
     expected_hash = control_reuse_audit.get("dann_batch_audit_sha256")
@@ -1779,6 +1801,8 @@ def validate_external_control_dann_audit(
         allow_legacy=allow_legacy,
         require_journal=require_journal,
         require_fresh_replay_free=require_fresh_replay_free,
+        expected_source_batch_size=expected_source_batch_size,
+        expected_target_batch_size=expected_target_batch_size,
     )
 
 
@@ -1863,6 +1887,8 @@ def _validate_control_treatment_dann_reports(
     allow_legacy: bool = True,
     require_journal: bool = False,
     require_fresh_replay_free: bool = False,
+    expected_source_batch_size: int = 1,
+    expected_target_batch_size: int = 1,
 ) -> dict:
     treatment_path = variant_dirs["treatment"] / "dann_batch_audit.json"
     if expected_source_row_ids is None:
@@ -1890,6 +1916,8 @@ def _validate_control_treatment_dann_reports(
         allow_legacy=allow_legacy,
         require_journal=require_journal,
         require_fresh_replay_free=require_fresh_replay_free,
+        expected_source_batch_size=expected_source_batch_size,
+        expected_target_batch_size=expected_target_batch_size,
     )
     if skip_treatment_report:
         return {"status": "disabled", "reason": "lambda_domain_adv_zero", "control": control_report, "treatment": None}
@@ -1907,6 +1935,8 @@ def _validate_control_treatment_dann_reports(
         allow_legacy=allow_legacy,
         require_journal=require_journal,
         require_fresh_replay_free=require_fresh_replay_free,
+        expected_source_batch_size=expected_source_batch_size,
+        expected_target_batch_size=expected_target_batch_size,
     )
     comparable_fields = (
         "seed",
@@ -2649,6 +2679,8 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         allow_legacy=False,
         require_journal=True,
         require_fresh_replay_free=not args.resume,
+        expected_source_batch_size=int(args.recipe_data["training"]["target_unlabeled_dann"]["source_batch_size"]),
+        expected_target_batch_size=int(args.recipe_data["training"]["target_unlabeled_dann"]["target_batch_size"]),
     )
     lifecycle_reports = {}
     for variant in ("control", "treatment"):

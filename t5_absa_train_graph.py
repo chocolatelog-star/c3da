@@ -1925,7 +1925,7 @@ class PairedDomainBatchSampler:
                     or not isinstance(target_indices, list)
                     or len(target_indices) != self.target_batch_size
                 ):
-                    raise ValueError("DANN sampler audit report has an invalid 1/1 batch")
+                    raise ValueError("DANN sampler audit report has an invalid domain batch")
                 if any(not isinstance(index, int) or not 0 <= index < self.source_count for index in source_indices) or any(not isinstance(index, int) or not self.source_count <= index < self.source_count + self.target_count for index in target_indices):
                     raise ValueError("DANN sampler audit report index/row identity mismatch")
                 if batch.get("source_row_ids") != [self.source_row_ids[index] for index in source_indices] or batch.get("target_row_ids") != [self.target_row_ids[index - self.source_count] for index in target_indices]:

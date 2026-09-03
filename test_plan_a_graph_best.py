@@ -1,3 +1,4 @@
+import argparse
 import json
 from pathlib import Path
 
@@ -21,3 +22,38 @@ def test_adapter_manifest_maps_phase_a_treatment(tmp_path: Path):
     state = json.loads((adapter / "target_pseudo_generation_state.json").read_text(encoding="utf-8"))
     assert state["status"] == "complete"
     assert state["target_test_access"] is False
+
+
+def test_internal_dann_batch_sizes_are_forwarded_from_recipe(tmp_path: Path):
+    from m1_syntactic_rgat_pseudo_quick_ablation import _read_json, _training_argv
+
+    recipe_path = Path(__file__).parent / "configs" / "recipes" / "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann003_internal16_v1.json"
+    recipe = _read_json(recipe_path)
+    args = argparse.Namespace(
+        recipe_data=recipe,
+        model_path="model",
+        cuda="0",
+        graph_cache_dir=tmp_path / "cache",
+        parser_dir=tmp_path / "parser",
+    )
+    argv = _training_argv(args, tmp_path / "treatment", graph_enabled=True)
+    assert argv[argv.index("--dann_source_batch_size") + 1] == "16"
+    assert argv[argv.index("--dann_target_batch_size") + 1] == "16"
+
+
+def test_dann_zero_coverage_recipe_does_not_forward_domain_batching(tmp_path: Path):
+    from m1_syntactic_rgat_pseudo_quick_ablation import _read_json, _training_argv
+
+    recipe_path = Path(__file__).parent / "configs" / "recipes" / "laptop14_to_rest15_m1_syntactic_rgat_pseudo_quick_ablation_dann0_16x2_coverage_v1.json"
+    recipe = _read_json(recipe_path)
+    args = argparse.Namespace(
+        recipe_data=recipe,
+        model_path="model",
+        cuda="0",
+        graph_cache_dir=tmp_path / "cache",
+        parser_dir=tmp_path / "parser",
+    )
+    argv = _training_argv(args, tmp_path / "treatment", graph_enabled=True)
+    assert "--paired_domain_batches" not in argv
+    assert "--dann_source_batch_size" not in argv
+    assert "--dann_target_batch_size" not in argv
