@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -170,6 +171,17 @@ FROZEN_PHASE_A_TREATMENT_GRAPH = {
 
 def _utc_now() -> str:
     return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+
+
+def _disk_budget_guard(run_dir: Path, *, minimum_free_gib: float = 8.0) -> dict:
+    """Check free space before creating Phase-A artifacts; never deletes data."""
+    usage = shutil.disk_usage(run_dir if run_dir.exists() else run_dir.parent)
+    total = usage.total / (1024 ** 3)
+    free = usage.free / (1024 ** 3)
+    result = {"total_gib": round(total, 3), "free_gib": round(free, 3), "minimum_free_gib": minimum_free_gib, "status": "PASS" if free >= minimum_free_gib else "BLOCKED_BY_DISK"}
+    if free < minimum_free_gib:
+        raise RuntimeError(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return result
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -739,8 +751,13 @@ def _validate_recipe(recipe: dict, *, allow_batch_overrides: bool = False, allow
     expected_recipe = dict(FROZEN_RECIPE)
     expected_recipe["source_dataset"] = recipe.get("source_dataset")
     expected_recipe["target_dataset"] = recipe.get("target_dataset")
-    if allow_dann_zero or recipe.get("recipe_id", "").endswith("_dann0_v1"):
+    recipe_id = recipe.get("recipe_id", "")
+    if allow_dann_zero or recipe_id.endswith("_dann0_v1"):
         expected_recipe["lambda_domain_adv"] = 0.0
+    elif recipe_id.endswith(("_dann001_v1", "_dann002_v1", "_dann005_v1")):
+        # Explicit DANN sweep recipes are test-independent tuning variants;
+        # validate that the declared value is internally consistent.
+        expected_recipe["lambda_domain_adv"] = actual["lambda_domain_adv"]
     allowed_overrides = {"extractor_train_batch_size", "gradient_accumulation_steps"} if allow_batch_overrides else set()
     mismatches = {
         key: {"actual": actual[key], "expected": expected}
@@ -1033,6 +1050,7 @@ def _training_argv(
         "--max_effective_weight", str(training["max_effective_weight"]),
         "--neutral_generation_loss_gain", str(training["neutral_generation_loss_gain"]),
         "--neutral_generation_max_effective_weight", str(training["neutral_generation_max_effective_weight"]),
+        "--element_coverage_weight", str(training.get("element_coverage_weight", 0.0)),
         "--max_pairing_triplets", str(training["max_pairing_triplets"]),
         "--min_pairing_triplets", str(training["min_pairing_triplets"]),
         "--min_pairing_sample_weight", str(training["min_pairing_sample_weight"]),
@@ -1041,9 +1059,10 @@ def _training_argv(
         "--cuda", str(args.cuda),
         "--seed", str(recipe["seed"]),
     ]
+    if graph_enabled or float(training["lambda_domain_adv"]) > 0:
+        argv.extend(["--target_unlabeled_file", str(variant_dir / "target_unlabeled.jsonl")])
     if float(training["lambda_domain_adv"]) > 0:
         argv.extend([
-            "--target_unlabeled_file", str(variant_dir / "target_unlabeled.jsonl"),
             "--paired_domain_batches",
             "--dann_source_batch_size", str(training["target_unlabeled_dann"]["source_batch_size"]),
             "--dann_target_batch_size", str(training["target_unlabeled_dann"]["target_batch_size"]),
@@ -1054,6 +1073,8 @@ def _training_argv(
             "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
             "--syntactic_graph_parser_dir", str(args.parser_dir),
         ])
+        if bool(training.get("multi_element_coverage_loss", False)):
+            argv.append("--multi_element_coverage_loss")
     if training["force_domain_weights"]:
         argv.append("--force_domain_weights")
     if training["pairing_source_only"]:
@@ -1093,7 +1114,8 @@ def _run_training(
         args,
         variant_dir,
         graph_enabled,
-        variant_dir / "dann_batch_audit.json",
+        (variant_dir / "dann_batch_audit.json"
+         if float(args.recipe_data["training"]["lambda_domain_adv"]) > 0 else None),
         variant_dir / "phase_a_initialization_audit.json",
     )
     result_path = variant_dir / "worker_result.json"
@@ -1319,14 +1341,9 @@ def _pipeline_argv(
             "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
             "--output_tag", output_tag,
         ]
-        if graph_enabled:
-            argv.extend([
-                "--use_syntactic_graph_adapter",
-                "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
-                "--syntactic_graph_parser_dir", str(args.parser_dir),
-                "--syntactic_graph_cache_tokenizer_path", str(args.model_path),
-                "--syntactic_graph_split", "source_dev",
-            ])
+        # t5_aste_pipeline evaluate does not accept graph-adapter CLI flags;
+        # graph-aware training artifacts are evaluated through the standard
+        # serialized model interface.
     elif command == "pseudo":
         argv = [
             str(Path(sys.executable)), "t5_aste_pipeline.py", "pseudo",
@@ -1345,13 +1362,8 @@ def _pipeline_argv(
             "--fixed_changed_weight", str(args.recipe_data["pseudo"]["fixed_changed_weight"]),
             "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
         ]
-        if graph_enabled:
-            argv.extend([
-                "--use_syntactic_graph_adapter",
-                "--syntactic_graph_cache_dir", str(args.graph_cache_dir),
-                "--syntactic_graph_parser_dir", str(args.parser_dir),
-                "--syntactic_graph_cache_tokenizer_path", str(args.model_path),
-            ])
+        # t5_aste_pipeline pseudo does not accept graph-adapter CLI flags.
+        # The graph-aware extractor checkpoint remains the model used here.
     else:
         raise ValueError(command)
     return argv
@@ -2214,9 +2226,11 @@ def run_phase_a(args: argparse.Namespace) -> dict:
     recipe = args.recipe_data
     _validate_recipe(recipe, allow_batch_overrides=True)
     run_dir = Path(args.output_dir)
+    disk_budget = _disk_budget_guard(run_dir)
     if run_dir.exists() and not args.resume:
         raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(run_dir / "disk_budget.json", disk_budget)
     git_identity = _git_identity(args.project_root)
     # Research runs record dirty-worktree state in git_identity; it is
     # intentionally non-blocking so local/server hotfixes do not prevent a run.

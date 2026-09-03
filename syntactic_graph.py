@@ -10,6 +10,7 @@ from typing import Iterable
 
 
 GRAPH_SCHEMA_VERSION = 2
+COMPOSITIONAL_RELATION_SCHEMA_VERSION = 1
 ALIGNMENT_POLICY_VERSION = "overlap-contiguous-contained-sharing-v3"
 DEFAULT_PARSER_DIR = Path(r"J:\nlp\models\stanza_resources")
 PARSER_PROCESSORS = "tokenize,mwt,pos,lemma,depparse"
@@ -21,6 +22,16 @@ PARSER_PACKAGES = {
     "depparse": "ewt_charlm",
 }
 UNK_RELATION_KEY = "__UNK_REL__"
+UNK_DEP = "__UNK_DEP__"
+UNK_POS = "__UNK_POS__"
+GRAPH_DIRECTIONS = ("forward", "reverse", "self")
+GRAPH_DEPENDENCY_VOCAB = (
+    "self", "pos_neighbor", "acl", "advcl", "advmod", "amod", "appos", "aux", "case", "cc", "ccomp", "clf", "compound", "conj", "cop", "csubj", "dep", "det", "discourse", "dislocated", "expl", "fixed", "flat", "goeswith", "iobj", "list", "mark", "nmod", "nsubj", "nummod", "obj", "obl", "orphan", "parataxis", "punct", "reparandum", "root", "vocative", "xcomp", UNK_DEP,
+)
+GRAPH_POS_VOCAB = (
+    "ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM",
+    "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X", UNK_POS,
+)
 EXPECTED_PARSER_SHA256 = {
     "resources.json": "4e41c1df152146fa26ed0c006a08feea7a60bb3414bb6d57dbda24ad2e3cb99c",
     "en/tokenize/ewt.pt": "fc2fed0cd74dbaef1620bd3e776141ae76c4e28eb5aeff369b2715c31cc73cba",
@@ -85,6 +96,20 @@ def _relation_key(edge: dict) -> str:
     return str(edge["relation_key"])
 
 
+def _compositional_parts(edge: dict) -> tuple[str, str, str, str]:
+    """Return deterministic dependency, direction and endpoint POS categories."""
+    kind = str(edge.get("kind", ""))
+    direction = "reverse" if "reverse" in kind else ("self" if "self_loop" in kind else "forward")
+    dep = str(edge.get("deprel", edge.get("dependency_key", "dep"))).split("|")[0]
+    if dep.startswith("reverse:"):
+        dep = dep.removeprefix("reverse:")
+    dep = dep if dep in GRAPH_DEPENDENCY_VOCAB else ("pos_neighbor" if dep == "pos_neighbor" else UNK_DEP)
+    pos_pair = str(edge.get("pos_pair_key", "" )).split("|")
+    src_pos = pos_pair[0] if pos_pair and pos_pair[0] in GRAPH_POS_VOCAB else UNK_POS
+    dst_pos = pos_pair[1] if len(pos_pair) > 1 and pos_pair[1] in GRAPH_POS_VOCAB else UNK_POS
+    return dep, direction, src_pos, dst_pos
+
+
 def _assign_edge_ids(edges: list[dict], relation_vocab: list[str] | None = None) -> list[dict]:
     relation_values = relation_vocab or sorted(set([_relation_key(edge) for edge in edges] + [UNK_RELATION_KEY]))
     relation_ids = {value: index for index, value in enumerate(relation_values)}
@@ -103,6 +128,15 @@ def _assign_edge_ids(edges: list[dict], relation_vocab: list[str] | None = None)
             current["relation_id"] = relation_ids[relation_key]
         current["dependency_relation_id"] = _stable_index(_dependency_key(current), dependency_values)
         current["pos_pair_id"] = _stable_index(_pos_key(current), pos_values)
+        dep, direction, src_pos, dst_pos = _compositional_parts(current)
+        current["compositional_dependency"] = dep
+        current["compositional_direction"] = direction
+        current["compositional_src_pos"] = src_pos
+        current["compositional_dst_pos"] = dst_pos
+        current["compositional_dependency_id"] = list(GRAPH_DEPENDENCY_VOCAB).index(dep)
+        current["compositional_direction_id"] = GRAPH_DIRECTIONS.index(direction)
+        current["compositional_src_pos_id"] = list(GRAPH_POS_VOCAB).index(src_pos)
+        current["compositional_dst_pos_id"] = list(GRAPH_POS_VOCAB).index(dst_pos)
         assigned.append(current)
     return assigned
 
@@ -665,6 +699,10 @@ class GraphCache:
             "relation_id": [int(edge["relation_id"]) for edge in record["edges"]],
             "dependency_relation_id": [int(edge["dependency_relation_id"]) for edge in record["edges"]],
             "pos_pair_id": [int(edge["pos_pair_id"]) for edge in record["edges"]],
+            "compositional_dependency_id": [int(edge["compositional_dependency_id"]) for edge in record["edges"]],
+            "compositional_direction_id": [int(edge["compositional_direction_id"]) for edge in record["edges"]],
+            "compositional_src_pos_id": [int(edge["compositional_src_pos_id"]) for edge in record["edges"]],
+            "compositional_dst_pos_id": [int(edge["compositional_dst_pos_id"]) for edge in record["edges"]],
             "edge_mask": [1] * len(record["edges"]),
         }
 
@@ -1099,6 +1137,13 @@ def build_graph_cache_records(
         "tokenizer_identity": tokenizer_identity,
         "relation_vocab_sha256": sha256_file(output_dir / "relation_vocab.json"),
         "relation_vocab_size": len(relation_vocab),
+        "compositional_relation_schema": {
+            "version": COMPOSITIONAL_RELATION_SCHEMA_VERSION,
+            "dependency_vocab": list(GRAPH_DEPENDENCY_VOCAB),
+            "direction_vocab": list(GRAPH_DIRECTIONS),
+            "pos_vocab": list(GRAPH_POS_VOCAB),
+            "combined_relation_lookup": "disabled_for_new_adapter",
+        },
         "use_task_prefix": bool(use_task_prefix),
         "max_length": int(max_length),
         "target_test_access": False,

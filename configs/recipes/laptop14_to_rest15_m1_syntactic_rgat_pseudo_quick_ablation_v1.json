@@ -7,6 +7,22 @@
   "seed": 1000,
   "research_status": "APPROVED_FOR_PHASE_A_IMPLEMENTATION",
   "training_status": "PHASE_A_ONLY_NOT_RUN",
+  "experiment_matrix": {
+    "phase_a_only": true,
+    "shared_graph_cache_read_only": true,
+    "variants": {
+      "G0": {"relation_encoding": "legacy_combined", "focus_enabled": false, "coverage_enabled": true, "focus_weight": 0.0, "coverage_weight": 0.05},
+      "G1": {"relation_encoding": "compositional", "focus_enabled": false, "coverage_enabled": true, "focus_weight": 0.0, "coverage_weight": 0.05},
+      "G2": {"relation_encoding": "compositional", "focus_enabled": true, "coverage_enabled": false, "focus_weight": 0.05, "coverage_weight": 0.0},
+      "G3": {"relation_encoding": "compositional", "focus_enabled": true, "coverage_enabled": true, "focus_weight": 0.05, "coverage_weight": 0.05}
+    }
+  },
+  "disk_policy": {
+    "max_checkpoints": 1,
+    "per_run_max_gib": 1.5,
+    "total_increment_max_gib": 6.0,
+    "output_whitelist": ["resolved_config.json", "run_manifest.json", "phase_a_metrics.json", "phase_a_result_card.json", "metrics_history.jsonl", "best_source_dev_predictions.jsonl.gz", "selected_target_pseudo.jsonl.gz", "relation_schema_summary.json", "model_sha256.txt", "training_log_compact.txt"]
+  },
   "models": {
     "t5_base": "models/t5-base-py"
   },

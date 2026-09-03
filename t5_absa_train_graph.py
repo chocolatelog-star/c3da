@@ -1308,12 +1308,28 @@ class DataCollatorForSeq2SeqWithPairing:
             "relation_id",
             "dependency_relation_id",
             "pos_pair_id",
+            "compositional_dependency_id",
+            "compositional_direction_id",
+            "compositional_src_pos_id",
+            "compositional_dst_pos_id",
             "edge_mask",
         )
         graph_present = [key in feature for feature in features for key in graph_keys]
         if any(graph_present) and not all(graph_present):
             raise ValueError("graph fields must be present for every feature or for none of them")
         graph_values = {key: [feature.pop(key, None) for feature in features] for key in graph_keys}
+        # Legacy caches may not contain compositional fields; use neutral IDs
+        # so the adapter can fall back to the legacy relation embedding.
+        for key in (
+            "compositional_dependency_id",
+            "compositional_direction_id",
+            "compositional_src_pos_id",
+            "compositional_dst_pos_id",
+        ):
+            graph_values[key] = [
+                value if value is not None else [0] * len(graph_values["edge_src"][index] or [])
+                for index, value in enumerate(graph_values[key])
+            ]
         pairing_aspect_spans = [feature.pop("pairing_aspect_spans", []) for feature in features]
         pairing_opinion_spans = [feature.pop("pairing_opinion_spans", []) for feature in features]
         pairing_masks = [feature.pop("pairing_mask", []) for feature in features]
@@ -1382,11 +1398,15 @@ class DataCollatorForSeq2SeqWithPairing:
                     "relation_id",
                     "dependency_relation_id",
                     "pos_pair_id",
+                    "compositional_dependency_id",
+                    "compositional_direction_id",
+                    "compositional_src_pos_id",
+                    "compositional_dst_pos_id",
                 )
             }
             edge_mask = torch.zeros((len(features), max_edges), dtype=torch.bool)
             for row_index, values in enumerate(zip(*graph_values.values())):
-                row_word_to_subword, row_word_mask, row_src, row_dst, row_relation, row_dependency, row_pos, row_edge_mask = values
+                row_word_to_subword, row_word_mask, row_src, row_dst, row_relation, row_dependency, row_pos, row_comp_dep, row_comp_dir, row_comp_src, row_comp_dst, row_edge_mask = values
                 word_mask[row_index, : len(row_word_mask)] = torch.tensor(row_word_mask, dtype=torch.bool)
                 for word_index, indices in enumerate(row_word_to_subword):
                     word_to_subword[row_index, word_index, : len(indices)] = torch.tensor(indices, dtype=torch.long)
@@ -1397,6 +1417,10 @@ class DataCollatorForSeq2SeqWithPairing:
                 edge_tensors["relation_id"][row_index, :edge_count] = torch.tensor(row_relation, dtype=torch.long)
                 edge_tensors["dependency_relation_id"][row_index, :edge_count] = torch.tensor(row_dependency, dtype=torch.long)
                 edge_tensors["pos_pair_id"][row_index, :edge_count] = torch.tensor(row_pos, dtype=torch.long)
+                edge_tensors["compositional_dependency_id"][row_index, :edge_count] = torch.tensor(row_comp_dep, dtype=torch.long)
+                edge_tensors["compositional_direction_id"][row_index, :edge_count] = torch.tensor(row_comp_dir, dtype=torch.long)
+                edge_tensors["compositional_src_pos_id"][row_index, :edge_count] = torch.tensor(row_comp_src, dtype=torch.long)
+                edge_tensors["compositional_dst_pos_id"][row_index, :edge_count] = torch.tensor(row_comp_dst, dtype=torch.long)
             batch["graph_word_to_subword"] = word_to_subword
             batch["graph_word_mask"] = word_mask
             batch["graph_edge_src"] = edge_tensors["edge_src"]
@@ -1404,6 +1428,10 @@ class DataCollatorForSeq2SeqWithPairing:
             batch["graph_relation_id"] = edge_tensors["relation_id"]
             batch["graph_dependency_relation_id"] = edge_tensors["dependency_relation_id"]
             batch["graph_pos_pair_id"] = edge_tensors["pos_pair_id"]
+            batch["graph_compositional_dependency_id"] = edge_tensors["compositional_dependency_id"]
+            batch["graph_compositional_direction_id"] = edge_tensors["compositional_direction_id"]
+            batch["graph_compositional_src_pos_id"] = edge_tensors["compositional_src_pos_id"]
+            batch["graph_compositional_dst_pos_id"] = edge_tensors["compositional_dst_pos_id"]
             batch["graph_edge_mask"] = edge_mask
         return batch
 

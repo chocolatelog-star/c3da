@@ -34,6 +34,9 @@ class SyntacticGraphAdapter(nn.Module):
         dropout: float = 0.1,
         num_dependency_relations: int | None = None,
         num_pos_pair_relations: int | None = None,
+        compositional_dependency_vocab_size: int = 40,
+        compositional_direction_vocab_size: int = 3,
+        compositional_pos_vocab_size: int = 18,
     ):
         super().__init__()
         if graph_hidden_size != attention_heads * head_size:
@@ -48,6 +51,10 @@ class SyntacticGraphAdapter(nn.Module):
         self.key_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
         self.value_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
         self.relation_embedding = nn.Embedding(self.num_relations, graph_hidden_size)
+        self.compositional_dependency_embedding = nn.Embedding(max(1, int(compositional_dependency_vocab_size)), graph_hidden_size)
+        self.compositional_direction_embedding = nn.Embedding(max(1, int(compositional_direction_vocab_size)), graph_hidden_size)
+        self.compositional_src_pos_embedding = nn.Embedding(max(1, int(compositional_pos_vocab_size)), graph_hidden_size)
+        self.compositional_dst_pos_embedding = nn.Embedding(max(1, int(compositional_pos_vocab_size)), graph_hidden_size)
         self.dependency_bias = nn.Embedding(
             max(1, int(num_dependency_relations or num_relations)), attention_heads
         )
@@ -66,6 +73,10 @@ class SyntacticGraphAdapter(nn.Module):
         self.key_projection.reset_parameters()
         self.value_projection.reset_parameters()
         self.relation_embedding.reset_parameters()
+        self.compositional_dependency_embedding.reset_parameters()
+        self.compositional_direction_embedding.reset_parameters()
+        self.compositional_src_pos_embedding.reset_parameters()
+        self.compositional_dst_pos_embedding.reset_parameters()
         self.dependency_bias.reset_parameters()
         self.pos_pair_bias.reset_parameters()
         self.output_projection.reset_parameters()
@@ -118,6 +129,10 @@ class SyntacticGraphAdapter(nn.Module):
         relation_id: torch.Tensor,
         dependency_relation_id: torch.Tensor,
         pos_pair_id: torch.Tensor,
+        compositional_dependency_id: torch.Tensor | None,
+        compositional_direction_id: torch.Tensor | None,
+        compositional_src_pos_id: torch.Tensor | None,
+        compositional_dst_pos_id: torch.Tensor | None,
         edge_mask: torch.Tensor,
         word_mask: torch.Tensor,
         trace=None,
@@ -161,9 +176,15 @@ class SyntacticGraphAdapter(nn.Module):
         relation_ids = relation_id.clamp(min=0, max=self.relation_embedding.num_embeddings - 1)
         dependency_ids = dependency_relation_id.clamp(min=0, max=self.dependency_bias.num_embeddings - 1)
         pos_ids = pos_pair_id.clamp(min=0, max=self.pos_pair_bias.num_embeddings - 1)
-        relation = self.relation_embedding(relation_ids).view(
-            batch_size, edge_count, self.attention_heads, self.head_size
-        )
+        if compositional_dependency_id is not None:
+            relation = (
+                self.compositional_dependency_embedding(compositional_dependency_id.clamp(0, self.compositional_dependency_embedding.num_embeddings - 1))
+                + self.compositional_direction_embedding(compositional_direction_id.clamp(0, self.compositional_direction_embedding.num_embeddings - 1))
+                + self.compositional_src_pos_embedding(compositional_src_pos_id.clamp(0, self.compositional_src_pos_embedding.num_embeddings - 1))
+                + self.compositional_dst_pos_embedding(compositional_dst_pos_id.clamp(0, self.compositional_dst_pos_embedding.num_embeddings - 1))
+            ).view(batch_size, edge_count, self.attention_heads, self.head_size)
+        else:
+            relation = self.relation_embedding(relation_ids).view(batch_size, edge_count, self.attention_heads, self.head_size)
         if trace is None:
             logits = (edge_queries * edge_keys).sum(dim=-1) / math.sqrt(self.head_size)
             logits = logits + self.dependency_bias(dependency_ids) + self.pos_pair_bias(pos_ids)
@@ -244,7 +265,11 @@ class SyntacticGraphAdapter(nn.Module):
         relation_id: torch.Tensor,
         dependency_relation_id: torch.Tensor,
         pos_pair_id: torch.Tensor,
-        edge_mask: torch.Tensor,
+        compositional_dependency_id: torch.Tensor | None = None,
+        compositional_direction_id: torch.Tensor | None = None,
+        compositional_src_pos_id: torch.Tensor | None = None,
+        compositional_dst_pos_id: torch.Tensor | None = None,
+        edge_mask: torch.Tensor | None = None,
         trace=None,
     ) -> GraphAdapterOutput:
         word_hidden = self._pool_word_hidden(hidden, word_to_subword, word_mask)
@@ -258,6 +283,10 @@ class SyntacticGraphAdapter(nn.Module):
             relation_id,
             dependency_relation_id,
             pos_pair_id,
+            compositional_dependency_id,
+            compositional_direction_id,
+            compositional_src_pos_id,
+            compositional_dst_pos_id,
             edge_mask,
             word_mask,
             trace=trace,
@@ -297,6 +326,10 @@ def graph_model_config(config, relation_vocab_size: int) -> None:
     config.graph_attention_heads = 4
     config.graph_head_size = 64
     config.graph_relation_vocab_size = int(max(1, relation_vocab_size))
+    config.graph_compositional_relation = True
+    config.graph_compositional_dependency_vocab_size = 40
+    config.graph_compositional_direction_vocab_size = 3
+    config.graph_compositional_pos_vocab_size = 18
     config.graph_use_dependency = True
     config.graph_use_reverse_dependency = True
     config.graph_use_pos_neighbor = True
@@ -312,6 +345,9 @@ def _graph_adapter_from_config(config) -> SyntacticGraphAdapter:
         attention_heads=int(getattr(config, "graph_attention_heads", 4)),
         head_size=int(getattr(config, "graph_head_size", 64)),
         num_relations=int(getattr(config, "graph_relation_vocab_size", 1)),
+        compositional_dependency_vocab_size=int(getattr(config, "graph_compositional_dependency_vocab_size", 40)),
+        compositional_direction_vocab_size=int(getattr(config, "graph_compositional_direction_vocab_size", 3)),
+        compositional_pos_vocab_size=int(getattr(config, "graph_compositional_pos_vocab_size", 18)),
         dropout=float(getattr(config, "dropout_rate", 0.1)),
     )
 
@@ -394,6 +430,10 @@ if AutoModelForSeq2SeqLM is not None:
             relation_id=None,
             dependency_relation_id=None,
             pos_pair_id=None,
+            compositional_dependency_id=None,
+            compositional_direction_id=None,
+            compositional_src_pos_id=None,
+            compositional_dst_pos_id=None,
             edge_mask=None,
             trace=None,
         ):
@@ -405,9 +445,13 @@ if AutoModelForSeq2SeqLM is not None:
                 "relation_id": relation_id,
                 "dependency_relation_id": dependency_relation_id,
                 "pos_pair_id": pos_pair_id,
+                "compositional_dependency_id": compositional_dependency_id,
+                "compositional_direction_id": compositional_direction_id,
+                "compositional_src_pos_id": compositional_src_pos_id,
+                "compositional_dst_pos_id": compositional_dst_pos_id,
                 "edge_mask": edge_mask,
             }
-            missing = [name for name, value in graph_fields.items() if value is None]
+            missing = [name for name, value in graph_fields.items() if value is None and not name.startswith("compositional_")]
             if missing:
                 raise ValueError(f"syntactic graph inputs missing: {', '.join(missing)}")
             encoder_outputs = self.encoder(
@@ -518,6 +562,10 @@ if AutoModelForSeq2SeqLM is not None:
                 "graph_relation_id",
                 "graph_dependency_relation_id",
                 "graph_pos_pair_id",
+                "graph_compositional_dependency_id",
+                "graph_compositional_direction_id",
+                "graph_compositional_src_pos_id",
+                "graph_compositional_dst_pos_id",
                 "graph_edge_mask",
             )
             graph_fields = {name: kwargs.pop(name, None) for name in graph_names}
