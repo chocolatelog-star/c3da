@@ -2,9 +2,38 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn as nn
+
+
+_GRAPH_ADAPTER_PREFIX = "syntactic_graph_adapter."
+_COMPOSITIONAL_RELATION_PREFIX = f"{_GRAPH_ADAPTER_PREFIX}compositional_"
+
+
+def graph_checkpoint_uses_compositional_relations(parameter_names) -> bool:
+    """Return the relation encoder mode encoded by a graph checkpoint."""
+    return any(str(name).startswith(_COMPOSITIONAL_RELATION_PREFIX) for name in parameter_names)
+
+
+def _checkpoint_graph_relation_mode(model_path: str | Path) -> bool | None:
+    checkpoint = Path(model_path)
+    safetensors_path = checkpoint / "model.safetensors"
+    if safetensors_path.is_file():
+        from safetensors import safe_open
+
+        with safe_open(str(safetensors_path), framework="pt", device="cpu") as handle:
+            keys = list(handle.keys())
+    else:
+        pytorch_path = checkpoint / "pytorch_model.bin"
+        if not pytorch_path.is_file():
+            return None
+        state_dict = torch.load(str(pytorch_path), map_location="meta", weights_only=True)
+        keys = list(state_dict)
+    if not any(str(name).startswith(_GRAPH_ADAPTER_PREFIX) for name in keys):
+        return None
+    return graph_checkpoint_uses_compositional_relations(keys)
 
 
 def _record_trace(trace, stage: str, value: torch.Tensor, axes=()):
@@ -55,10 +84,19 @@ class SyntacticGraphAdapter(nn.Module):
         self.key_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
         self.value_projection = nn.Linear(graph_hidden_size, graph_hidden_size)
         self.relation_embedding = nn.Embedding(self.num_relations, graph_hidden_size)
-        self.compositional_dependency_embedding = nn.Embedding(max(1, int(compositional_dependency_vocab_size)), graph_hidden_size)
-        self.compositional_direction_embedding = nn.Embedding(max(1, int(compositional_direction_vocab_size)), graph_hidden_size)
-        self.compositional_src_pos_embedding = nn.Embedding(max(1, int(compositional_pos_vocab_size)), graph_hidden_size)
-        self.compositional_dst_pos_embedding = nn.Embedding(max(1, int(compositional_pos_vocab_size)), graph_hidden_size)
+        if self.compositional_relation:
+            self.compositional_dependency_embedding = nn.Embedding(
+                max(1, int(compositional_dependency_vocab_size)), graph_hidden_size
+            )
+            self.compositional_direction_embedding = nn.Embedding(
+                max(1, int(compositional_direction_vocab_size)), graph_hidden_size
+            )
+            self.compositional_src_pos_embedding = nn.Embedding(
+                max(1, int(compositional_pos_vocab_size)), graph_hidden_size
+            )
+            self.compositional_dst_pos_embedding = nn.Embedding(
+                max(1, int(compositional_pos_vocab_size)), graph_hidden_size
+            )
         self.dependency_bias = nn.Embedding(
             max(1, int(num_dependency_relations or num_relations)), attention_heads
         )
@@ -77,10 +115,11 @@ class SyntacticGraphAdapter(nn.Module):
         self.key_projection.reset_parameters()
         self.value_projection.reset_parameters()
         self.relation_embedding.reset_parameters()
-        self.compositional_dependency_embedding.reset_parameters()
-        self.compositional_direction_embedding.reset_parameters()
-        self.compositional_src_pos_embedding.reset_parameters()
-        self.compositional_dst_pos_embedding.reset_parameters()
+        if self.compositional_relation:
+            self.compositional_dependency_embedding.reset_parameters()
+            self.compositional_direction_embedding.reset_parameters()
+            self.compositional_src_pos_embedding.reset_parameters()
+            self.compositional_dst_pos_embedding.reset_parameters()
         self.dependency_bias.reset_parameters()
         self.pos_pair_bias.reset_parameters()
         self.output_projection.reset_parameters()
@@ -610,6 +649,9 @@ def load_seq2seq_model(
         return AutoModelForSeq2SeqLM.from_pretrained(model_path)
     from transformers import AutoConfig
 
+    checkpoint_relation_mode = _checkpoint_graph_relation_mode(model_path)
+    if checkpoint_relation_mode is not None:
+        compositional_relation = checkpoint_relation_mode
     config = AutoConfig.from_pretrained(model_path, local_files_only=True)
     graph_model_config(config, relation_vocab_size)
     config.graph_focus_enabled = bool(focus_enabled)
