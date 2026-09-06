@@ -3250,6 +3250,7 @@ def augment(args: argparse.Namespace) -> None:
         compatibility_profile=args.compatibility_profile,
         syntax_candidate_mode=args.syntax_candidate_mode,
         syntax_min_acceptable_score=args.syntax_min_acceptable_score,
+        target_domain_opinion_priority=args.target_domain_opinion_priority,
     )
     output_tag = args.augment_output_tag
     if not args.sentiment_vector_diagnostics_only:
@@ -3489,6 +3490,7 @@ def augment(args: argparse.Namespace) -> None:
         "compatibility_profile": args.compatibility_profile,
         "syntax_candidate_mode": args.syntax_candidate_mode,
         "syntax_min_acceptable_score": args.syntax_min_acceptable_score,
+        "target_domain_opinion_priority": args.target_domain_opinion_priority,
         "augment_channel_mode": args.augment_channel_mode,
         "domain_prefix_style": args.domain_prefix_style,
         "opinion_replacement_mode": args.opinion_replacement_mode,
@@ -3538,6 +3540,26 @@ def augment(args: argparse.Namespace) -> None:
         }
     else:
         aug_stats["syntax_audit"] = {"enabled": False, "candidate_requests": 0}
+    opinion_requests = [row for row in requests if row.get("channel") in {"opinion_sentiment_channel", "masked_opinion_sentiment_channel"}]
+    target_hits = sum(bool(row.get("target_bank_hit")) for row in opinion_requests)
+    fallbacks = sum(bool(row.get("target_opinion_fallback")) for row in opinion_requests)
+    aug_stats["opinion_selection_audit"] = {
+        "opinion_replacement_requests": len(opinion_requests),
+        "target_bank_hit_requests": target_hits,
+        "target_bank_hit_rate": target_hits / max(1, len(opinion_requests)),
+        "target_opinion_utilization_rate": target_hits / max(1, len(opinion_requests)),
+        "fallback_requests": fallbacks,
+        "fallback_rate": fallbacks / max(1, len(opinion_requests)),
+        "selected_opinion_domain_distribution": dict(Counter(row.get("opinion_source_domain", "unknown") for row in opinion_requests)),
+        "same_sentiment_replacement_rate": sum(
+            bool((row.get("old_triplet") or ["", "", ""])[2] == (row.get("new_triplet") or ["", "", ""])[2])
+            for row in opinion_requests
+        ) / max(1, len(opinion_requests)),
+        "cross_sentiment_replacement_rate": sum(
+            bool((row.get("old_triplet") or ["", "", ""])[2] != (row.get("new_triplet") or ["", "", ""])[2])
+            for row in opinion_requests
+        ) / max(1, len(opinion_requests)),
+    }
     dump_json(tagged_output_path(run_dir, "c3da_augment_analysis.json", output_tag), aug_stats)
     if args.augment_prompt_style in {"label_composition", "label_to_text", "sentence_fusion_composition"}:
         dump_json(
@@ -3860,6 +3882,7 @@ def main() -> None:
         help="句法候选模式：none/aspect/opinion/dual",
     )
     p.add_argument("--syntax_min_acceptable_score", type=int, choices=[0, 1, 2, 3], default=1)
+    p.add_argument("--target_domain_opinion_priority", action="store_true")
     p.add_argument("--sentiment_vector_model_path", default="")
     p.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
     p.add_argument("--glove_path", default=r"models/glove/glove.6B.300d.txt")

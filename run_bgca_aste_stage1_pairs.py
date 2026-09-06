@@ -913,6 +913,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
     )
     if augment_prompt_suffix:
         final_tag = f"{final_tag}_{augment_prompt_suffix}"
+    if args.target_domain_opinion_priority:
+        final_tag = f"{final_tag}_targetopinion"
     final_weight_suffix = final_weight_tag(args.final_pseudo_weight, args.final_augment_weight)
     if final_weight_suffix:
         final_tag = f"{final_tag}_{final_weight_suffix}"
@@ -942,6 +944,8 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         )
         if augment_prompt_suffix:
             base_augment_tag = f"{base_augment_tag}_{augment_prompt_suffix}"
+        if args.target_domain_opinion_priority:
+            base_augment_tag = f"{base_augment_tag}_targetopinion"
         selected_augment_file = run_dir / f"c3da_two_channel_augmented_selected_{base_augment_tag}.jsonl"
         base_augment_stage = f"augment_{base_augment_tag}"
         if not reuse_for_auxiliary_loss and (args.rerun or not selected_augment_file.exists()):
@@ -973,6 +977,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                     args.syntax_candidate_mode,
                     "--syntax_min_acceptable_score",
                     str(args.syntax_min_acceptable_score),
+                    *( ["--target_domain_opinion_priority"] if args.target_domain_opinion_priority else [] ),
                     *( ["--syntax_cache_file", args.syntax_cache_file] if args.syntax_cache_file else [] ),
                     "--sentiment_vector_model_path",
                     args.sentiment_vector_model_path,
@@ -1094,6 +1099,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.syntax_candidate_mode,
                 "--syntax_min_acceptable_score",
                 str(args.syntax_min_acceptable_score),
+                *( ["--target_domain_opinion_priority"] if args.target_domain_opinion_priority else [] ),
                 *( ["--syntax_cache_file", args.syntax_cache_file] if args.syntax_cache_file else [] ),
                 "--sentiment_vector_model_path",
                 args.sentiment_vector_model_path,
@@ -1586,6 +1592,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--syntax_min_acceptable_score", type=int, choices=[0, 1, 2, 3], default=1)
     parser.add_argument("--syntax_cache_file", default="")
+    parser.add_argument("--target_domain_opinion_priority", action="store_true")
     parser.add_argument("--sentiment_vector_model_path", default=r"models/t5-base-py")
     parser.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
     parser.add_argument("--glove_path", default=r"models/glove/glove.6B.300d.txt")

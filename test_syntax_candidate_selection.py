@@ -1,4 +1,10 @@
-from t5_aste_augment import build_syntax_candidate_banks, rank_syntax_candidates, syntax_compatibility_score
+from t5_aste_augment import (
+    build_augmentation_requests,
+    build_opinion_provenance_banks,
+    build_syntax_candidate_banks,
+    rank_syntax_candidates,
+    syntax_compatibility_score,
+)
 
 
 def test_syntax_rank_prefers_compatible_candidate():
@@ -43,3 +49,31 @@ def test_graph_cache_metadata_is_attached_to_triplet_occurrence():
     assert result["syntax_cache_rows"] == 1
     assert rows[0]["triplet_syntax"]["battery|good|pos"]["aspect"]["upos"] == "NOUN"
     assert result["syntax_candidate_opinions"][0]["head_pos"] == "NOUN"
+
+
+def test_target_priority_bank_contains_only_pseudo_opinions_with_provenance():
+    banks = build_opinion_provenance_banks(
+        [{"id": "s1", "label": "<pos> screen <opinion> bright"}],
+        [{"id": "t1", "label": "<pos> display <opinion> vivid"}],
+    )
+    assert banks["source_gold"]["pos"][0]["source_domain"] == "source_gold"
+    assert banks["target_pseudo"]["pos"][0]["source_domain"] == "target_pseudo"
+    assert banks["target_pseudo"]["pos"][0]["source_row_ids"] == ["t1"]
+
+
+def test_target_priority_keeps_coupled_random_sentiment_transition():
+    source = [{"id": "s1", "text": "screen is bright", "label": "<pos> screen <opinion> bright"}]
+    pseudo = [{"id": "t1", "text": "display is vivid", "label": "<pos> display <opinion> vivid", "sample_weight": 0.9}]
+    memory = {
+        "target_aspects": ["display"],
+        "opinions_by_sentiment": {"pos": ["vivid"], "neg": ["bad"]},
+        "candidate_opinions_by_sentiment": {"pos": ["vivid"], "neg": ["bad"]},
+    }
+    requests = build_augmentation_requests(
+        source, pseudo, 1, 1000, prompt_style="masked_mutual", channel_mode="opinion",
+        domain_memory=memory, target_domain_opinion_priority=True,
+    )
+    assert requests
+    request = requests[0]
+    assert request["new_triplet"][2] != request["old_triplet"][2]
+    assert request["target_bank_hit"] is False or request["opinion_source_domain"] == "target_pseudo"

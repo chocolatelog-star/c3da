@@ -499,6 +499,42 @@ def build_opinion_sentiment_bank(source_rows: Iterable[dict], pseudo_rows: Itera
     return {sentiment: sorted(opinions) for sentiment, opinions in bank.items()}
 
 
+def build_opinion_provenance_banks(
+    source_rows: Iterable[dict], pseudo_rows: Iterable[dict]
+) -> dict[str, dict[str, list[dict]]]:
+    """Build deduplicated source/target opinion banks with row provenance."""
+    banks: dict[str, dict[str, dict]] = {"source_gold": {}, "target_pseudo": {}}
+    for domain, rows in (("source_gold", source_rows), ("target_pseudo", pseudo_rows)):
+        for row in rows:
+            for _aspect, opinion, sentiment in parse_triplet_text(row.get("label", "")):
+                key = _normalize_fragment(opinion)
+                if not key:
+                    continue
+                item = banks[domain].setdefault(
+                    f"{sentiment}|{key}",
+                    {
+                        "text": opinion,
+                        "sentiment": sentiment,
+                        "source_domain": domain,
+                        "source_row_ids": [],
+                        "frequency": 0,
+                    },
+                )
+                item["frequency"] += 1
+                if row.get("id") is not None and row.get("id") not in item["source_row_ids"]:
+                    item["source_row_ids"].append(row.get("id"))
+    return {
+        domain: {
+            sentiment: sorted(
+                [item for key, item in values.items() if key.startswith(f"{sentiment}|")],
+                key=lambda item: (item["text"].lower(), item["text"]),
+            )
+            for sentiment in sorted({key.split("|", 1)[0] for key in values})
+        }
+        for domain, values in banks.items()
+    }
+
+
 def build_syntax_candidate_banks(rows: list[dict], cache_rows: Iterable[dict]) -> dict:
     """Attach occurrence-level parser metadata to triplets and build candidate banks."""
     cache_by_id = {str(row.get("row_id", row.get("id", ""))): row for row in cache_rows if row.get("row_id", row.get("id")) is not None}
@@ -1254,6 +1290,7 @@ def build_augmentation_requests(
     compatibility_profile: str = "",
     syntax_candidate_mode: str = "none",
     syntax_min_acceptable_score: int = 1,
+    target_domain_opinion_priority: bool = False,
 ) -> list[dict]:
     """Build C3DA-style generation prompts for ASTE augmentation.
 
@@ -1294,6 +1331,11 @@ def build_augmentation_requests(
         merged.update(opinions)
         merged_opinion_bank[sentiment] = sorted(merged)
     opinion_bank = merged_opinion_bank
+    provenance_banks = build_opinion_provenance_banks(source_rows, pseudo_rows)
+    target_opinion_bank = {
+        sentiment: [item["text"] for item in items]
+        for sentiment, items in provenance_banks.get("target_pseudo", {}).items()
+    }
     aspect_bank = list(aspect_bank)
     syntax_aspect_bank = memory.get("syntax_candidate_aspects") or memory.get("syntax_aspect_bank") or []
     syntax_opinion_bank = memory.get("syntax_candidate_opinions") or memory.get("syntax_opinion_bank") or []
@@ -1346,6 +1388,11 @@ def build_augmentation_requests(
             request["replacement_rank"] = replacement_rank
         if syntax_selection is not None:
             request["syntax_selection"] = syntax_selection
+        if replacement_rank is not None and replacement_rank.get("source_domain"):
+            request["opinion_source_domain"] = replacement_rank["source_domain"]
+        if replacement_rank is not None and replacement_rank.get("target_bank_hit") is not None:
+            request["target_bank_hit"] = bool(replacement_rank["target_bank_hit"])
+            request["target_opinion_fallback"] = bool(replacement_rank.get("target_opinion_fallback", False))
         requests.append(request)
 
     def row_syntax_for_triplet(row: dict, triplet: tuple[str, str, str], element_type: str) -> dict:
@@ -1641,13 +1688,21 @@ def build_augmentation_requests(
                 aspect, _opinion, _sentiment = old_triplet
                 replacement_rank = None
                 syntax_selection = None
+                target_bank_hit = False
+                target_opinion_fallback = False
                 if opinion_replacement_mode in {"semantic_same_sentiment", "sentiment_vector"}:
+                    ranking_bank = preferred_opinion_bank
+                    if target_domain_opinion_priority:
+                        target_candidates = target_opinion_bank.get(_sentiment, [])
+                        if target_candidates:
+                            ranking_bank = {_sentiment: target_candidates}
+                            target_bank_hit = True
                     if opinion_replacement_mode == "sentiment_vector":
                         ranked_opinions = rank_sentiment_vector_replacement_opinions(
                             aspect=aspect,
                             old_opinion=_opinion,
                             sentiment=_sentiment,
-                            opinion_bank=preferred_opinion_bank,
+                            opinion_bank=ranking_bank,
                             domain_memory=memory,
                             min_margin=sentiment_vector_min_margin,
                             use_polarity_axis=sentiment_vector_use_polarity_axis,
@@ -1659,10 +1714,13 @@ def build_augmentation_requests(
                             aspect=aspect,
                             old_opinion=_opinion,
                             sentiment=_sentiment,
-                            opinion_bank=preferred_opinion_bank,
+                            opinion_bank=ranking_bank,
                             domain_memory=memory,
                         )
                     if not ranked_opinions:
+                        if target_domain_opinion_priority and target_bank_hit:
+                            target_opinion_fallback = True
+                            target_bank_hit = False
                         if opinion_replacement_mode == "sentiment_vector":
                             ranked_opinions = rank_sentiment_vector_replacement_opinions(
                                 aspect=aspect,
@@ -1697,16 +1755,21 @@ def build_augmentation_requests(
                     )
                     top_k = ranked_opinions[: min(3, len(ranked_opinions))]
                     replacement_rank = rng.choice(top_k)
+                    replacement_rank["source_domain"] = "target_pseudo" if target_bank_hit else "source_gold_or_merged"
+                    replacement_rank["target_bank_hit"] = target_bank_hit
+                    replacement_rank["target_opinion_fallback"] = target_opinion_fallback
                     new_opinion = replacement_rank["opinion"]
                     new_sentiment = replacement_rank["sentiment"]
                 else:
+                    candidate_source = target_opinion_bank if target_domain_opinion_priority else preferred_opinion_bank
                     candidate_pairs = [
                         (opinion, sentiment)
-                        for sentiment, opinions in preferred_opinion_bank.items()
+                        for sentiment, opinions in candidate_source.items()
                         for opinion in opinions
                         if sentiment != _sentiment and (opinion, sentiment) != (_opinion, _sentiment)
                     ]
                     if not candidate_pairs:
+                        target_opinion_fallback = bool(target_domain_opinion_priority)
                         candidate_pairs = [
                             (opinion, sentiment)
                             for sentiment, opinions in opinion_bank.items()
@@ -1738,6 +1801,9 @@ def build_augmentation_requests(
                             True,
                         )
                         replacement_rank = rng.choice(ranked_opinions[: min(3, len(ranked_opinions))])
+                        replacement_rank["source_domain"] = "target_pseudo" if target_bank_hit else "source_gold_or_merged"
+                        replacement_rank["target_bank_hit"] = target_bank_hit
+                        replacement_rank["target_opinion_fallback"] = target_opinion_fallback
                         new_opinion = replacement_rank["opinion"]
                         new_sentiment = replacement_rank["sentiment"]
                     else:
@@ -1748,6 +1814,9 @@ def build_augmentation_requests(
                             new_opinion, new_sentiment = preferred_opinion, preferred_sentiment
                         else:
                             new_opinion, new_sentiment = _choose_replacement_opinion(rng, opinion_bank, _opinion, _sentiment)
+                        if target_domain_opinion_priority:
+                            target_bank_hit = False
+                            target_opinion_fallback = True
                     if (new_opinion, new_sentiment) == (_opinion, _sentiment):
                         same_sentiment_candidates = [
                             opinion for opinion in opinion_bank.get(_sentiment, []) if opinion != _opinion
@@ -1758,6 +1827,14 @@ def build_augmentation_requests(
                             continue
                 new_triplet = (aspect, new_opinion, new_sentiment)
                 new_triplets[idx] = new_triplet
+                if replacement_rank is None and target_domain_opinion_priority:
+                    replacement_rank = {
+                        "opinion": new_opinion,
+                        "sentiment": new_sentiment,
+                        "source_domain": "source_gold_or_merged",
+                        "target_bank_hit": target_bank_hit,
+                        "target_opinion_fallback": target_opinion_fallback,
+                    }
                 if prompt_style == "masked_mutual":
                     prompt = build_masked_opinion_sentiment_prompt(
                         row["text"],
