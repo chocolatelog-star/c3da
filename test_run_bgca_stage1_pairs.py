@@ -156,6 +156,11 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
             keep = [
                 "manifest.json",
                 "stage_status.json",
+                "plan_a_full_command.json",
+                "resolved_config.json",
+                "config_snapshot.json",
+                "graph_cache_identity.json",
+                "treatment_only_entry.json",
                 "target_pseudo_high_precision.jsonl",
                 "target_pseudo_high_precision_analysis.json",
                 "target_pseudo_selected.jsonl",

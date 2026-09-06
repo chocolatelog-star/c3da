@@ -10,7 +10,7 @@
 |---|---|
 | 主方向 | `Laptop14 → Restaurant15` |
 | seed（随机种子） | `1000` |
-| 当前最佳 | G3 Final Raw F1=`54.55%` |
+| 当前最佳（待封存） | G3 Final Raw F1=`55.88%`（下游 DANN=0.03） |
 | 外部目标 | BGCA=`58.95%` |
 | 唯一目标 | 将 Raw F1 提升到 `58.95%` 以上 |
 
@@ -20,7 +20,7 @@
 
 - G0–G3 上游比较完成，后续锁定 G3；暂不重训 G0–G3、搜索新图关系或图参数。
 - 主要瓶颈是下游知识利用和增强结构破坏。G3 已审计：edited validity=`68.32%`、untouched retention=`33.33%`、3+ untouched retention=`20.00%`、triplet-count preservation=`59.41%`、3+ preservation=`0%`、unplanned row rate=`57.43%`；Opinion edited validity 约 `52%`。
-- Phase A/B 冻结：G3 upstream、current pseudo/complete_multi/generator、domain prefix=`none`、masked mutual、pseudo weight=`0.75`、augmentation weight=`0.20`、complete_multi extra=`0.25`、sentiment contrastive=`0.01`、Final batch=`16`、gradient accumulation=`2`（有效批次32）、lr=`3e-4`、epochs=`5`、Final DANN=`0.03`、beam=`4`、max_new_tokens=`96`、checkpoint=`best`。
+- Phase A/B 冻结：G3 upstream、current pseudo/complete_multi/generator、domain prefix=`none`、masked mutual、pseudo weight=`0.75`、augmentation weight=`0.20`、complete_multi extra=`0.25`、sentiment contrastive=`0.01`、Final batch=`16`、gradient accumulation=`2`（有效批次32）、lr=`3e-4`、epochs=`5`、Final DANN=`0.03`、beam=`4`、max_new_tokens=`96`、checkpoint=`best`。最新运行 Raw F1=`55.88%`、Fixed F1=`56.31%`，目录为`reproduce_G3_dann003_20260906`，待完成最佳流程封存后晋级。
 - Target-test gold（目标测试金标）禁止用于训练、选模、调参和下一变量选择，只能最终报告或事后分析。
 
 ## Phase A：结构保持 + 句法感知增强

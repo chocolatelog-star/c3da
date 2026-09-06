@@ -1651,6 +1651,12 @@ def _prune_minimal_pair_outputs(pair_root: Path) -> None:
         "manifest.json",
         "results_bgca_aste_stage1.csv",
         "results_bgca_aste_stage1_CN.md",
+        # Reproducibility and upstream provenance records required by Chat audits.
+        "plan_a_full_command.json",
+        "resolved_config.json",
+        "config_snapshot.json",
+        "graph_cache_identity.json",
+        "treatment_only_entry.json",
     }
     keep_prefixes = (
         "target_pseudo",
