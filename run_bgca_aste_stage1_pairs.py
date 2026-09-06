@@ -857,8 +857,13 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         "" if args.generator_checkpoint_selection == "best" else f"_{args.generator_checkpoint_selection}"
     )
     generator_stage_tag = f"{gen_tag}{generator_selection_suffix}"
-    generator_dir = run_dir / "models" / f"generator_{generator_stage_tag}_ep{args.generator_epochs}"
-    if not stage_done(status, f"train_generator_{generator_stage_tag}", [generator_dir / "best" / "config.json"], args.rerun):
+    reused_generator = Path(args.reuse_generator_model_path) if args.reuse_generator_model_path else None
+    generator_dir = reused_generator.parent if reused_generator is not None else run_dir / "models" / f"generator_{generator_stage_tag}_ep{args.generator_epochs}"
+    generator_best = reused_generator or (generator_dir / "best")
+    if reused_generator is not None:
+        if not args.dry_run and not (generator_best / "config.json").exists():
+            raise FileNotFoundError(f"reused generator checkpoint not found: {generator_best}")
+    elif not stage_done(status, f"train_generator_{generator_stage_tag}", [generator_best / "config.json"], args.rerun):
         run_command(
             [
                 py,
@@ -953,7 +958,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                         else []
                     ),
                     "--model_path",
-                    str(generator_dir / "best"),
+                    str(generator_best),
                     "--nli_model_path",
                     args.nli_model_path,
                     "--augment_prompt_style",
@@ -1074,7 +1079,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                     else []
                 ),
                 "--model_path",
-                str(generator_dir / "best"),
+                str(generator_best),
                 "--nli_model_path",
                 args.nli_model_path,
                 "--augment_prompt_style",
@@ -1556,6 +1561,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--extractor_model_path", default=r"models/t5-base-py")
     parser.add_argument("--generator_model_path", default=r"models/t5-base-py")
+    parser.add_argument(
+        "--reuse_generator_model_path",
+        default="",
+        help="复用已有 generator/best（生成器最佳检查点），跳过生成器训练",
+    )
     parser.add_argument(
         "--generator_prompt_style",
         choices=["label_to_text", "masked_mutual", "mixed"],
