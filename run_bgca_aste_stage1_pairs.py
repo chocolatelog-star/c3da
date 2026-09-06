@@ -964,6 +964,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                     args.domain_prefix_style,
                     "--opinion_replacement_mode",
                     args.opinion_replacement_mode,
+                    "--syntax_candidate_mode",
+                    args.syntax_candidate_mode,
+                    "--syntax_min_acceptable_score",
+                    str(args.syntax_min_acceptable_score),
+                    *( ["--syntax_cache_file", args.syntax_cache_file] if args.syntax_cache_file else [] ),
                     "--sentiment_vector_model_path",
                     args.sentiment_vector_model_path,
                     "--sentiment_vector_backend",
@@ -1080,6 +1085,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 args.domain_prefix_style,
                 "--opinion_replacement_mode",
                 args.opinion_replacement_mode,
+                "--syntax_candidate_mode",
+                args.syntax_candidate_mode,
+                "--syntax_min_acceptable_score",
+                str(args.syntax_min_acceptable_score),
+                *( ["--syntax_cache_file", args.syntax_cache_file] if args.syntax_cache_file else [] ),
                 "--sentiment_vector_model_path",
                 args.sentiment_vector_model_path,
                 "--sentiment_vector_backend",
@@ -1558,6 +1568,14 @@ def parse_args() -> argparse.Namespace:
         choices=["coupled_random", "semantic_same_sentiment", "sentiment_vector"],
         default="coupled_random",
     )
+    parser.add_argument(
+        "--syntax_candidate_mode",
+        choices=["none", "aspect", "opinion", "dual"],
+        default="none",
+        help="句法候选模式：none/aspect/opinion/dual",
+    )
+    parser.add_argument("--syntax_min_acceptable_score", type=int, choices=[0, 1, 2, 3], default=1)
+    parser.add_argument("--syntax_cache_file", default="")
     parser.add_argument("--sentiment_vector_model_path", default=r"models/t5-base-py")
     parser.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
     parser.add_argument("--glove_path", default=r"models/glove/glove.6B.300d.txt")

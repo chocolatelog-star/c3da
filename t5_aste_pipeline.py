@@ -15,6 +15,7 @@ from t5_aste_augment import (
     build_source_memory,
     build_target_memory,
     build_augmentation_requests,
+    build_syntax_candidate_banks,
     build_generator_training_rows,
     filter_augmented_text_quality,
     is_consistent_with_label,
@@ -3124,6 +3125,15 @@ def augment(args: argparse.Namespace) -> None:
     source_rows = read_jsonl(input_run_dir / "source_train.jsonl")
     source_dev_rows = read_jsonl(input_run_dir / "source_dev.jsonl")
     pseudo_rows = read_selected_pseudo_rows(input_run_dir)
+    syntax_cache_rows = []
+    if args.syntax_cache_file:
+        syntax_cache_path = Path(args.syntax_cache_file)
+        if not syntax_cache_path.exists():
+            raise FileNotFoundError(f"syntax cache file not found: {syntax_cache_path}")
+        syntax_cache_rows = read_jsonl(syntax_cache_path)
+        syntax_memory = build_syntax_candidate_banks(source_rows + pseudo_rows, syntax_cache_rows)
+    else:
+        syntax_memory = {}
     manifest_path = input_run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     target_domain_name = manifest.get("target_dataset", "")
@@ -3131,6 +3141,7 @@ def augment(args: argparse.Namespace) -> None:
     memory_path = Path(args.memory_path) if args.memory_path else input_run_dir / "c3da_cross_domain_memory.json"
     if memory_path.exists():
         domain_memory = json.loads(memory_path.read_text(encoding="utf-8"))
+    domain_memory = {**(domain_memory or {}), **syntax_memory}
     model_path = Path(args.model_path) if args.model_path else Path(args.generator_model_path)
     label_embeddings = None
     if args.augment_prompt_style == "rsda_t5_label_composition":
@@ -3237,6 +3248,8 @@ def augment(args: argparse.Namespace) -> None:
         sentiment_vector_min_old_similarity=args.sentiment_vector_min_old_similarity,
         sentiment_vector_no_cooccurrence_min_similarity=args.sentiment_vector_no_cooccurrence_min_similarity,
         compatibility_profile=args.compatibility_profile,
+        syntax_candidate_mode=args.syntax_candidate_mode,
+        syntax_min_acceptable_score=args.syntax_min_acceptable_score,
     )
     output_tag = args.augment_output_tag
     if not args.sentiment_vector_diagnostics_only:
@@ -3330,6 +3343,7 @@ def augment(args: argparse.Namespace) -> None:
             "new_triplet": req.get("new_triplet"),
             "new_triplets": req.get("new_triplets"),
             "replacement_rank": req.get("replacement_rank"),
+            "syntax_selection": req.get("syntax_selection"),
             "domain_name": req.get("domain_name"),
             "domain_prefix_style": req.get("domain_prefix_style"),
             "domain_prefix": req.get("domain_prefix"),
@@ -3473,6 +3487,8 @@ def augment(args: argparse.Namespace) -> None:
         "augmentation_input_run_dir": str(input_run_dir),
         "prompt_style": args.augment_prompt_style,
         "compatibility_profile": args.compatibility_profile,
+        "syntax_candidate_mode": args.syntax_candidate_mode,
+        "syntax_min_acceptable_score": args.syntax_min_acceptable_score,
         "augment_channel_mode": args.augment_channel_mode,
         "domain_prefix_style": args.domain_prefix_style,
         "opinion_replacement_mode": args.opinion_replacement_mode,
@@ -3481,6 +3497,8 @@ def augment(args: argparse.Namespace) -> None:
         "output_tag": output_tag,
         "selected_output_path": str(tagged_output_path(run_dir, "c3da_two_channel_augmented_selected.jsonl", output_tag)),
         "memory_path": str(memory_path) if domain_memory is not None else "",
+        "syntax_cache_file": args.syntax_cache_file,
+        "syntax_cache_rows": len(syntax_cache_rows),
         "after_quality_filter": quality_kept_rows,
         "after_consistency_filter": consistency_kept_rows,
         "after_nli_filter": after_nli_rows,
@@ -3501,6 +3519,25 @@ def augment(args: argparse.Namespace) -> None:
         "model_filter": model_filter_stats,
         "structure_preserving": structure_stats,
     }
+    syntax_selections = [row.get("syntax_selection") for row in requests if row.get("syntax_selection")]
+    if syntax_selections:
+        total_before = sum(int(item.get("candidate_count_before", 0)) for item in syntax_selections)
+        total_after = sum(int(item.get("candidate_count_after", 0)) for item in syntax_selections)
+        aug_stats["syntax_audit"] = {
+            "candidate_requests": len(syntax_selections),
+            "mean_candidates_before_syntax": total_before / len(syntax_selections),
+            "mean_candidates_after_syntax": total_after / len(syntax_selections),
+            "upos_compatible_rate": sum(int(item.get("upos_compatible", 0)) for item in syntax_selections) / max(1, total_before),
+            "dependency_role_compatible_rate": sum(int(item.get("dependency_role_compatible", 0)) for item in syntax_selections) / max(1, total_before),
+            "head_pos_compatible_rate": sum(int(item.get("head_pos_compatible", 0)) for item in syntax_selections) / max(1, total_before),
+            "high_compatibility_rate": sum(int(item.get("high_compatibility", 0)) for item in syntax_selections) / max(1, total_before),
+            "no_compatible_candidate_requests": sum(bool(item.get("no_compatible_candidate")) for item in syntax_selections),
+            "fallback_requests": sum(bool(item.get("syntax_fallback")) for item in syntax_selections),
+            "fallback_rate": sum(bool(item.get("syntax_fallback")) for item in syntax_selections) / len(syntax_selections),
+            "candidate_selection_change_rate": sum(bool(item.get("selection_changed")) for item in syntax_selections) / len(syntax_selections),
+        }
+    else:
+        aug_stats["syntax_audit"] = {"enabled": False, "candidate_requests": 0}
     dump_json(tagged_output_path(run_dir, "c3da_augment_analysis.json", output_tag), aug_stats)
     if args.augment_prompt_style in {"label_composition", "label_to_text", "sentence_fusion_composition"}:
         dump_json(
@@ -3816,6 +3853,13 @@ def main() -> None:
         default="coupled_random",
     )
     p.add_argument("--compatibility_profile", choices=["", "historical_best_v1"], default="")
+    p.add_argument(
+        "--syntax_candidate_mode",
+        choices=["none", "aspect", "opinion", "dual"],
+        default="none",
+        help="句法候选模式：none/aspect/opinion/dual",
+    )
+    p.add_argument("--syntax_min_acceptable_score", type=int, choices=[0, 1, 2, 3], default=1)
     p.add_argument("--sentiment_vector_model_path", default="")
     p.add_argument("--sentiment_vector_backend", choices=["t5", "glove"], default="t5")
     p.add_argument("--glove_path", default=r"models/glove/glove.6B.300d.txt")
@@ -3826,6 +3870,7 @@ def main() -> None:
     p.add_argument("--sentiment_vector_diagnostics_only", action="store_true")
     p.add_argument("--augment_output_tag", default="")
     p.add_argument("--memory_path", default="")
+    p.add_argument("--syntax_cache_file", default="")
     p.add_argument("--cuda", default="0")
     p.add_argument("--allow_inconsistent_aug", action="store_true")
     p.add_argument("--structure_preserving_augmentation", action="store_true")

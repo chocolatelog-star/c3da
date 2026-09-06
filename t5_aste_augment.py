@@ -23,6 +23,7 @@ PROMPT_STYLES = {
 CHANNEL_MODES = {"all", "aspect", "opinion"}
 OPINION_REPLACEMENT_MODES = {"coupled_random", "semantic_same_sentiment", "sentiment_vector"}
 COMPATIBILITY_PROFILES = {"", "historical_best_v1"}
+SYNTAX_CANDIDATE_MODES = {"none", "aspect", "opinion", "dual"}
 GENERIC_ASPECTS = {
     "about",
     "all",
@@ -498,6 +499,59 @@ def build_opinion_sentiment_bank(source_rows: Iterable[dict], pseudo_rows: Itera
     return {sentiment: sorted(opinions) for sentiment, opinions in bank.items()}
 
 
+def build_syntax_candidate_banks(rows: list[dict], cache_rows: Iterable[dict]) -> dict:
+    """Attach occurrence-level parser metadata to triplets and build candidate banks."""
+    cache_by_id = {str(row.get("row_id", row.get("id", ""))): row for row in cache_rows if row.get("row_id", row.get("id")) is not None}
+    cache_by_text = {_normalize_fragment(row.get("text", "")): row for row in cache_rows if row.get("text")}
+    aspect_candidates = []
+    opinion_candidates = []
+    for row in rows:
+        cache = cache_by_id.get(str(row.get("id", ""))) or cache_by_text.get(_normalize_fragment(row.get("text", "")))
+        tokens = (cache or {}).get("parser_tokens") or []
+        token_texts = [_normalize_fragment(token.get("text", "")) for token in tokens]
+        triplet_syntax = {}
+        for triplet in parse_triplet_text(row.get("label", "")):
+            aspect, opinion, sentiment = triplet
+            metadata_for = {}
+            for value, element_type in ((aspect, "aspect"), (opinion, "opinion")):
+                parts = _normalize_fragment(value).split()
+                match = None
+                for start in range(0, max(0, len(token_texts) - len(parts) + 1)):
+                    if token_texts[start : start + len(parts)] == parts:
+                        match = start
+                        break
+                if match is None or not tokens:
+                    metadata_for[element_type] = {"text": value, "element_type": element_type}
+                    continue
+                token = tokens[match]
+                head_index = token.get("head")
+                head_token = next((candidate for candidate in tokens if candidate.get("index") == head_index), None)
+                metadata_for[element_type] = {
+                    "text": value,
+                    "element_type": element_type,
+                    "source_row_id": row.get("id"),
+                    "source_sentence": row.get("text", ""),
+                    "token_span": [match, match + len(parts)],
+                    "upos": token.get("upos", ""),
+                    "dependency_relation": token.get("deprel", ""),
+                    "head_index": head_index,
+                    "head_pos": (head_token or {}).get("upos", ""),
+                }
+            triplet_syntax["|".join(triplet)] = {
+                "aspect": metadata_for["aspect"],
+                "opinion": metadata_for["opinion"],
+            }
+            aspect_candidates.append(metadata_for["aspect"])
+            opinion_candidates.append({**metadata_for["opinion"], "sentiment": sentiment})
+        if triplet_syntax:
+            row["triplet_syntax"] = triplet_syntax
+    return {
+        "syntax_candidate_aspects": aspect_candidates,
+        "syntax_candidate_opinions": opinion_candidates,
+        "syntax_cache_rows": len(cache_by_id),
+    }
+
+
 POLARITY_HINTS = {
     "pos": ["so good", "excellent", "great"],
     "neg": ["so bad", "terrible", "poor"],
@@ -953,6 +1007,104 @@ def rank_replacement_opinions(
     return sorted(ranked, key=lambda item: (item["score"], item["opinion"]), reverse=True)
 
 
+def normalize_syntax_metadata(metadata: dict | None) -> dict:
+    """Normalize parser/cache fields without inventing missing syntax values."""
+    metadata = metadata or {}
+    return {
+        "upos": str(metadata.get("upos") or metadata.get("pos") or "").upper(),
+        "dependency_relation": str(
+            metadata.get("dependency_relation")
+            or metadata.get("deprel")
+            or metadata.get("dependency")
+            or ""
+        ).lower(),
+        "head_pos": str(metadata.get("head_pos") or metadata.get("head_upos") or "").upper(),
+        "head_index": metadata.get("head_index", metadata.get("head")),
+        "token_span": metadata.get("token_span", metadata.get("span")),
+    }
+
+
+def syntax_compatibility_score(source_metadata: dict | None, candidate_metadata: dict | None) -> dict:
+    source = normalize_syntax_metadata(source_metadata)
+    candidate = normalize_syntax_metadata(candidate_metadata)
+    checks = {
+        "upos": bool(source["upos"] and candidate["upos"] and source["upos"] == candidate["upos"]),
+        "dependency_role": bool(
+            source["dependency_relation"]
+            and candidate["dependency_relation"]
+            and source["dependency_relation"] == candidate["dependency_relation"]
+        ),
+        "head_pos": bool(source["head_pos"] and candidate["head_pos"] and source["head_pos"] == candidate["head_pos"]),
+    }
+    available = sum(
+        bool(source[key] and candidate[key])
+        for key in ("upos", "dependency_relation", "head_pos")
+    )
+    matches = sum(checks.values())
+    return {
+        "score": matches,
+        "available_features": available,
+        "compatible_features": matches,
+        "high_compatibility": bool(available and matches == available),
+        "checks": checks,
+        "source": source,
+        "candidate": candidate,
+    }
+
+
+def _candidate_metadata(candidate: dict | str, text_key: str) -> tuple[str, dict]:
+    if isinstance(candidate, dict):
+        value = str(candidate.get(text_key) or candidate.get("text") or "").strip()
+        metadata = candidate.get("syntax") or candidate.get("syntax_metadata") or candidate
+        return value, normalize_syntax_metadata(metadata)
+    return str(candidate).strip(), normalize_syntax_metadata(None)
+
+
+def rank_syntax_candidates(
+    source_metadata: dict | None,
+    candidates: list[dict],
+    min_acceptable_score: int = 1,
+) -> tuple[list[dict], dict]:
+    """Rank candidates by available UPOS/dependency/head-POS compatibility.
+
+    Missing metadata never earns a compatibility point. If no candidate reaches
+    the threshold, the original order is returned and the caller can record a
+    controlled fallback.
+    """
+    scored = []
+    for index, candidate in enumerate(candidates):
+        item = dict(candidate)
+        syntax_options = item.get("syntax_options") or []
+        if syntax_options:
+            compatibility = max(
+                (syntax_compatibility_score(source_metadata, option) for option in syntax_options),
+                key=lambda value: value["score"],
+            )
+        else:
+            compatibility = syntax_compatibility_score(source_metadata, item.get("syntax") or item)
+        item["syntax_compatibility"] = compatibility
+        item["syntax_score"] = compatibility["score"]
+        scored.append((compatibility["score"], index, item))
+    acceptable = [entry for entry in scored if entry[0] >= min_acceptable_score]
+    fallback = not acceptable
+    ordered = (
+        [entry[2] for entry in sorted(scored, key=lambda entry: (-entry[0], entry[1]))]
+        if not fallback
+        else [entry[2] for entry in scored]
+    )
+    available = [entry[2]["syntax_compatibility"] for entry in scored]
+    return ordered, {
+        "syntax_fallback": fallback,
+        "candidate_count_before": len(candidates),
+        "candidate_count_after": len(acceptable) if not fallback else len(candidates),
+        "upos_compatible": sum(item["checks"]["upos"] for item in available),
+        "dependency_role_compatible": sum(item["checks"]["dependency_role"] for item in available),
+        "head_pos_compatible": sum(item["checks"]["head_pos"] for item in available),
+        "high_compatibility": sum(item["high_compatibility"] for item in available),
+        "no_compatible_candidate": fallback,
+    }
+
+
 def _mean_vector(vectors: list[list[float]]) -> list[float]:
     if not vectors:
         return []
@@ -1100,6 +1252,8 @@ def build_augmentation_requests(
     sentiment_vector_min_old_similarity: float = 0.35,
     sentiment_vector_no_cooccurrence_min_similarity: float = 0.50,
     compatibility_profile: str = "",
+    syntax_candidate_mode: str = "none",
+    syntax_min_acceptable_score: int = 1,
 ) -> list[dict]:
     """Build C3DA-style generation prompts for ASTE augmentation.
 
@@ -1118,6 +1272,8 @@ def build_augmentation_requests(
         raise ValueError("opinion_replacement_mode must be one of coupled_random, semantic_same_sentiment, sentiment_vector")
     if compatibility_profile not in COMPATIBILITY_PROFILES:
         raise ValueError("compatibility_profile must be empty or historical_best_v1")
+    if syntax_candidate_mode not in SYNTAX_CANDIDATE_MODES:
+        raise ValueError("syntax_candidate_mode must be one of none, aspect, opinion, dual")
     memory = domain_memory or build_domain_memory(pseudo_rows)
     domain_prefix = format_domain_prefix(target_domain_name, domain_prefix_style)
     aspect_bank = (
@@ -1139,6 +1295,18 @@ def build_augmentation_requests(
         merged_opinion_bank[sentiment] = sorted(merged)
     opinion_bank = merged_opinion_bank
     aspect_bank = list(aspect_bank)
+    syntax_aspect_bank = memory.get("syntax_candidate_aspects") or memory.get("syntax_aspect_bank") or []
+    syntax_opinion_bank = memory.get("syntax_candidate_opinions") or memory.get("syntax_opinion_bank") or []
+    syntax_aspect_by_text = {}
+    for candidate in syntax_aspect_bank:
+        value, metadata = _candidate_metadata(candidate, "aspect")
+        if value:
+            syntax_aspect_by_text.setdefault(_normalize_fragment(value), []).append(metadata)
+    syntax_opinion_by_text = {}
+    for candidate in syntax_opinion_bank:
+        value, metadata = _candidate_metadata(candidate, "opinion")
+        if value:
+            syntax_opinion_by_text.setdefault(_normalize_fragment(value), []).append(metadata)
     requests: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
@@ -1150,6 +1318,7 @@ def build_augmentation_requests(
         old_triplet: tuple[str, str, str] | None = None,
         new_triplet: tuple[str, str, str] | None = None,
         replacement_rank: dict | None = None,
+        syntax_selection: dict | None = None,
     ) -> None:
         label = canonicalize_triplet_text(triplets_to_text(triplets))
         if not label:
@@ -1175,7 +1344,51 @@ def build_augmentation_requests(
             request["new_triplet"] = list(new_triplet)
         if replacement_rank is not None:
             request["replacement_rank"] = replacement_rank
+        if syntax_selection is not None:
+            request["syntax_selection"] = syntax_selection
         requests.append(request)
+
+    def row_syntax_for_triplet(row: dict, triplet: tuple[str, str, str], element_type: str) -> dict:
+        for key in ("triplet_syntax", "syntax_triplets", "syntax_metadata"):
+            value = row.get(key)
+            if isinstance(value, dict):
+                for lookup in ("|".join(triplet), list(triplet), str(list(triplet))):
+                    if lookup in value:
+                        metadata = value[lookup]
+                        if isinstance(metadata, dict) and element_type in metadata:
+                            metadata = metadata[element_type]
+                        return normalize_syntax_metadata(metadata)
+            if isinstance(value, list):
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    item_triplet = item.get("triplet") or item.get("label_triplet")
+                    if item_triplet and tuple(item_triplet) == tuple(triplet):
+                        return normalize_syntax_metadata(item)
+        return normalize_syntax_metadata(None)
+
+    def apply_syntax_selection(
+        row: dict,
+        old_triplet: tuple[str, str, str],
+        ranked: list[dict],
+        text_key: str,
+        enabled: bool,
+    ) -> tuple[list[dict], dict | None]:
+        if not enabled:
+            return ranked, None
+        source_metadata = row_syntax_for_triplet(row, old_triplet, text_key)
+        ranked_items, audit = rank_syntax_candidates(
+            source_metadata,
+            ranked,
+            min_acceptable_score=syntax_min_acceptable_score,
+        )
+        audit["channel"] = text_key
+        audit["source_metadata"] = source_metadata
+        key = "aspect" if text_key == "aspect" else "opinion"
+        audit["baseline_top"] = ranked[0].get(key) if ranked else ""
+        audit["syntax_top"] = ranked_items[0].get(key) if ranked_items else ""
+        audit["selection_changed"] = audit["baseline_top"] != audit["syntax_top"]
+        return ranked_items, audit
 
     if prompt_style == "sentence_fusion_composition":
         source_rows_for_composition = composition_source_rows or []
@@ -1363,6 +1576,16 @@ def build_augmentation_requests(
                 )
                 if not ranked_aspects:
                     continue
+                for candidate in ranked_aspects:
+                    candidate["syntax_options"] = syntax_aspect_by_text.get(_normalize_fragment(candidate["aspect"]), [])
+                    candidate["syntax"] = (candidate["syntax_options"] or [{}])[0]
+                ranked_aspects, syntax_selection = apply_syntax_selection(
+                    row,
+                    old_triplet,
+                    ranked_aspects,
+                    "aspect",
+                    syntax_candidate_mode in {"aspect", "dual"},
+                )
                 top_k = ranked_aspects[: min(3, len(ranked_aspects))]
                 replacement_rank = rng.choice(top_k)
                 new_aspect = replacement_rank["aspect"]
@@ -1398,7 +1621,16 @@ def build_augmentation_requests(
                         domain_prefix_style,
                     )
                     channel = "aspect_channel"
-                add_request(row, new_triplets, channel, prompt, old_triplet, new_triplet, replacement_rank)
+                add_request(
+                    row,
+                    new_triplets,
+                    channel,
+                    prompt,
+                    old_triplet,
+                    new_triplet,
+                    replacement_rank,
+                    syntax_selection,
+                )
 
             # Opinion-sentiment channel: replace opinion and sentiment as a coupled pair.
             sentiment_choices = [s for s, opinions in opinion_bank.items() if opinions]
@@ -1408,6 +1640,7 @@ def build_augmentation_requests(
                 old_triplet = new_triplets[idx]
                 aspect, _opinion, _sentiment = old_triplet
                 replacement_rank = None
+                syntax_selection = None
                 if opinion_replacement_mode in {"semantic_same_sentiment", "sentiment_vector"}:
                     if opinion_replacement_mode == "sentiment_vector":
                         ranked_opinions = rank_sentiment_vector_replacement_opinions(
@@ -1452,18 +1685,69 @@ def build_augmentation_requests(
                             )
                     if not ranked_opinions:
                         continue
+                    for candidate in ranked_opinions:
+                        candidate["syntax_options"] = syntax_opinion_by_text.get(_normalize_fragment(candidate["opinion"]), [])
+                        candidate["syntax"] = (candidate["syntax_options"] or [{}])[0]
+                    ranked_opinions, syntax_selection = apply_syntax_selection(
+                        row,
+                        old_triplet,
+                        ranked_opinions,
+                        "opinion",
+                        syntax_candidate_mode in {"opinion", "dual"},
+                    )
                     top_k = ranked_opinions[: min(3, len(ranked_opinions))]
                     replacement_rank = rng.choice(top_k)
                     new_opinion = replacement_rank["opinion"]
                     new_sentiment = replacement_rank["sentiment"]
                 else:
-                    preferred_opinion, preferred_sentiment = _choose_replacement_opinion(
-                        rng, preferred_opinion_bank, _opinion, _sentiment
-                    )
-                    if (preferred_opinion, preferred_sentiment) != (_opinion, _sentiment):
-                        new_opinion, new_sentiment = preferred_opinion, preferred_sentiment
+                    candidate_pairs = [
+                        (opinion, sentiment)
+                        for sentiment, opinions in preferred_opinion_bank.items()
+                        for opinion in opinions
+                        if sentiment != _sentiment and (opinion, sentiment) != (_opinion, _sentiment)
+                    ]
+                    if not candidate_pairs:
+                        candidate_pairs = [
+                            (opinion, sentiment)
+                            for sentiment, opinions in opinion_bank.items()
+                            for opinion in opinions
+                            if sentiment != _sentiment and (opinion, sentiment) != (_opinion, _sentiment)
+                        ]
+                    if not candidate_pairs:
+                        candidate_pairs = [
+                            (opinion, _sentiment)
+                            for opinion in opinion_bank.get(_sentiment, [])
+                            if opinion != _opinion
+                        ]
+                    if syntax_candidate_mode in {"opinion", "dual"} and candidate_pairs:
+                        ranked_opinions = [
+                            {
+                                "opinion": opinion,
+                                "sentiment": sentiment,
+                                "score": 1.0,
+                                "syntax_options": syntax_opinion_by_text.get(_normalize_fragment(opinion), []),
+                                "syntax": (syntax_opinion_by_text.get(_normalize_fragment(opinion), []) or [{}])[0],
+                            }
+                            for opinion, sentiment in candidate_pairs
+                        ]
+                        ranked_opinions, syntax_selection = apply_syntax_selection(
+                            row,
+                            old_triplet,
+                            ranked_opinions,
+                            "opinion",
+                            True,
+                        )
+                        replacement_rank = rng.choice(ranked_opinions[: min(3, len(ranked_opinions))])
+                        new_opinion = replacement_rank["opinion"]
+                        new_sentiment = replacement_rank["sentiment"]
                     else:
-                        new_opinion, new_sentiment = _choose_replacement_opinion(rng, opinion_bank, _opinion, _sentiment)
+                        preferred_opinion, preferred_sentiment = _choose_replacement_opinion(
+                            rng, preferred_opinion_bank, _opinion, _sentiment
+                        )
+                        if (preferred_opinion, preferred_sentiment) != (_opinion, _sentiment):
+                            new_opinion, new_sentiment = preferred_opinion, preferred_sentiment
+                        else:
+                            new_opinion, new_sentiment = _choose_replacement_opinion(rng, opinion_bank, _opinion, _sentiment)
                     if (new_opinion, new_sentiment) == (_opinion, _sentiment):
                         same_sentiment_candidates = [
                             opinion for opinion in opinion_bank.get(_sentiment, []) if opinion != _opinion
@@ -1498,7 +1782,16 @@ def build_augmentation_requests(
                     )
                     channel = "opinion_sentiment_channel"
                 before_count = len(requests)
-                add_request(row, new_triplets, channel, prompt, old_triplet, new_triplet, replacement_rank)
+                add_request(
+                    row,
+                    new_triplets,
+                    channel,
+                    prompt,
+                    old_triplet,
+                    new_triplet,
+                    replacement_rank,
+                    syntax_selection,
+                )
                 if len(requests) > before_count and compatibility_profile != "historical_best_v1":
                     requests[-1]["opinion_replacement_mode"] = opinion_replacement_mode
                     if replacement_rank is not None:
