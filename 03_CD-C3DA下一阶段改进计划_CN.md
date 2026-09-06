@@ -22,6 +22,7 @@
 - 主要瓶颈是下游知识利用和增强结构破坏。G3 已审计：edited validity=`68.32%`、untouched retention=`33.33%`、3+ untouched retention=`20.00%`、triplet-count preservation=`59.41%`、3+ preservation=`0%`、unplanned row rate=`57.43%`；Opinion edited validity 约 `52%`。
 - Phase A/B 冻结：G3 upstream、Generator-25、current pseudo/complete_multi、domain prefix=`none`、masked mutual、pseudo weight=`0.75`、augmentation weight=`0.20`、complete_multi extra=`0.25`、sentiment contrastive=`0.01`、Final batch=`16`、gradient accumulation=`2`（有效批次32）、lr=`3e-4`、Final epochs=`5`、Final DANN=`0.03`、beam=`4`、max_new_tokens=`96`、checkpoint=`best`。最新运行 Raw F1=`56.81%`、Fixed F1=`57.88%`，已晋级最佳流程。上一版 Generator-8 结果为 Raw/Fixed=`55.88%/56.31%`。
 - Target-test gold（目标测试金标）禁止用于训练、选模、调参和下一变量选择，只能最终报告或事后分析。
+- 2026-09-06 轮次扫描结论：Generator-25 + Final ASTE-5 为当前最佳（Raw/Fixed=`56.81%/57.88%`）；Final ASTE-10 在最终训练轮次扫描中最高为 `55.79%`，仍低于当前最佳；Final ASTE-15/20 退化，Final ASTE-25 尚未完成目标评估，不进入正式比较。
 
 ## Phase A：结构保持 + 句法感知增强
 
