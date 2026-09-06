@@ -26,7 +26,7 @@ metadata:
 - 项目最高优先级是在2026年9月16日前完成并提交ICASSP 2027常规4+1页英文论文。9月8日前冻结方法、9月12日前冻结数字、9月15日前完成提交演练；任何新变量必须先评估时间代价。
 - 终极目标：六个跨域 ASTE（方面级情感三元组抽取）方向分别超过 BGCA（双向生成跨域方法）。
 - 保护 `rest16 -> laptop14` 的48.93，不在独立验收现场上做新实验。
-- `laptop14 -> rest15` 当前研究基线为54.01，DANN（领域对抗网络）0.03、目标伪标签高层权重0.75。
+- `laptop14 -> rest15` 的54.01%是历史研究基线；当前正式最佳是16x2 G3，Raw F1（原始F1）54.55%、Fixed F1（修正规则F1）55.63%，对应固定分支 `best/laptop14-to-rest15`。
 - 当前在`laptop14 -> rest15`的目标伪标签形成阶段研究Dependency/POS Graph（依存/词性图）与四头RGAT（关系图注意力网络）；最终ASTE模型尚未批准使用图结构。
 - 完整Element Salience（元素显著性）＋Multi-Element Coverage（多元素覆盖）Treatment（实验组）相对普通RGAT改善multi recall（多三元组召回）和元素缺失，但未同时超过无图T5，因此只属于`QUICK_DIAGNOSTIC`（快速诊断），未进入Graph Freeze（图模块冻结）。
 - 当前唯一任务是Focus-only（仅聚焦）与Coverage-only（仅覆盖）组件归因；固定DANN（领域对抗网络）为0、损失系数0.05、图结构、数据和训练设置，不进行系数、batch（批大小）、图层或注意力头网格。实时边界以`.ai/CURRENT_TASK.md`和`03`为准。
@@ -127,7 +127,7 @@ metadata:
 
 索引首屏必须显示六方向正式最佳、BGCA、差距和比较口径。历史只记录有研究或复现价值的大改动：日期、改动、Git 提交、运行身份、raw/fixed 指标、成功/失败和简短分析。小修复不改变实验语义时可合并记录。
 
-五个非保护方向分别使用固定最佳分支：`best/rest14-to-laptop14`、`best/rest15-to-laptop14`、`best/laptop14-to-rest14`、`best/laptop14-to-rest15`、`best/laptop14-to-rest16`。`rest16-to-laptop14` 的48.93%保护基线和 `laptop14-to-rest15` 的54.01%历史流程单独保留，不被普通实验覆盖。
+五个非保护方向分别使用固定最佳分支：`best/rest14-to-laptop14`、`best/rest15-to-laptop14`、`best/laptop14-to-rest14`、`best/laptop14-to-rest15`、`best/laptop14-to-rest16`。`rest16-to-laptop14` 的48.93%保护基线和 `laptop14-to-rest15` 的54.01%历史流程单独保留，不被普通实验覆盖；`best/laptop14-to-rest15` 的当前最佳记录是 G3、16x2、Raw F1=54.55%。
 
 新实验只有在同一方向、同一正式评估口径下的 Raw F1 严格超过当前分支最佳时，才允许晋级：必须提交代码、配方、完整命令、运行身份、输入/输出SHA256（哈希）和结果卡，并更新对应 `best/*` 分支；晋级后报告必须明确写“当前最佳”，提醒用户后续默认复用该提交。仅伪标签F1、Fixed F1或诊断峰值提高，不得更新最佳分支。
 
