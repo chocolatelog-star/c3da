@@ -97,9 +97,9 @@ def apply_graph_variant(recipe: dict, variant: str) -> dict:
     return resolved
 FORMAL_PHASE_A_CALLPOINTS = {
     "source_extractor_training": "t5_absa_train_graph.WeightedSeq2SeqTrainer.compute_loss",
-    "source_dev_evaluation": "t5_aste_pipeline.evaluate -> generate_for_run -> generate_graph_texts",
+    "source_dev_evaluation": "t5_aste_pipeline.evaluate -> generate_for_run -> plain_generation",
     "target_unlabeled_dann": "t5_absa_train_graph.WeightedSeq2SeqTrainer.compute_loss",
-    "target_pseudo_inference": "t5_aste_pipeline.pseudo -> generate_for_run -> generate_graph_texts",
+    "target_pseudo_inference": "t5_aste_pipeline.pseudo -> generate_for_run -> plain_generation",
 }
 CONTROL_IDENTITY_FIELDS = (
     "direction",
@@ -524,7 +524,10 @@ def build_phase_a_scope() -> dict:
     return {
         "control": {"graph_enabled": False, "entry": "raw_t5_pseudo_extractor"},
         "treatment": {
-            name: {"graph_enabled": True, "entry": name}
+            name: {
+                "graph_enabled": name in {"source_extractor_training", "target_unlabeled_dann"},
+                "entry": name,
+            }
             for name in PHASE_A_CALLPOINTS
         },
         "forbidden": {
