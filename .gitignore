@@ -51,6 +51,11 @@ desktop.ini
 .idea/
 .worktrees/
 
+# Local server artifact archives and transfer bundles
+server_key_artifacts_20260905/
+server-verified-*.bundle
+debug.log
+
 # Temporary notes
 .planning/
 _tmp_*
