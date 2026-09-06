@@ -861,6 +861,8 @@ def _build_input_rows(
     source_dataset: str,
     target_dataset: str,
     external_inputs: dict | None = None,
+    *,
+    use_task_prefix: bool = False,
 ) -> dict[str, list[dict]]:
     if external_inputs is None:
         paths = {
@@ -877,8 +879,8 @@ def _build_input_rows(
     source_dev_raw = read_bgca_aste_file(paths["source_dev"])
     target_raw = read_bgca_aste_file(paths["target_unlabeled"])
     return {
-        "source_train": to_extract_rows(source_train_raw, use_task_prefix=_use_task_prefix(args)),
-        "source_dev": to_extract_rows(source_dev_raw, use_task_prefix=_use_task_prefix(args)),
+        "source_train": to_extract_rows(source_train_raw, use_task_prefix=use_task_prefix),
+        "source_dev": to_extract_rows(source_dev_raw, use_task_prefix=use_task_prefix),
         "target_unlabeled": [{"id": row["id"], "text": row["text"]} for row in target_raw],
     }
 
@@ -2275,7 +2277,7 @@ def ensure_phase_a_graph_cache(
             output_dir=cache_dir,
             model_path=args.model_path,
             parser_dir=args.parser_dir,
-            use_task_prefix=_use_task_prefix(args),
+            use_task_prefix=use_task_prefix,
             max_length=int(args.recipe_data.get("training", {}).get("max_source_length", 128)),
             use_gpu=True,
         )
@@ -2286,7 +2288,7 @@ def ensure_phase_a_graph_cache(
                 input_rows,
                 parser_identity,
                 expected_relation_encoding=args.recipe_data.get("training", {}).get("relation_encoding"),
-                expected_use_task_prefix=_use_task_prefix(args),
+                expected_use_task_prefix=use_task_prefix,
             )
         except RuntimeError:
             raise first_error
@@ -2300,7 +2302,7 @@ def run_treatment_only(args: argparse.Namespace) -> dict:
     if run_dir.exists() and not args.resume:
         raise RuntimeError(f"output directory exists; use a new directory or --resume: {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
-    input_rows = _build_input_rows(recipe["source_dataset"], recipe["target_dataset"], recipe["external_inputs"])
+    input_rows = _build_input_rows(recipe["source_dataset"], recipe["target_dataset"], recipe["external_inputs"], use_task_prefix=_use_task_prefix(args))
     if args.resume:
         _preflight_resume_inputs(input_rows, run_dir)
     parser_identity = build_parser_identity(args.parser_dir)
@@ -2311,8 +2313,10 @@ def run_treatment_only(args: argparse.Namespace) -> dict:
     _atomic_write_json(run_dir / "graph_cache_identity.json", graph_cache_identity)
     _run_training(args, treatment_dir, True, stage="treatment_training")
     model_path = treatment_dir / "models" / "extractor" / "best"
-    _run_pipeline_command(args, treatment_dir, "evaluate", True, model_path, "source_dev")
-    _run_pipeline_command(args, treatment_dir, "pseudo", True, model_path)
+    # Legacy reproduction: keep graph adapter in training, but use plain inference
+    # for the historical source-dev/pseudo calls.
+    _run_pipeline_command(args, treatment_dir, "evaluate", False, model_path, "source_dev")
+    _run_pipeline_command(args, treatment_dir, "pseudo", False, model_path)
     required = (model_path / "config.json", treatment_dir / "target_pseudo_selected.jsonl")
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -2354,6 +2358,7 @@ def run_phase_a(args: argparse.Namespace) -> dict:
         recipe["source_dataset"],
         recipe["target_dataset"],
         recipe["external_inputs"],
+        use_task_prefix=_use_task_prefix(args),
     )
     if args.resume:
         # A failed resume must be observational: validate every persisted input

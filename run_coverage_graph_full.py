@@ -23,11 +23,19 @@ def main() -> int:
     args = parser.parse_args()
 
     phase_a = Path(args.phase_a_output).resolve()
-    if not (phase_a / "treatment_only_entry.json").is_file():
+    # Accept either the treatment-only run root or its treatment directory.
+    # The manifest lives at the run root while model/pseudo artifacts live
+    # under treatment/.
+    if (phase_a / "treatment_only_entry.json").is_file() and (phase_a / "treatment").is_dir():
+        treatment_dir = phase_a / "treatment"
+    elif (phase_a / "models" / "extractor" / "best" / "config.json").is_file():
+        treatment_dir = phase_a
+        phase_a = phase_a.parent
+    else:
         raise FileNotFoundError(f"Coverage-only Phase A result not found: {phase_a}")
     adapter = phase_a.parent / f"{phase_a.name}_full_adapter"
     manifest = build_adapter_manifest(
-        phase_a,
+        treatment_dir,
         adapter,
         source="laptop14",
         target="rest15",
@@ -43,6 +51,8 @@ def main() -> int:
         accumulation=args.gradient_accumulation_steps,
         cuda=args.cuda,
         seed=args.seed,
+        source_dataset="laptop14",
+        target_dataset="rest15",
     )
     record = {"phase_a": str(phase_a), "adapter": manifest, "command": command, "target_test_access": True}
     (phase_a / "coverage_full_command.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")

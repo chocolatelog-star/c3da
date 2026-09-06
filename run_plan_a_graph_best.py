@@ -94,11 +94,7 @@ def build_full_command(*, project_root: Path, adapter: Path, output_root: Path, 
 
 
 def resolve_final_domain_adv(*, no_dann: bool, explicit: float | None, recipe_value: float) -> float:
-    """Resolve final ASTE DANN independently from the upstream switch.
-
-    ``no_dann`` controls Phase A only. An explicit final value is therefore
-    authoritative, which is required for the controlled 0.01/0.02/0.03 sweep.
-    """
+    """Resolve final ASTE DANN independently from the upstream switch."""
     if explicit is not None:
         value = float(explicit)
     elif no_dann:

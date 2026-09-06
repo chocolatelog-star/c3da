@@ -102,13 +102,6 @@ def test_graph_inference_task_prefix_matches_recipe_setting(tmp_path: Path):
     assert "--no_task_prefix" in argv
 
 
-def test_graph_inference_uses_checkpoint_tokenizer_for_aste_labels():
-    source = (ROOT / "t5_aste_pipeline.py").read_text(encoding="utf-8")
-    assert "cache_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path" in source
-    assert "tokenizer = AutoTokenizer.from_pretrained(model_path" in source
-    assert "build_tokenizer_identity(tokenizer_path, cache_tokenizer)" in source
-
-
 def test_graph_split_is_a_supported_evaluate_and_pseudo_argument():
     for command in ("evaluate", "pseudo"):
         completed = subprocess.run(

@@ -28,7 +28,7 @@ def run_command(command: list[str], dry_run: bool = False) -> None:
     print(" ".join(command), flush=True)
     if dry_run:
         return
-    subprocess.run(command, check=True)
+    subprocess.run(command, cwd=Path(__file__).resolve().parent, check=True)
 
 
 def read_json(path: Path) -> dict:
