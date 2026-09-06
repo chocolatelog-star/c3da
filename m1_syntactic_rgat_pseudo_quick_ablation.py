@@ -2650,11 +2650,14 @@ def run_phase_a(args: argparse.Namespace) -> dict:
                 elif stage == "control_source_dev_evaluation":
                     _run_pipeline_command(args, variant_dirs["control"], "evaluate", False, control_model_path, "source_dev")
                 elif stage == "treatment_source_dev_evaluation":
-                    _run_pipeline_command(args, variant_dirs["treatment"], "evaluate", True, variant_dirs["treatment"] / "models" / "extractor" / "best", "source_dev")
+                    # Preserve the graph adapter for extractor training only; the
+                    # historical Phase A inference path evaluates the saved model
+                    # without rebuilding/feeding a syntactic graph.
+                    _run_pipeline_command(args, variant_dirs["treatment"], "evaluate", False, variant_dirs["treatment"] / "models" / "extractor" / "best", "source_dev")
                 elif stage == "control_target_pseudo_inference":
                     _run_pipeline_command(args, variant_dirs["control"], "pseudo", False, control_model_path)
                 elif stage == "treatment_target_pseudo_inference":
-                    _run_pipeline_command(args, variant_dirs["treatment"], "pseudo", True, variant_dirs["treatment"] / "models" / "extractor" / "best")
+                    _run_pipeline_command(args, variant_dirs["treatment"], "pseudo", False, variant_dirs["treatment"] / "models" / "extractor" / "best")
             spec = _stage_spec(
                 args,
                 stage,
