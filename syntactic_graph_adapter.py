@@ -505,6 +505,17 @@ if AutoModelForSeq2SeqLM is not None:
                 "edge_mask": edge_mask,
             }
             missing = [name for name, value in graph_fields.items() if value is None and not name.startswith("compositional_")]
+            if self.syntactic_graph_adapter.compositional_relation:
+                missing.extend(
+                    name
+                    for name in (
+                        "compositional_dependency_id",
+                        "compositional_direction_id",
+                        "compositional_src_pos_id",
+                        "compositional_dst_pos_id",
+                    )
+                    if graph_fields[name] is None
+                )
             if missing:
                 raise ValueError(f"syntactic graph inputs missing: {', '.join(missing)}")
             encoder_outputs = self.encoder(
@@ -556,6 +567,10 @@ if AutoModelForSeq2SeqLM is not None:
             graph_relation_id=None,
             graph_dependency_relation_id=None,
             graph_pos_pair_id=None,
+            graph_compositional_dependency_id=None,
+            graph_compositional_direction_id=None,
+            graph_compositional_src_pos_id=None,
+            graph_compositional_dst_pos_id=None,
             graph_edge_mask=None,
             graph_trace=None,
             **kwargs,
@@ -572,6 +587,10 @@ if AutoModelForSeq2SeqLM is not None:
                     relation_id=graph_relation_id,
                     dependency_relation_id=graph_dependency_relation_id,
                     pos_pair_id=graph_pos_pair_id,
+                    compositional_dependency_id=graph_compositional_dependency_id,
+                    compositional_direction_id=graph_compositional_direction_id,
+                    compositional_src_pos_id=graph_compositional_src_pos_id,
+                    compositional_dst_pos_id=graph_compositional_dst_pos_id,
                     edge_mask=graph_edge_mask,
                     trace=graph_trace,
                 )

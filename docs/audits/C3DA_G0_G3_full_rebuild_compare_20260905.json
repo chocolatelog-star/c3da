@@ -1,0 +1,29 @@
+{
+  "task": "C3DA_G0_G3_FULL_PIPELINE_REBUILD_AND_FINAL_COMPARE_V1",
+  "validity": "COMPLETE_PIPELINE_COMPLETED_PARTIAL_INTERMEDIATE_RETENTION",
+  "target_test_gold_used_for_training_or_selection": false,
+  "source_target": "laptop14_to_rest15",
+  "seed": 1000,
+  "extractor_retrained": false,
+  "upstream_dann": 0.0,
+  "final_dann": 0.03,
+  "common_downstream": {"train_batch": 16, "gradient_accumulation": 2, "effective_batch": 32, "eval_batch": 16, "learning_rate": 0.0003, "final_epochs": 5, "pseudo_weight": 0.75, "augmentation_weight": 0.2, "complete_multi_extra_weight": 0.25, "sentiment_contrastive_weight": 0.01, "checkpoint_selection": "best", "num_beams": 4, "max_new_tokens": 96},
+  "stage_status": {"G0": "all_true", "G3": "all_true"},
+  "selected_pseudo": {
+    "G0": {"rows": 545, "triplets": 818, "precision": 0.6442542787, "recall": 0.5968289921, "f1": 0.6196355085, "tp": 527, "fp": 291, "fn": 356, "single_rows": 315, "multi_rows": 187, "3plus_rows": 43, "sentiment": {"positive": 626, "negative": 183, "neutral": 9}, "sha256": "827298debb9127c9648752811a644904d18699543166d8f2dace4ba38dc6e0df2"},
+    "G3": {"rows": 553, "triplets": 803, "single_rows": 341, "multi_rows": 174, "3plus_rows": 38, "f1": 0.5770, "quality_metrics_source": "previously verified audit; rebuilt intermediate metrics were removed", "sha256": "fdaa9b9d7df3776ca09b330a6ed2576d6959aa099011ef93dbc84951775870d39"}
+  },
+  "complete_multi": {"G0": "UNAVAILABLE_AFTER_MINIMAL_OUTPUT_CLEANUP", "G3": "UNAVAILABLE_AFTER_MINIMAL_OUTPUT_CLEANUP"},
+  "augmentation": {"G0": {"selected_rows": 116, "triplets": 182, "single_rows": 59, "multi_rows": 49, "3plus_rows": 8}, "G3": {"selected_rows": 101, "triplets": "UNAVAILABLE", "single_rows": "UNAVAILABLE", "multi_rows": "UNAVAILABLE", "3plus_rows": "UNAVAILABLE"}},
+  "final_train": {"G0": {"rows": 1565, "triplets": 2450, "multi_rows": 644}, "G3": {"rows": 1558, "triplets": "UNAVAILABLE", "multi_rows": "UNAVAILABLE"}},
+  "final_target": {
+    "G0": {"raw": {"precision": 0.5552995392, "recall": 0.4969072165, "f1": 0.5244831338, "tp": 241, "fp": 193, "fn": 244}, "fixed": {"precision": 0.5635103926, "recall": 0.5030927835, "f1": 0.5315904139}},
+    "G3": {"raw": {"precision": 0.5740318907, "recall": 0.5195876289, "f1": 0.5454545455, "tp": 252, "fp": 187, "fn": 233}, "fixed": {"precision": 0.5854214123, "recall": 0.5298969072, "f1": 0.5562770563}}
+  },
+  "deltas_G3_minus_G0": {"selected_pseudo_f1": -0.0426355, "selected_pseudo_rows": 8, "selected_pseudo_triplets": -15, "augmentation_rows": -15, "final_train_rows": -7, "final_raw_precision": 0.01873235, "final_raw_recall": 0.02268041, "final_raw_f1": 0.02097141, "final_fixed_f1": 0.02468664},
+  "upstream_advantage_preserved_to_final": false,
+  "ranking_reversal_still_exists": true,
+  "ranking_reversal": "G0 selected pseudo F1 > G3, but G3 final Raw F1 > G0",
+  "intermediate_quality_ranking": "UNAVAILABLE due minimal output cleanup",
+  "conclusion": "Under a unified rebuilt downstream command with final DANN=0.03, the historical final ranking and exact F1 values were reproduced. The rebuild confirms the reversal persists, but cannot identify the earliest intermediate stage because complete_multi and most augmentation/final_train JSONL were removed by minimal_outputs."
+}

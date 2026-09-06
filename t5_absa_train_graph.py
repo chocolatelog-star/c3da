@@ -2378,6 +2378,10 @@ class WeightedSeq2SeqTrainer(Seq2SeqTrainer):
         "graph_relation_id",
         "graph_dependency_relation_id",
         "graph_pos_pair_id",
+        "graph_compositional_dependency_id",
+        "graph_compositional_direction_id",
+        "graph_compositional_src_pos_id",
+        "graph_compositional_dst_pos_id",
         "graph_edge_mask",
     }
 

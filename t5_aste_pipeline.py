@@ -147,7 +147,7 @@ def generate_graph_texts(
     import torch
     from torch.utils.data import DataLoader
     from tqdm import tqdm
-    from transformers import AutoTokenizer, DataCollatorForSeq2Seq
+    from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
 
     from syntactic_graph import build_parser_identity, build_tokenizer_identity, load_graph_cache_directory
     from syntactic_graph_adapter import load_seq2seq_model
@@ -156,7 +156,10 @@ def generate_graph_texts(
     os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tokenizer_path = Path(graph_cache_tokenizer_path or model_path)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+    # The graph cache is aligned with the base tokenizer, while the checkpoint
+    # tokenizer carries the ASTE label tokens required for decoding.
+    cache_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     inference_rows = [
         {**row, "input": input_text, "target": row.get("target", "")}
         for row, input_text in zip(rows, build_extract_inputs(rows, use_task_prefix=use_task_prefix))
@@ -165,13 +168,15 @@ def generate_graph_texts(
         graph_cache_dir,
         graph_split,
         inference_rows,
-        tokenizer_identity=build_tokenizer_identity(tokenizer_path, tokenizer),
+        tokenizer_identity=build_tokenizer_identity(tokenizer_path, cache_tokenizer),
         parser_identity=build_parser_identity(graph_parser_dir),
     )
+    checkpoint_config = AutoConfig.from_pretrained(model_path, local_files_only=True)
     model = load_seq2seq_model(
         model_path,
         use_syntactic_graph_adapter=True,
         relation_vocab_size=graph_cache.relation_vocab_size,
+        compositional_relation=bool(getattr(checkpoint_config, "graph_compositional_relation", True)),
     ).to(device)
     model.eval()
     dataset = JsonlSeq2SeqDataset(
@@ -919,6 +924,63 @@ def filter_augmented_rows_for_compatibility(
     if compatibility_profile == "historical_best_v1":
         return list(rows)
     return [row for row in rows if opinion_augmented_label_boundary_valid(row)]
+
+
+def validate_structure_preserving_augmentation(
+    parent_triplets: list[tuple[str, str, str]],
+    old_triplet: tuple[str, str, str] | list[str] | None,
+    new_triplet: tuple[str, str, str] | list[str] | None,
+    augmented_label: str,
+) -> dict:
+    """Validate that one edited triplet changed while all other structure stayed intact."""
+    def key(triplet: tuple[str, str, str] | list[str]) -> str:
+        return canonicalize_triplet_text(triplets_to_text([tuple(triplet)]))
+
+    parent = [tuple(t) for t in (parent_triplets or []) if len(t) == 3]
+    actual = parse_triplet_text_list(canonicalize_triplet_text(augmented_label or ""))
+    old_key = key(old_triplet) if old_triplet is not None and len(old_triplet) == 3 else ""
+    new_key = key(new_triplet) if new_triplet is not None and len(new_triplet) == 3 else ""
+    parent_counts = Counter(key(t) for t in parent)
+    actual_counts = Counter(key(t) for t in actual)
+    expected_counts = parent_counts.copy()
+    if old_key and expected_counts.get(old_key, 0):
+        expected_counts[old_key] -= 1
+        if expected_counts[old_key] <= 0:
+            del expected_counts[old_key]
+    else:
+        old_key = ""
+    if new_key:
+        expected_counts[new_key] += 1
+    untouched_counts = parent_counts.copy()
+    if old_key and untouched_counts.get(old_key, 0):
+        untouched_counts[old_key] -= 1
+        if untouched_counts[old_key] <= 0:
+            del untouched_counts[old_key]
+    untouched_total = sum(untouched_counts.values())
+    untouched_preserved = sum(min(count, actual_counts.get(item, 0)) for item, count in untouched_counts.items())
+    unplanned_counts = actual_counts - expected_counts
+    unplanned = sorted(item for item, count in unplanned_counts.items() for _ in range(count))
+    edited_valid = bool(new_key) and actual_counts.get(new_key, 0) >= 1
+    count_preserved = len(actual) == len(parent)
+    structure_passed = (
+        edited_valid
+        and untouched_preserved == untouched_total
+        and count_preserved
+        and not unplanned
+    )
+    return {
+        "edited_valid": edited_valid,
+        "untouched_total": untouched_total,
+        "untouched_preserved": untouched_preserved,
+        "untouched_retention": untouched_preserved / untouched_total if untouched_total else 1.0,
+        "count_before": len(parent),
+        "count_after": len(actual),
+        "count_preserved": count_preserved,
+        "unplanned_triplets": unplanned,
+        "structure_passed": structure_passed,
+        "expected_triplets": sorted(expected_counts.elements()),
+        "actual_triplets": sorted(actual_counts.elements()),
+    }
 
 
 def _is_opinion_augment_channel(row: dict) -> bool:
@@ -2652,6 +2714,10 @@ def pseudo(args: argparse.Namespace) -> None:
             if pseudo_row:
                 pseudo_rows.append(pseudo_row)
     pseudo_rows = assign_pseudo_quality(pseudo_rows, base_weight=args.pseudo_base_weight)
+    if getattr(args, "use_syntactic_graph_adapter", False) and target_rows and not pseudo_rows:
+        raise RuntimeError(
+            "graph generation produced zero usable pseudo rows; refusing to mark pseudo generation complete"
+        )
     write_jsonl(run_dir / "target_pseudo.jsonl", pseudo_rows)
     selected_rows, selected_stats = select_high_confidence_pseudo_rows(
         pseudo_rows,
@@ -3220,6 +3286,7 @@ def augment(args: argparse.Namespace) -> None:
 
     augmented_rows = []
     seen_aug = set()
+    pseudo_by_id = {str(row.get("id")): row for row in pseudo_rows if row.get("id") is not None}
     filtered_inconsistent = 0
     filtered_channel_inconsistent = 0
     quality_filter_counts: Counter[str] = Counter()
@@ -3281,6 +3348,7 @@ def augment(args: argparse.Namespace) -> None:
         [row for row in augmented_rows if row.get("augmentation") in {"opinion_sentiment_channel", "masked_opinion_sentiment_channel"}],
     )
     consistency_kept_rows = len(augmented_rows)
+    generated_candidate_rows = len(augmented_rows)
 
     nli_stats = {"enabled": False}
     if args.nli_model_path:
@@ -3329,6 +3397,58 @@ def augment(args: argparse.Namespace) -> None:
         )
         write_jsonl(tagged_output_path(run_dir, "c3da_model_filter_removed.jsonl", output_tag), model_filter_removed)
         dump_json(tagged_output_path(run_dir, "c3da_model_filter_analysis.json", output_tag), model_filter_stats)
+
+    structure_stats = {
+        "enabled": bool(args.structure_preserving_augmentation),
+        "generated_rows": generated_candidate_rows,
+        "old_filter_pass_rows": len(augmented_rows),
+        "structure_pass_rows": len(augmented_rows),
+        "structure_drop_rows": 0,
+        "failure_reasons": Counter(),
+        "channels": Counter(),
+        "parent_buckets": Counter(),
+    }
+    if args.structure_preserving_augmentation:
+        structure_kept = []
+        for row in augmented_rows:
+            parent = pseudo_by_id.get(str(row.get("base_id")))
+            parent_triplets = parse_triplet_text_list(canonicalize_triplet_text(parent.get("label", ""))) if parent else []
+            old_triplet = row.get("old_triplet")
+            new_triplet = row.get("new_triplet")
+            # The model-filter prediction is the observed structure when available.
+            observed_label = row.get("model_filter_pred_fixed") or row.get("model_filter_pred_raw") or row.get("label", "")
+            validation = validate_structure_preserving_augmentation(
+                parent_triplets, old_triplet, new_triplet, observed_label
+            )
+            row["parent_triplets"] = [list(t) for t in parent_triplets]
+            row["edited_triplet"] = new_triplet
+            row["untouched_triplets"] = [list(t) for t in parent_triplets if list(t) != list(old_triplet or [])]
+            row["expected_triplets"] = validation["expected_triplets"]
+            row["structure_validation"] = validation
+            bucket = triplet_count_bucket(len(parent_triplets))
+            structure_stats["channels"][str(row.get("augmentation", "unknown"))] += 1
+            structure_stats["parent_buckets"][bucket] += 1
+            if validation["structure_passed"]:
+                structure_kept.append(row)
+            else:
+                structure_stats["structure_drop_rows"] += 1
+                reasons = []
+                if not validation["edited_valid"]:
+                    reasons.append("edited_invalid")
+                if validation["untouched_preserved"] != validation["untouched_total"]:
+                    reasons.append("untouched_missing")
+                if not validation["count_preserved"]:
+                    reasons.append("count_changed")
+                if validation["unplanned_triplets"]:
+                    reasons.append("unplanned_triplets")
+                for reason in reasons or ["missing_parent"]:
+                    structure_stats["failure_reasons"][reason] += 1
+        augmented_rows = structure_kept
+        structure_stats["structure_pass_rows"] = len(augmented_rows)
+    structure_stats["failure_reasons"] = dict(structure_stats["failure_reasons"])
+    structure_stats["channels"] = dict(structure_stats["channels"])
+    structure_stats["parent_buckets"] = dict(structure_stats["parent_buckets"])
+    dump_json(tagged_output_path(run_dir, "c3da_augmentation_structure_audit.json", output_tag), structure_stats)
 
     before_opinion_boundary_filter = len(augmented_rows)
     augmented_rows = filter_augmented_rows_for_compatibility(
@@ -3379,6 +3499,7 @@ def augment(args: argparse.Namespace) -> None:
         "selection": selection_stats,
         "nli": nli_stats,
         "model_filter": model_filter_stats,
+        "structure_preserving": structure_stats,
     }
     dump_json(tagged_output_path(run_dir, "c3da_augment_analysis.json", output_tag), aug_stats)
     if args.augment_prompt_style in {"label_composition", "label_to_text", "sentence_fusion_composition"}:
@@ -3707,6 +3828,7 @@ def main() -> None:
     p.add_argument("--memory_path", default="")
     p.add_argument("--cuda", default="0")
     p.add_argument("--allow_inconsistent_aug", action="store_true")
+    p.add_argument("--structure_preserving_augmentation", action="store_true")
     p.add_argument("--augment_base_weight", type=float, default=0.2)
     p.add_argument("--augment_select_max_rows", type=int, default=200)
     p.add_argument("--augment_select_max_per_base", type=int, default=1)

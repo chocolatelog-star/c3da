@@ -104,6 +104,40 @@ def validate_pseudo_provenance(
     return True, ""
 
 
+def resolve_reused_extractor(upstream_run_dir: Path, expected_tag: str) -> tuple[str, Path]:
+    """Resolve the actual reused extractor from provenance, with legacy layout fallbacks."""
+    upstream_run_dir = upstream_run_dir.resolve()
+    state = read_json(upstream_run_dir / "target_pseudo_generation_state.json")
+    analysis = read_json(upstream_run_dir / "target_pseudo_analysis.json")
+    recorded_tag = state.get("pseudo_source_tag") or analysis.get("pseudo_source_tag")
+    recorded_path = state.get("resolved_model_path") or analysis.get("model_path")
+    candidates: list[Path] = []
+    if recorded_path:
+        path = Path(str(recorded_path))
+        candidates.append(path if path.is_absolute() else upstream_run_dir / path)
+    candidates.extend(
+        [
+            upstream_run_dir / "models" / expected_tag / "best",
+            upstream_run_dir / "models" / "extractor" / "best",
+            upstream_run_dir / "extractor" / "best",
+        ]
+    )
+    models_dir = upstream_run_dir / "models"
+    if models_dir.exists():
+        candidates.extend(sorted(models_dir.glob("*/best")))
+    for best in candidates:
+        best = best.resolve()
+        if (best / "config.json").exists():
+            tag = str(recorded_tag or expected_tag)
+            if not tag:
+                raise FileNotFoundError("reused extractor has no pseudo source tag")
+            return tag, best
+    raise FileNotFoundError(
+        f"reused extractor checkpoint not found under {upstream_run_dir}; "
+        "expected config.json in a models/*/best layout"
+    )
+
+
 def validate_dynamic_pseudo_selection(
     output_dir: Path,
     pseudo_source_tag: str,
@@ -340,7 +374,11 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         extractor_tag += f"_sentiment_contrastive_l{extractor_lambda_tag}_source_balanced"
         if args.sentiment_prototype_initialize_from_context:
             extractor_tag += "_encoder_context_init"
-    extractor_dir = (upstream_run_dir or run_dir) / "models" / extractor_tag
+    if upstream_run_dir is not None:
+        extractor_tag, extractor_best = resolve_reused_extractor(upstream_run_dir, extractor_tag)
+        extractor_dir = extractor_best.parent
+    else:
+        extractor_dir = run_dir / "models" / extractor_tag
     extractor_stage = f"train_{extractor_tag}"
     if upstream_run_dir is not None:
         upstream_valid, upstream_reason = validate_pseudo_provenance(
@@ -953,6 +991,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                     str(args.augment_select_max_opinion_ratio),
                     "--augment_select_require_raw_exact",
                     "--augment_select_require_model_filter_passed",
+                    *( ["--structure_preserving_augmentation"] if args.structure_preserving_augmentation else [] ),
                     "--pseudo_train_source",
                     "high_precision",
                     "--pseudo_train_file",
@@ -1068,6 +1107,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 str(args.augment_select_max_opinion_ratio),
                 "--augment_select_require_raw_exact",
                 "--augment_select_require_model_filter_passed",
+                *( ["--structure_preserving_augmentation"] if args.structure_preserving_augmentation else [] ),
                 "--pseudo_train_source",
                 "high_precision",
                 "--pseudo_train_file",
@@ -1556,6 +1596,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--final_pseudo_weight", type=float, default=0.5)
     parser.add_argument("--final_augment_weight", type=float, default=0.2)
     parser.add_argument("--augment_complete_pseudo", action="store_true")
+    parser.add_argument("--structure_preserving_augmentation", action="store_true")
     parser.add_argument("--dynamic_multitriplet", action="store_true")
     parser.add_argument("--dynamic_multitriplet_strict", action="store_true")
     parser.add_argument("--source_count1_weight", type=positive_finite_float, default=1.0)
@@ -1599,17 +1640,54 @@ def selected_pairs(pairs_text: str) -> list[tuple[str, str]]:
 
 
 def _prune_minimal_pair_outputs(pair_root: Path) -> None:
-    """Retain only final raw metrics, status, manifest, and compact summaries."""
+    """Retain the audit chain and required best models while pruning heavy state.
+
+    The minimal mode is intentionally limited to storage hygiene: it must not
+    remove pseudo, complete-multi, augmentation, final-train, or prediction
+    artifacts needed for downstream audit.
+    """
     keep_names = {
         "stage_status.json",
         "manifest.json",
         "results_bgca_aste_stage1.csv",
         "results_bgca_aste_stage1_CN.md",
     }
-    keep_prefixes = ("aste_metrics_raw_", "aste_metrics_fixed_")
+    keep_prefixes = (
+        "target_pseudo",
+        "c3da_augment",
+        "c3da_two_channel_augmented",
+        "final_train",
+        "final_dev",
+        "aste_metrics",
+        "aste_predictions",
+        "aste_error_analysis",
+        "phase_a_",
+        "worker_",
+        "coverage_full_command",
+    )
+    keep_suffixes = ("_analysis.json", "_composition.json", "_weight_analysis.json")
+    heavy_names = {
+        "optimizer.pt",
+        "scheduler.pt",
+        "trainer_state.json",
+        "full_logits.pt",
+        "attention.npy",
+        "attentions.pt",
+    }
     for path in sorted(pair_root.rglob("*"), reverse=True):
-        if path.is_file() and path.name not in keep_names and not path.name.startswith(keep_prefixes):
-            path.unlink()
+        if path.is_file():
+            relative_parts = path.relative_to(pair_root).parts
+            in_best_model = "best" in relative_parts
+            keep = (
+                in_best_model
+                or path.name in keep_names
+                or path.name.startswith(keep_prefixes)
+                or path.name.endswith(keep_suffixes)
+            )
+            if path.name in heavy_names or path.name.startswith("checkpoint-"):
+                keep = False
+            if not keep:
+                path.unlink()
         elif path.is_dir() and not any(path.iterdir()):
             path.rmdir()
 

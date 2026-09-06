@@ -1,0 +1,3 @@
+variant,selected_pseudo_rows,selected_pseudo_triplets,selected_pseudo_f1,augmentation_rows,final_train_rows,raw_precision,raw_recall,raw_f1,fixed_f1,final_dann,status
+G0,545,818,61.9636,116,1565,55.5300,49.6907,52.4483,53.1590,0.03,complete
+G3,553,803,57.7000,101,1558,57.4032,51.9588,54.5455,55.6277,0.03,complete

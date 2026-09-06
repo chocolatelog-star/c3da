@@ -1,0 +1,337 @@
+{
+  "overlap": {
+    "G0_triplets": 684,
+    "G3_triplets": 665,
+    "shared_triplets": 506,
+    "G0_only_triplets": 178,
+    "G3_only_triplets": 159
+  },
+  "groups": {
+    "G0": {
+      "only_rows": 144,
+      "only_triplets": 271,
+      "single_rows": 44,
+      "multi_rows": 100,
+      "3plus_rows": 27,
+      "sentiment": {
+        "neg": 62,
+        "pos": 201,
+        "neu": 8
+      },
+      "unique_aspects": 182,
+      "unique_opinions": 155,
+      "mean_sentence_length": 18.041666666666668,
+      "mean_gold_triplets": 1.9236111111111112,
+      "quality": {
+        "precision": 0.4612546125461255,
+        "recall": 0.45126353790613716,
+        "f1": 0.4562043795620438,
+        "tp": 125,
+        "fp": 146,
+        "fn": 152
+      },
+      "quality_by_structure": {
+        "multi": {
+          "precision": 0.4863013698630137,
+          "recall": 0.47651006711409394,
+          "f1": 0.4813559322033898,
+          "tp": 71,
+          "fp": 75,
+          "fn": 78
+        },
+        "single": {
+          "precision": 0.2727272727272727,
+          "recall": 0.21428571428571427,
+          "f1": 0.23999999999999996,
+          "tp": 12,
+          "fp": 32,
+          "fn": 44
+        },
+        "3plus": {
+          "precision": 0.5185185185185185,
+          "recall": 0.5833333333333334,
+          "f1": 0.5490196078431373,
+          "tp": 42,
+          "fp": 39,
+          "fn": 30
+        }
+      },
+      "matched_ids": 144
+    },
+    "G3": {
+      "only_rows": 128,
+      "only_triplets": 231,
+      "single_rows": 47,
+      "multi_rows": 81,
+      "3plus_rows": 22,
+      "sentiment": {
+        "pos": 170,
+        "neg": 59,
+        "neu": 2
+      },
+      "unique_aspects": 148,
+      "unique_opinions": 148,
+      "mean_sentence_length": 19.0,
+      "mean_gold_triplets": 1.984375,
+      "quality": {
+        "precision": 0.44155844155844154,
+        "recall": 0.4015748031496063,
+        "f1": 0.42061855670103093,
+        "tp": 102,
+        "fp": 129,
+        "fn": 152
+      },
+      "quality_by_structure": {
+        "multi": {
+          "precision": 0.4576271186440678,
+          "recall": 0.42857142857142855,
+          "f1": 0.4426229508196722,
+          "tp": 54,
+          "fp": 64,
+          "fn": 72
+        },
+        "3plus": {
+          "precision": 0.5,
+          "recall": 0.5076923076923077,
+          "f1": 0.5038167938931297,
+          "tp": 33,
+          "fp": 33,
+          "fn": 32
+        },
+        "single": {
+          "precision": 0.3191489361702128,
+          "recall": 0.23809523809523808,
+          "f1": 0.27272727272727276,
+          "tp": 15,
+          "fp": 32,
+          "fn": 48
+        }
+      },
+      "matched_ids": 128
+    }
+  },
+  "augmentation": {
+    "G0": {
+      "rows": 116,
+      "triplets": 182,
+      "aspect_rows": 87,
+      "opinion_rows": 29
+    },
+    "G3": {
+      "rows": 101,
+      "triplets": 151,
+      "aspect_rows": 74,
+      "opinion_rows": 27
+    }
+  },
+  "augmentation_audit": {
+    "G0": {
+      "mapping_complete": 116,
+      "mapping_missing": 0,
+      "edited_total": 116,
+      "edited_valid": 87,
+      "untouched_total": 36,
+      "untouched_preserved": 20,
+      "count_preserved": 78,
+      "count_decreased": 4,
+      "count_increased": 34,
+      "unplanned_triplets": 76,
+      "unplanned_rows": 57,
+      "by_channel": {
+        "aspect": {
+          "rows": 87,
+          "edited_valid": 72,
+          "untouched_total": 21,
+          "untouched_preserved": 15,
+          "count_preserved": 58,
+          "count_decreased": 3,
+          "count_increased": 26,
+          "unplanned_triplets": 46,
+          "unplanned_rows": 36
+        },
+        "opinion": {
+          "rows": 29,
+          "edited_valid": 15,
+          "untouched_total": 15,
+          "untouched_preserved": 5,
+          "count_preserved": 20,
+          "count_decreased": 1,
+          "count_increased": 8,
+          "unplanned_triplets": 30,
+          "unplanned_rows": 21
+        }
+      },
+      "edited_validity_rate": 0.75,
+      "untouched_retention_rate": 0.5555555555555556,
+      "count_preservation_rate": 0.6724137931034483,
+      "unplanned_rate": 0.49137931034482757,
+      "parent_quality_rows": {
+        "correct": 53,
+        "incorrect": 35,
+        "partial": 28
+      },
+      "descendant_rows_by_parent_quality": {
+        "correct": 53,
+        "incorrect": 35,
+        "partial": 28
+      },
+      "mean_descendants_by_quality": {
+        "correct": 1.0,
+        "incorrect": 1.0,
+        "partial": 1.0
+      },
+      "by_parent_structure": {
+        "single_parent": {
+          "rows": 87,
+          "untouched_total": 0,
+          "untouched_preserved": 0,
+          "count_preserved": 55,
+          "count_decreased": 0,
+          "count_increased": 32,
+          "unplanned_rows": 41,
+          "unplanned_triplets": 53,
+          "untouched_retention_rate": null,
+          "count_preservation_rate": 0.632183908045977,
+          "unplanned_rate": 0.47126436781609193
+        },
+        "3plus_parent": {
+          "rows": 7,
+          "untouched_total": 14,
+          "untouched_preserved": 9,
+          "count_preserved": 4,
+          "count_decreased": 2,
+          "count_increased": 1,
+          "unplanned_rows": 3,
+          "unplanned_triplets": 4,
+          "untouched_retention_rate": 0.6428571428571429,
+          "count_preservation_rate": 0.5714285714285714,
+          "unplanned_rate": 0.42857142857142855
+        },
+        "multi_parent": {
+          "rows": 22,
+          "untouched_total": 22,
+          "untouched_preserved": 11,
+          "count_preserved": 19,
+          "count_decreased": 2,
+          "count_increased": 1,
+          "unplanned_rows": 13,
+          "unplanned_triplets": 19,
+          "untouched_retention_rate": 0.5,
+          "count_preservation_rate": 0.8636363636363636,
+          "unplanned_rate": 0.5909090909090909
+        }
+      }
+    },
+    "G3": {
+      "mapping_complete": 101,
+      "mapping_missing": 0,
+      "edited_total": 101,
+      "edited_valid": 69,
+      "untouched_total": 21,
+      "untouched_preserved": 7,
+      "count_preserved": 60,
+      "count_decreased": 8,
+      "count_increased": 33,
+      "unplanned_triplets": 76,
+      "unplanned_rows": 58,
+      "by_channel": {
+        "aspect": {
+          "rows": 74,
+          "edited_valid": 55,
+          "untouched_total": 11,
+          "untouched_preserved": 7,
+          "count_preserved": 41,
+          "count_decreased": 3,
+          "count_increased": 30,
+          "unplanned_triplets": 54,
+          "unplanned_rows": 39
+        },
+        "opinion": {
+          "rows": 27,
+          "edited_valid": 14,
+          "untouched_total": 10,
+          "untouched_preserved": 0,
+          "count_preserved": 19,
+          "count_decreased": 5,
+          "count_increased": 3,
+          "unplanned_triplets": 22,
+          "unplanned_rows": 19
+        }
+      },
+      "edited_validity_rate": 0.6831683168316832,
+      "untouched_retention_rate": 0.3333333333333333,
+      "count_preservation_rate": 0.594059405940594,
+      "unplanned_rate": 0.5742574257425742,
+      "parent_quality_rows": {
+        "correct": 46,
+        "partial": 19,
+        "incorrect": 36
+      },
+      "descendant_rows_by_parent_quality": {
+        "correct": 46,
+        "partial": 19,
+        "incorrect": 36
+      },
+      "mean_descendants_by_quality": {
+        "correct": 1.0,
+        "partial": 1.0,
+        "incorrect": 1.0
+      },
+      "by_parent_structure": {
+        "single_parent": {
+          "rows": 85,
+          "untouched_total": 0,
+          "untouched_preserved": 0,
+          "count_preserved": 54,
+          "count_decreased": 0,
+          "count_increased": 31,
+          "unplanned_rows": 47,
+          "unplanned_triplets": 64,
+          "untouched_retention_rate": null,
+          "count_preservation_rate": 0.6352941176470588,
+          "unplanned_rate": 0.5529411764705883
+        },
+        "multi_parent": {
+          "rows": 11,
+          "untouched_total": 11,
+          "untouched_preserved": 5,
+          "count_preserved": 6,
+          "count_decreased": 3,
+          "count_increased": 2,
+          "unplanned_rows": 7,
+          "unplanned_triplets": 8,
+          "untouched_retention_rate": 0.45454545454545453,
+          "count_preservation_rate": 0.5454545454545454,
+          "unplanned_rate": 0.6363636363636364
+        },
+        "3plus_parent": {
+          "rows": 5,
+          "untouched_total": 10,
+          "untouched_preserved": 2,
+          "count_preserved": 0,
+          "count_decreased": 5,
+          "count_increased": 0,
+          "unplanned_rows": 4,
+          "unplanned_triplets": 4,
+          "untouched_retention_rate": 0.2,
+          "count_preservation_rate": 0.0,
+          "unplanned_rate": 0.8
+        }
+      }
+    }
+  },
+  "final_train": {
+    "G0": {
+      "rows": 1565,
+      "triplets": 2450,
+      "multi_rows": 644,
+      "density": 1.5654952076677315
+    },
+    "G3": {
+      "rows": 1558,
+      "triplets": 2404,
+      "multi_rows": 612,
+      "density": 1.5430038510911426
+    }
+  }
+}

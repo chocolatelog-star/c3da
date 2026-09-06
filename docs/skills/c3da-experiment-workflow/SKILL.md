@@ -89,7 +89,15 @@ metadata:
 
 ## 结果分析与文档
 
-预注册的黄金观察值（实际观测）必须与筛选配额（选择上限）分开记录；不得用筛选配额替代黄金观察值。正式比较只以当前最佳（已验证最佳）为准，不以诊断峰值替代。
+### 根目录 Markdown 管理边界
+
+- 日常只管理 `J:\nlp\CD-C3DA` 项目根目录中的 Markdown（文档）文件；不在仓库外层或实验输出目录新增项目文档。
+- 根目录正式文档的职责固定为：`AGENTS.md`（项目与协作规则）、`README.md`（代码入口说明）、`实验记录与模型索引_CN.md`（正式结果索引）、`实验计划_*.md`（实验计划与结果台账）、`03_CD-C3DA下一阶段改进计划_CN.md`（研究改进设计）、`07_CD-C3DA六组跨域实验详细分析与GPT交接_CN.md`（详细交接分析）、`服务器迁移与实验运行交接_CN.md`（服务器操作交接）、`CHAT_SOL_CURRENT_TASK_CN.md`（当前交给 ChatGPT 的任务边界）、`CHAT_SOL_DECISION_LOG_CN.md`（已确认决策记录）、`CHAT_SOL_PROJECT_STATE_CN.md`（项目状态镜像）。
+- `CHAT_SOL_CURRENT_TASK_CN.md` 用于记录当前需要 ChatGPT（聊天模型）分析的任务；`CHAT_SOL_DECISION_LOG_CN.md` 用于记录已经确认、不可凭记忆改写的决策；`CHAT_SOL_PROJECT_STATE_CN.md` 用于提供稳定的项目背景和当前状态。三者不是实验结果本身，结果仍以实验台账、索引和实际产物为准。
+- 不再创建或维护通用临时的 `task_plan.md`、`findings.md`、`progress.md`；阶段进度和结论写入对应正式台账或任务镜像。已删除的临时文档不恢复。
+- 整理 Markdown 时先按上述职责归类，合并重复内容时保留事实源、更新时间和证据路径；不擅自删除正式文档，删除仍需用户明确许可。
+
+预注册的黄金观察值（实际观测）必须与筛选配额（选择上限）分开记录；不得用筛选配额替代黄金观察值。正式比较只以当前最佳（已验证最佳）为准，不以诊断峰值替代。 
 
 实验完成不是“进程结束”或“指标落盘”，而是完成分析闭环。拿到结果后无需等用户追问，必须主动依次完成：
 
@@ -149,3 +157,4 @@ metadata:
 - 论文结果是5次运行均值；单随机种子只能做接近性检查。
 - 原版使用 T5-base、学习率3e-4、物理批次16、梯度累积2，并按源域开发集选择训练轮数/检查点。3070适配必须用回归测试证明优化尺度等价。
 - 不使用 `--clear_model` 自动删除检查点。
+- `--minimal_outputs` 仅可用于存储整理：必须保留 `target_pseudo*`、`c3da_augment*`、`c3da_two_channel_augmented*`、`final_train*`、`final_dev*`、`aste_metrics*`、`aste_predictions*`、阶段 manifest/status、分析摘要和 `best` 模型目录；只允许删除 epoch checkpoint、optimizer/scheduler state、logits、attention 等重型状态。

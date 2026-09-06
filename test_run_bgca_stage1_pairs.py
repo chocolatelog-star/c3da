@@ -19,6 +19,19 @@ SCRIPT = PROJECT_ROOT / "run_bgca_aste_stage1_pairs.py"
 
 
 class Stage1PairPseudoFilterTest(unittest.TestCase):
+    def test_resolve_reused_extractor_uses_recorded_model_path_and_tag(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            best = root / "models" / "extractor" / "best"
+            best.mkdir(parents=True)
+            (best / "config.json").write_text("{}", encoding="utf-8")
+            self._write_pseudo_metadata(root, best, "extractor_ep25_plain_last")
+
+            tag, resolved = stage1.resolve_reused_extractor(root, "unused_expected_tag")
+
+            self.assertEqual(tag, "extractor_ep25_plain_last")
+            self.assertEqual(resolved, best.resolve())
+
     @staticmethod
     def _write_pseudo_metadata(
         run_dir: Path,
@@ -136,6 +149,37 @@ class Stage1PairPseudoFilterTest(unittest.TestCase):
                     legacy_stages=("train_extractor",),
                 )
             )
+
+    def test_minimal_prune_keeps_audit_artifacts_and_removes_heavy_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            keep = [
+                "manifest.json",
+                "stage_status.json",
+                "target_pseudo_high_precision.jsonl",
+                "target_pseudo_high_precision_analysis.json",
+                "target_pseudo_selected.jsonl",
+                "target_pseudo_selected_analysis.json",
+                "c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl",
+                "c3da_augment_analysis_strict_aug150_w020_label_to_text_gen.json",
+                "final_train_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_pw075.jsonl",
+                "final_train_composition_analysis_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_pw075.json",
+                "aste_predictions_raw_fixed_final.jsonl",
+                "aste_metrics_raw_final.json",
+                "aste_metrics_fixed_final.json",
+            ]
+            heavy = ["checkpoint-100/pytorch_model.bin", "optimizer.pt", "scheduler.pt", "full_logits.pt", "attention.npy"]
+            for name in keep + heavy:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x", encoding="utf-8")
+
+            stage1._prune_minimal_pair_outputs(root)
+
+            for name in keep:
+                self.assertTrue((root / name).exists(), name)
+            for name in heavy:
+                self.assertFalse((root / name).exists(), name)
 
     def test_legacy_hp1_stage_names_cover_expensive_downstream_stages(self) -> None:
         aliases = stage1.legacy_hp1_stage_names("label_to_text_gen")

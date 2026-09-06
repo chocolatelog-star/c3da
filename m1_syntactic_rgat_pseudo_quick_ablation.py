@@ -80,6 +80,7 @@ def apply_graph_variant(recipe: dict, variant: str) -> dict:
         "G1": {"relation_encoding": "compositional", "focus_enabled": False, "coverage_enabled": True, "focus_weight": 0.0, "coverage_weight": 0.05},
         "G2": {"relation_encoding": "compositional", "focus_enabled": True, "coverage_enabled": False, "focus_weight": 0.05, "coverage_weight": 0.0},
         "G3": {"relation_encoding": "compositional", "focus_enabled": True, "coverage_enabled": True, "focus_weight": 0.05, "coverage_weight": 0.05},
+        "G4": {"relation_encoding": "compositional", "focus_enabled": False, "coverage_enabled": False, "focus_weight": 0.0, "coverage_weight": 0.0},
     }
     if variant not in specs:
         raise ValueError(f"unknown graph variant: {variant}")
@@ -96,9 +97,9 @@ def apply_graph_variant(recipe: dict, variant: str) -> dict:
     return resolved
 FORMAL_PHASE_A_CALLPOINTS = {
     "source_extractor_training": "t5_absa_train_graph.WeightedSeq2SeqTrainer.compute_loss",
-    "source_dev_evaluation": "t5_aste_pipeline.evaluate -> generate_texts",
+    "source_dev_evaluation": "t5_aste_pipeline.evaluate -> generate_for_run -> generate_graph_texts",
     "target_unlabeled_dann": "t5_absa_train_graph.WeightedSeq2SeqTrainer.compute_loss",
-    "target_pseudo_inference": "t5_aste_pipeline.pseudo -> generate_texts",
+    "target_pseudo_inference": "t5_aste_pipeline.pseudo -> generate_for_run -> generate_graph_texts",
 }
 CONTROL_IDENTITY_FIELDS = (
     "direction",
@@ -178,6 +179,13 @@ FROZEN_PHASE_A_DATA_BOUNDARY = {
     "final_aste": False,
     "phase_b": False,
 }
+
+
+def _use_task_prefix(args: argparse.Namespace) -> bool:
+    """Use one task-prefix setting for preparation, training, and inference."""
+    return bool(args.recipe_data.get("pseudo", {}).get(
+        "use_task_prefix", FROZEN_PSEUDO_RECIPE["use_task_prefix"]
+    ))
 FROZEN_PHASE_A_TREATMENT_GRAPH = {
     "graph_enabled": True,
     "graph_layers": 1,
@@ -869,8 +877,8 @@ def _build_input_rows(
     source_dev_raw = read_bgca_aste_file(paths["source_dev"])
     target_raw = read_bgca_aste_file(paths["target_unlabeled"])
     return {
-        "source_train": to_extract_rows(source_train_raw, use_task_prefix=False),
-        "source_dev": to_extract_rows(source_dev_raw, use_task_prefix=False),
+        "source_train": to_extract_rows(source_train_raw, use_task_prefix=_use_task_prefix(args)),
+        "source_dev": to_extract_rows(source_dev_raw, use_task_prefix=_use_task_prefix(args)),
         "target_unlabeled": [{"id": row["id"], "text": row["text"]} for row in target_raw],
     }
 
@@ -1065,7 +1073,6 @@ def _training_argv(
         "--neutral_loss_gain", str(training["neutral_loss_gain"]),
         "--checkpoint_selection", training["checkpoint_selection"],
         "--save_total_limit", "1",
-        "--save_only_model",
         "--resume_from_checkpoint", "auto",
         "--per_device_train_batch_size", str(training["extractor_train_batch_size"]),
         "--per_device_eval_batch_size", str(training["extractor_eval_batch_size"]),
@@ -1372,9 +1379,11 @@ def _pipeline_argv(
             "--num_beams", str(args.recipe_data["pseudo"]["num_beams"]),
             "--max_new_tokens", str(args.recipe_data["pseudo"]["max_new_tokens"]),
             "--length_penalty", str(args.recipe_data["pseudo"]["length_penalty"]),
-            "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
+            "--cuda", str(args.cuda), "--no_constrained_decoding",
             "--output_tag", output_tag,
         ]
+        if not _use_task_prefix(args):
+            argv.append("--no_task_prefix")
         if graph_enabled:
             argv.extend([
                 "--use_syntactic_graph_adapter",
@@ -1399,8 +1408,10 @@ def _pipeline_argv(
             "--high_precision_max_token_distance", str(args.recipe_data["pseudo"]["high_precision_max_token_distance"]),
             "--fixed_changed_min_score", str(args.recipe_data["pseudo"]["fixed_changed_min_score"]),
             "--fixed_changed_weight", str(args.recipe_data["pseudo"]["fixed_changed_weight"]),
-            "--cuda", str(args.cuda), "--no_task_prefix", "--no_constrained_decoding",
+            "--cuda", str(args.cuda), "--no_constrained_decoding",
         ]
+        if not _use_task_prefix(args):
+            argv.append("--no_task_prefix")
         if graph_enabled:
             argv.extend([
                 "--use_syntactic_graph_adapter",
@@ -2169,6 +2180,9 @@ def validate_phase_a_graph_cache(
     cache_dir: str | Path,
     input_rows: dict[str, list[dict]],
     parser_identity: dict,
+    *,
+    expected_relation_encoding: str | None = None,
+    expected_use_task_prefix: bool | None = None,
 ) -> dict:
     """Preflight every graph-cache identity before starting long training."""
     root = Path(cache_dir).resolve()
@@ -2190,6 +2204,18 @@ def validate_phase_a_graph_cache(
         raise RuntimeError(f"Phase A graph cache relation vocabulary is not a list: {root}")
     if manifest.get("target_test_access") is not False:
         raise RuntimeError("Phase A graph cache must explicitly forbid target_test access")
+    if expected_use_task_prefix is not None and bool(manifest.get("use_task_prefix", True)) != bool(expected_use_task_prefix):
+        raise RuntimeError(
+            "Phase A graph cache task-prefix setting does not match the training recipe"
+        )
+    if expected_relation_encoding not in (None, "legacy", "compositional"):
+        raise RuntimeError(f"unsupported graph relation encoding: {expected_relation_encoding}")
+    if expected_relation_encoding == "compositional":
+        schema = manifest.get("compositional_relation_schema")
+        if not isinstance(schema, dict) or schema.get("version") != 1:
+            raise RuntimeError(
+                "compositional graph recipe requires a cache with compositional relation schema"
+            )
     try:
         split_counts = {}
         split_hashes = {}
@@ -2226,7 +2252,15 @@ def ensure_phase_a_graph_cache(
     inputs remains resumable through syntactic_graph's progress files.
     """
     try:
-        return validate_phase_a_graph_cache(args.graph_cache_dir, input_rows, parser_identity)
+        relation_encoding = args.recipe_data.get("training", {}).get("relation_encoding")
+        use_task_prefix = _use_task_prefix(args)
+        return validate_phase_a_graph_cache(
+            args.graph_cache_dir,
+            input_rows,
+            parser_identity,
+            expected_relation_encoding=relation_encoding,
+            expected_use_task_prefix=use_task_prefix,
+        )
     except RuntimeError as first_error:
         base = Path(args.graph_cache_dir).resolve()
         fingerprint = _sha256_bytes(
@@ -2241,13 +2275,19 @@ def ensure_phase_a_graph_cache(
             output_dir=cache_dir,
             model_path=args.model_path,
             parser_dir=args.parser_dir,
-            use_task_prefix=False,
+            use_task_prefix=_use_task_prefix(args),
             max_length=int(args.recipe_data.get("training", {}).get("max_source_length", 128)),
             use_gpu=True,
         )
         args.graph_cache_dir = str(cache_dir)
         try:
-            return validate_phase_a_graph_cache(cache_dir, input_rows, parser_identity)
+            return validate_phase_a_graph_cache(
+                cache_dir,
+                input_rows,
+                parser_identity,
+                expected_relation_encoding=args.recipe_data.get("training", {}).get("relation_encoding"),
+                expected_use_task_prefix=_use_task_prefix(args),
+            )
         except RuntimeError:
             raise first_error
 
@@ -2757,7 +2797,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--no_dann", action="store_true")
     parser.add_argument("--treatment_only", action="store_true")
-    parser.add_argument("--variant", choices=("G0", "G1", "G2", "G3"), default="G1")
+    parser.add_argument("--variant", choices=("G0", "G1", "G2", "G3", "G4"), default="G1")
     return parser
 
 

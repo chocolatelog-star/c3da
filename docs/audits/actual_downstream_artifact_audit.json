@@ -1,0 +1,43 @@
+{
+  "task": "C3DA_G0_G3_ACTUAL_FINAL_TRAIN_AUDIT_V1",
+  "validity": "PARTIAL_ARTIFACTS_CLEANED",
+  "constraints": {"training": false, "model_changes": false, "target_test_gold_used": false},
+  "remote_read_error": null,
+  "actual_files_found": {
+    "G0": {
+      "pseudo_train_file": "/root/autodl-tmp/CD-C3DA-runs/chat_l14_r15_G0_16x2_20260904_run2_full_adapter/pseudo_variants/hp1_complete2_dist5_w025/target_pseudo_high_precision.jsonl",
+      "complete_multi_file": "EMBEDDED_IN_PSEUDO_VARIANT_OR_MISSING",
+      "augmentation_file": "/root/autodl-tmp/CD-C3DA-runs/chat_l14_r15_G0_16x2_20260904_full_retry/laptop14_to_rest15/c3da_two_channel_augmented_selected_strict_aug150_w020_label_to_text_gen.jsonl",
+      "final_train_file": "PRESENT_BUT_NOT_READ_THIS_TURN",
+      "final_train_composition": "/root/autodl-tmp/CD-C3DA-runs/chat_l14_r15_G0_16x2_20260904_full_retry/laptop14_to_rest15/final_train_composition_analysis_strict_aug150_w020_label_to_text_gen_complete_multi2_w025_pw075.json"
+    },
+    "G1": {"pseudo_train_file": "/root/autodl-tmp/CD-C3DA-runs/chat_l14_r15_G1_16x2_20260904_run2_full_adapter/pseudo_variants/hp1_complete2_dist5_w025/target_pseudo_high_precision.jsonl", "complete_multi_file": "EMBEDDED_IN_PSEUDO_VARIANT_OR_MISSING", "augmentation_file": "MISSING", "final_train_file": "MISSING"},
+    "G2": {"pseudo_train_file": "/root/autodl-tmp/CD-C3DA-runs/chat_l14_r15_G2_16x2_20260904_run2_full_adapter/pseudo_variants/hp1_complete2_dist5_w025/target_pseudo_high_precision.jsonl", "complete_multi_file": "EMBEDDED_IN_PSEUDO_VARIANT_OR_MISSING", "augmentation_file": "MISSING", "final_train_file": "MISSING"},
+    "G3": {"pseudo_train_file": "/root/autodl-tmp/CD-C3DA-runs/chat_l14_r15_G3_16x2_20260904_run2_full_adapter/pseudo_variants/hp1_complete2_dist5_w025/target_pseudo_high_precision.jsonl", "complete_multi_file": "EMBEDDED_IN_PSEUDO_VARIANT_OR_MISSING", "augmentation_file": "MISSING", "final_train_file": "MISSING"}
+  },
+  "sha256_row_triplet_audit": {
+    "G0": {"sha256": "827298debb9127c9648752811a644904d18699543166d8f2dace4ba38dc6e0df2", "rows": 545, "triplets": 818, "single_rows": 315, "multi_rows": 187, "3plus_rows": 43, "sentiment": {"positive": 626, "negative": 183, "neutral": 9}},
+    "G1": {"sha256": "0dd8b08ecf72e55f63e0ed4d4b0d2e30a857225a2bfdb5a650b6bb09d0e87cac9", "rows": 557, "triplets": 811, "single_rows": 339, "multi_rows": 182, "3plus_rows": 36, "sentiment": {"positive": 617, "negative": 187, "neutral": 7}},
+    "G2": {"sha256": "22e1827a0d2c8ec788acf26204b2d860fd42660a774ebf48e992fa956bddc4d08", "rows": 553, "triplets": 818, "single_rows": 325, "multi_rows": 191, "3plus_rows": 37, "sentiment": {"positive": 605, "negative": 203, "neutral": 10}},
+    "G3": {"sha256": "fdaa9b9d7df3776ca09b330a6ed2576d6959aa099011ef93dbc84951775870d39", "rows": 553, "triplets": 803, "single_rows": 341, "multi_rows": 174, "3plus_rows": 38, "sentiment": {"positive": 614, "negative": 184, "neutral": 5}}
+  },
+  "run2_selection_audit": {
+    "G0": {"input_rows": 603, "selected_rows": 545, "rejected_rows": 58, "added_fixed_rows": 14, "sample_weight_mean": 0.78873},
+    "G1": {"input_rows": 604, "selected_rows": 557, "rejected_rows": 47, "added_fixed_rows": 13, "sample_weight_mean": 0.78974},
+    "G2": {"input_rows": 604, "selected_rows": 553, "rejected_rows": 51, "added_fixed_rows": 7, "sample_weight_mean": 0.79438},
+    "G3": {"input_rows": 604, "selected_rows": 553, "rejected_rows": 51, "added_fixed_rows": 13, "sample_weight_mean": 0.78966}
+  },
+  "verified_final_raw_f1_percent": {"G0": 52.4483, "G1": 53.6898, "G2": 54.0948, "G3": 54.5455},
+  "verified_g0_final_train_composition": {"source_rows": 906, "pseudo_rows": 545, "selected_augmented_rows": 116, "final_train_rows": 1565, "final_train_multi_triplet_rows": 644, "source_label": "unknown=904", "pseudo_label": "target_pseudo=545", "augmentation_labels": {"masked_aspect_channel": 87, "masked_opinion_sentiment_channel": 29}},
+  "verified_weights": {"pseudo_weight": 0.75, "augmentation_weight": 0.2, "complete_multi_extra_weight": 0.25, "sentiment_contrastive_weight": 0.01, "final_DANN": "NONE"},
+  "rerun_selected_pseudo_reference_not_used_by_final_aste": {"G0": {"rows": 545, "triplets": 818, "f1_percent": 61.96}, "G1": {"rows": 527, "triplets": 778, "f1_percent": 60.25}, "G2": {"rows": 528, "triplets": 766, "f1_percent": 59.42}, "G3": {"rows": 533, "triplets": 753, "f1_percent": 57.70}},
+  "interpretation": {
+    "key_fact": "Final ASTE used historical adapter pseudo paths; rerun audit selected pseudo was not automatically fed into final_train.",
+    "ranking_reversal_first_appears_at": "UNCLEAR",
+    "primary_cause": "G",
+    "secondary_cause": "H",
+    "reason": "G1-G3 historical augmentation/final_train files are unavailable in the current readable workspace, so the first downstream stage causing reversal cannot be identified without remote read access."
+  },
+  "need_rebuild_missing_artifacts": "NO_REBUILD_WITHOUT_USER_AUTHORIZATION; audit-only task",
+  "next_allowed_action": "RETURN_TO_CHAT_SOL"
+}

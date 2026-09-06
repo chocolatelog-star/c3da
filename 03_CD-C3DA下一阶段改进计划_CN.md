@@ -1,5 +1,86 @@
 # CD-C3DA 下一阶段改进计划
 
+> **当前生效路线（2026-09-05）**
+>
+> 本节是当前唯一执行依据；下方旧版内容保留为历史记录，不再作为新实验安排。
+
+## 总目标与原则
+
+| 项目 | 冻结结论 |
+|---|---|
+| 主方向 | `Laptop14 → Restaurant15` |
+| seed（随机种子） | `1000` |
+| 当前最佳 | G3 Final Raw F1=`54.55%` |
+| 外部目标 | BGCA=`58.95%` |
+| 唯一目标 | 将 Raw F1 提升到 `58.95%` 以上 |
+
+路线固定为：`Phase A 结构保持/句法增强 → Phase B Opinion 通道/目标域候选 → Phase C 双域生成器 → Phase D 高成本最终冲刺`。每轮优先 3–4 个有意义实验；每个阶段只解决一个层级问题；重要方案必须跑到 Final Raw F1，不长期停留在 proxy metric（代理指标）。
+
+## 当前判断与冻结变量
+
+- G0–G3 上游比较完成，后续锁定 G3；暂不重训 G0–G3、搜索新图关系或图参数。
+- 主要瓶颈是下游知识利用和增强结构破坏。G3 已审计：edited validity=`68.32%`、untouched retention=`33.33%`、3+ untouched retention=`20.00%`、triplet-count preservation=`59.41%`、3+ preservation=`0%`、unplanned row rate=`57.43%`；Opinion edited validity 约 `52%`。
+- Phase A/B 冻结：G3 upstream、current pseudo/complete_multi/generator、domain prefix=`none`、masked mutual、pseudo weight=`0.75`、augmentation weight=`0.20`、complete_multi extra=`0.25`、sentiment contrastive=`0.01`、Final batch=`16`、gradient accumulation=`2`（有效批次32）、lr=`3e-4`、epochs=`5`、Final DANN=`0.03`、beam=`4`、max_new_tokens=`96`、checkpoint=`best`。
+- Target-test gold（目标测试金标）禁止用于训练、选模、调参和下一变量选择，只能最终报告或事后分析。
+
+## Phase A：结构保持 + 句法感知增强
+
+目标是先修复 augmentation structure break。四组均不重训 extractor，使用 G3、当前 generator、当前 pseudo/complete_multi 和当前 Final ASTE 配方；所有组必须完成 Final Raw F1。
+
+| 实验 | 唯一改动 | 归因目标 |
+|---|---|---|
+| A0 | Structure Preservation only（仅结构保持） | 新增强基准 |
+| A1 | 结构保持 + Aspect Syntax Constraint（方面句法约束） | 方面通道贡献 |
+| A2 | 结构保持 + Opinion Syntax Constraint（观点句法约束） | 观点通道贡献，重点实验 |
+| A3 | 结构保持 + 方面/观点句法约束 | 双通道互补性 |
+
+第一版只用 `POS/UPOS`、dependency relation（依存关系）、head POS（中心词词性）；暂不加入 dependency path、local neighborhood、trainable attention 或新图模块。增强文本变化后必须重新解析，禁止使用旧 parent graph。任何不满足 edited validity、untouched retention、triplet-count preservation、no unplanned triplets 的行直接 `DROP`，不得进入 `final_train`。
+
+Phase A 结束选择 `BEST_PHASE_A`；proxy 指标变好但 Final Raw F1 不涨，不算有效。完成 A0–A3 后停止，不自动进入 Phase B。
+
+## Phase B：Opinion 通道 + 目标域候选优化
+
+固定 `BEST_PHASE_A`、G3、相同 pseudo/complete_multi/generator/Final ASTE，只改变 candidate selection（候选选择）或 opinion replacement strategy（观点替换策略）。
+
+| 实验 | 策略 |
+|---|---|
+| B1 | `semantic_same_sentiment`：同情感、语义相似、共现和目标频率 |
+| B2 | `sentiment_vector`：观点嵌入、情感中心、余弦相似度、margin 和共现 |
+| B3 | target-domain-priority opinion bank：优先 Restaurant15 高置信伪观点 |
+| B4 | target + semantic + syntax ranking：目标域、情感、语义、句法、共现综合排序 |
+
+只借鉴 DAEGCN 的“目标域片段主动参与并由模型过滤”，不原样复现 domain-specific segments-aware attention。阶段结束重点看 Final Raw F1、Opinion validity、multi recall、unplanned rate 和目标候选利用率；若超过 `58.95%`，停止增加方法。
+
+## Phase C：Target-Aware Dual-Domain Generator（目标感知双域生成器）
+
+当前 generator 主要是 Source-trained（源域训练）。正式改造为 `Laptop14 source gold + Restaurant15 high-confidence pseudo`，并真实学习 `domain: laptop/restaurant` 条件，不是单独修 prefix（前缀）。
+
+| 实验 | 组成 | 目的 |
+|---|---|---|
+| C0 | Source gold + Target pseudo，无 prefix | 判断目标伪标签加入生成器训练的收益 |
+| C1 | C0 + dual-domain prefix（双域前缀） | 判断真实双域条件 |
+| C2 | C1 + Contrastive Learning（对比学习） | 强化目标域表示和域内一致性 |
+| C3 | C1 + Domain Adversarial Learning（领域对抗学习） | 保留跨域共享 ASTE 语义 |
+
+第一轮不同时打开对比和对抗；只有 C2、C3 都有明确正收益才测试组合 C4。达到 `58.95%` 后转入多 seed、消融、稳健性和论文主表验证。
+
+## Phase D：高成本模块/最终冲刺
+
+仅当 Phase A–C 未超过 BGCA 才进入。候选包括：可学习候选排序与 candidate-context cross-attention（候选-上下文交叉注意力）、更丰富句法（依存路径/局部邻域/多跳）、Graph-aware Final ASTE（图感知最终 ASTE）和 C4 组合目标。若已超过 `58.95%`，不继续堆模块。
+
+## 整体 Gate 与禁止支线
+
+```text
+Phase A：增强是否安全、句法是否有帮助
+→ Phase B：候选是否正确且具目标域价值
+→ Phase C：生成器是否真正学习双域
+→ Phase D：仅在接近但未超过 BGCA 时冲刺
+```
+
+在对应阶段前禁止：G4、新图关系/图超参搜索、prefix-only、DAEGCN 完整复现、candidate cross-attention、graph-aware Final ASTE、Contrastive+Adversarial 同时搜索。服务器每轮默认并行约 3–4 组，但不得为凑数添加无研究价值实验。
+
+---
+
 > 更新时间：2026-08-30 23:17（北京时间）
 >
 > 当前唯一目标：判断元素感知RGAT（关系图注意力网络）的收益究竟来自Element Salience（元素显著性）、Multi-Element Coverage（多元素覆盖），还是两者组合；在组件归因完成前，不启动Phase B（阶段B）、增强、最终ASTE（方面级情感三元组抽取）或目标测试。
