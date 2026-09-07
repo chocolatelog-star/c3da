@@ -110,7 +110,11 @@ def validate_pseudo_provenance(
         return False, "state and analysis pseudo source tags do not match"
     if state_model_path != model_path.resolve():
         return False, "recorded model path does not match the reused extractor best path"
-    if state.get("pseudo_source_tag") != pseudo_source_tag:
+    recorded_source_tag = state.get("pseudo_source_tag")
+    # Older canonical runs predate explicit source-tag recording. Their model
+    # path and pseudo artifacts are still provenance evidence; only enforce a
+    # tag equality check when the upstream run actually recorded one.
+    if recorded_source_tag and recorded_source_tag != pseudo_source_tag:
         return False, "recorded pseudo source tag does not match the current extractor tag"
     return True, ""
 
