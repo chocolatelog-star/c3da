@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import subprocess
 import sys
@@ -12,6 +13,8 @@ from t5_aste_pipeline import (
     dynamic_pseudo_filter_tag,
     positive_finite_float,
 )
+from t5_aste_augment import build_generator_training_rows
+from t5_absa_data import read_jsonl, write_jsonl
 
 
 ASTE_PAIRS = [
@@ -40,6 +43,14 @@ def read_json(path: Path) -> dict:
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def stage_done(
@@ -853,10 +864,49 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
             if not selection_valid:
                 raise RuntimeError(f"cannot validate upstream dynamic pseudo selection: {selection_reason}")
 
+    target_generator_file = run_dir / f"c3da_generator_target_pseudo_{gen_tag}.jsonl"
+    target_generator_weight = float(args.target_generator_loss_weight)
+    if target_generator_weight > 0 and not target_generator_file.exists():
+        target_rows = read_jsonl(base_hp1_pseudo_train_file)
+        indexed_target_rows = [dict(row, _generator_source_index=index) for index, row in enumerate(target_rows)]
+        target_generator_rows = build_generator_training_rows(
+            indexed_target_rows,
+            args.seed,
+            prompt_style=args.generator_prompt_style,
+            channel_mode="all",
+            domain_name="",
+            domain_prefix_style="none",
+        )
+        for row in target_generator_rows:
+            row["domain"] = "target_pseudo"
+            source_index = row.get("source_index")
+            if isinstance(source_index, int) and 0 <= source_index < len(target_rows):
+                source_row = target_rows[source_index]
+                row["source_row_id"] = source_row.get("id", source_index)
+                row["pseudo_triplets"] = source_row.get("label", "")
+        write_jsonl(target_generator_file, target_generator_rows)
+    if target_generator_weight > 0:
+        write_json(
+            run_dir / "target_generator_training_manifest.json",
+            {
+                "target_generator_loss_weight": target_generator_weight,
+                "source_generator_train_file": str(generator_train_file),
+                "source_generator_train_sha256": sha256_file(generator_train_file),
+                "source_generator_dev_file": str(generator_dev_file),
+                "source_generator_dev_sha256": sha256_file(generator_dev_file),
+                "canonical_selected_pseudo_file": str(base_hp1_pseudo_train_file),
+                "canonical_selected_pseudo_sha256": sha256_file(base_hp1_pseudo_train_file),
+                "target_generator_file": str(target_generator_file),
+                "target_generator_sha256": sha256_file(target_generator_file),
+                "domain_prefix_style": "none",
+                "generator_prompt_style": args.generator_prompt_style,
+            },
+        )
     generator_selection_suffix = (
         "" if args.generator_checkpoint_selection == "best" else f"_{args.generator_checkpoint_selection}"
     )
-    generator_stage_tag = f"{gen_tag}{generator_selection_suffix}"
+    target_weight_tag = "" if target_generator_weight <= 0 else f"_tw{str(target_generator_weight).replace('.', '')}"
+    generator_stage_tag = f"{gen_tag}{target_weight_tag}{generator_selection_suffix}"
     reused_generator = Path(args.reuse_generator_model_path) if args.reuse_generator_model_path else None
     generator_dir = reused_generator.parent if reused_generator is not None else run_dir / "models" / f"generator_{generator_stage_tag}_ep{args.generator_epochs}"
     generator_best = reused_generator or (generator_dir / "best")
@@ -864,10 +914,10 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         if not args.dry_run and not (generator_best / "config.json").exists():
             raise FileNotFoundError(f"reused generator checkpoint not found: {generator_best}")
     elif not stage_done(status, f"train_generator_{generator_stage_tag}", [generator_best / "config.json"], args.rerun):
-        run_command(
-            [
+        generator_train_script = "t5_absa_train_target_weighted.py" if target_generator_weight > 0 else "t5_absa_train.py"
+        generator_command = [
                 py,
-                "t5_absa_train.py",
+                generator_train_script,
                 "--model_path",
                 args.generator_model_path,
                 "--train_file",
@@ -889,15 +939,19 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
                 "--resume_from_checkpoint",
                 "auto",
                 *common_train,
-            ],
-            args.dry_run,
-        )
+            ]
+        if target_generator_weight > 0:
+            generator_command.extend(["--target_train_file", str(target_generator_file), "--target_generator_loss_weight", str(target_generator_weight)])
+            generator_command = [item for item in generator_command if item not in {"--resume_from_checkpoint", "auto"}]
+        run_command(generator_command, args.dry_run)
         if not args.dry_run:
             mark_done(status_path, status, f"train_generator_{generator_stage_tag}")
 
     generator_result_tag = gen_tag
     if args.generator_epochs != 8:
         generator_result_tag = f"{generator_result_tag}_ep{args.generator_epochs}"
+    if target_generator_weight > 0:
+        generator_result_tag = f"{generator_result_tag}_tw{str(target_generator_weight).replace('.', '')}"
     if args.generator_checkpoint_selection != "best":
         generator_result_tag = f"{generator_result_tag}_{args.generator_checkpoint_selection}"
     augment_prompt_suffix = augment_prompt_tag(args.augment_prompt_style)
@@ -1327,6 +1381,7 @@ def run_pair(args: argparse.Namespace, source: str, target: str) -> dict:
         pseudo_analysis_file,
         metrics_tag,
         source_dev_eval_tag,
+        target_generator_weight,
     )
 
 
@@ -1343,6 +1398,7 @@ def summarize_pair(
     pseudo_analysis_file: Path,
     metrics_tag: str,
     source_dev_eval_tag: str,
+    target_generator_loss_weight: float = 0.0,
 ) -> dict:
     pseudo_hp = read_json(pseudo_analysis_file)
     augment = read_json(run_dir / f"c3da_augment_analysis_{final_tag}.json")
@@ -1356,6 +1412,7 @@ def summarize_pair(
         "source": source,
         "target": target,
         "generator_prompt_style": generator_prompt_style,
+        "target_generator_loss_weight": target_generator_loss_weight,
         "augment_prompt_style": augment.get("prompt_style", configured_augment_prompt_style),
         "domain_prefix_style": augment.get("domain_prefix_style", configured_domain_prefix_style),
         "opinion_replacement_mode": augment.get("opinion_replacement_mode", configured_opinion_replacement_mode),
@@ -1606,6 +1663,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nli_model_path", default=r"models/nli-deberta-v3-base-mnli-fever-anli")
     parser.add_argument("--extractor_epochs", type=int, default=25)
     parser.add_argument("--generator_epochs", type=int, default=8)
+    parser.add_argument(
+        "--target_generator_loss_weight",
+        type=float,
+        default=0.0,
+        help="显式加入 selected target pseudo 的 Generator loss 权重；0 保持 source-only baseline",
+    )
     parser.add_argument("--generator_checkpoint_selection", choices=["last", "best", "aste_f1"], default="best")
     parser.add_argument("--final_epochs", type=int, default=5)
     parser.add_argument("--extractor_lambda_sentiment_contrastive", type=float, default=0.0)
